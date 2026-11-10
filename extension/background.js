@@ -105,7 +105,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const kind = message.kind;
     if (sender.frameId !== 0 || !origin || /^chrome-extension:/.test(origin) ||
         typeof message.token !== 'string' || message.token.length < 32 ||
-        (kind !== 'sign' && kind !== 'offer')) {
+        (kind !== 'sign' && kind !== 'offer' && kind !== 'buy') ||
+        (kind === 'buy' && !(message.payload && typeof message.payload.domain === 'string' && /^[0-9a-f]{32}$/.test(String(message.payload.coinId))))) {
       sendResponse({ ok: false });
       return;
     }

@@ -90,7 +90,13 @@ const def = { decimals: 6, maxSupply: '1000000', initialSupply: '10000' };
     line((await row('GOPH').getByRole('button', { name: /Buy/ }).count()) === 0 && (await row('POOR').getByRole('button', { name: /Buy/ }).count()) === 0 && (await row('MWC').getByRole('button', { name: /Buy/ }).count()) === 0, 'and not on GOPH, POOR or MWC, which have no usable offer');
     await row('SELL').getByRole('button', { name: 'Buy with Gold' }).click();
     const note = await page.locator('#buyNote').innerText();
-    line(/1 Au buys one SELL/.test(note) && /smallest purchase is 1 Au for 1 SELL/.test(note) && /exact price and quantity before you sign/.test(note), 'it states the price and the smallest purchase, and leaves signing to the wallet', note);
+    line(/wallet extension was not detected/.test(note) && /Install it, unlock your wallet/.test(note), 'without the extension the button says so instead of doing nothing', note);
+    await page.evaluate(() => { window.__asked = []; window.atlasWallet = { requestPurchase: async (r) => { window.__asked.push(r); return { allowed: true, result: null }; } }; });
+    await row('SELL').getByRole('button', { name: 'Buy with Gold' }).click();
+    await page.waitForFunction(() => /No purchase was made/.test(document.getElementById('buyNote').textContent));
+    const asked = await page.evaluate(() => window.__asked), sellId = sell.id;
+    line(asked.length === 1 && asked[0].domain === A && asked[0].coinId === sellId && Object.keys(asked[0]).sort().join() === 'coinId,domain', 'with a wallet it asks for that one coin on its authority domain and passes nothing else', asked);
+    line(/1 Au buys one SELL/.test(await page.locator('#buyNote').innerText()), 'and states the offer price when the prompt ends without a purchase');
     line(errors.length === 0, 'the page logged no errors', errors);
   } finally {
     await browser.close();

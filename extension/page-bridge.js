@@ -122,6 +122,20 @@
       return (result && typeof result === 'object') ? result : { allowed: false, result: null };
     },
 
+    // Asks the wallet to open its Buy with Gold step for one chain labs coin: { domain, coinId } names the authority domain and the
+    // coin. The page supplies nothing else; the wallet reads the terms from that domain, shows the exact quantity, price, Gold
+    // credential and receiving identity in its own prompt, and signs only when the owner approves there. Same gate as
+    // getIdentity (policy.walletBridge.read). Resolves { allowed, result }: allowed is false when the page may not use the
+    // wallet or the request is malformed; allowed:true with result:null covers every other way it ended without a purchase
+    // (denied, locked wallet, closed, timed out); otherwise result is { status: 'done' | 'waiting' }. Never throws.
+    async requestPurchase(request) {
+      if (!request || typeof request !== 'object' || typeof request.domain !== 'string' || !/^[0-9a-f]{32}$/.test(String(request.coinId))) {
+        return { allowed: false, result: null };
+      }
+      const result = await sendBridgeRequest('requestPurchase', { domain: request.domain, coinId: request.coinId }, 960000, { allowed: false, result: null });
+      return (result && typeof result === 'object') ? result : { allowed: false, result: null };
+    },
+
     // SPEC.md §3.8.5 — asks the wallet to show a credential this page
     // already holds in its own preview panel (drawn by the extension, not
     // this page). Same class gate as offerAsset (the domain's

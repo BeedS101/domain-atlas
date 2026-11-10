@@ -114,6 +114,13 @@ transfers carry no purchase reference and never count. A coin whose genesis has 
 Buy with Gold shows on the page and in the wallet only for a coin with a usable offer, and `spend34.php?action=coin` says whether
 the domain can take Gold at all (`purchasesEnabled`).
 
+Pressing Buy with Gold calls `window.atlasWallet.requestPurchase({ domain, coinId })` (the wallet extension's page bridge, allowed by the
+site's `walletBridge.read`). The wallet opens its own prompt over the page and runs the same `offer`, `prepareBuy` and `buy` steps as its
+Ledger tab, so a wallet that holds none of the coin can buy it: the prompt first asks to add the authority domain to the wallet's list, then
+shows the coin quantity, the Gold cost, the chosen Gold credential and the receiving key, and signs the purchase only when the owner presses
+Sign and buy. The page passes only the domain and the coin; the terms are read from the domain. Without the extension, with an outdated one,
+with a locked wallet or on a site the extension is not allowed to serve, the button says which. The Ledger tab refreshes when the purchase settles.
+
 The scanner shows only public forms. Entries are read from the public form of the log, so a private coin's pages hold references,
 amounts, hashes and signatures and nothing that names a key; the private form of an entry, and an owner's authorization, are
 never read by it. Evidence of a frozen coin is shown as the signed statements that prove it, and a record of an entry that

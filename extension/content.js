@@ -222,6 +222,18 @@
       const result = await requestBridgeConfirmation('offer', assetClass, credential);
       return { allowed: true, result };
     }
+    if (action === 'requestPurchase') {
+      // Opens the wallet's own Buy with Gold prompt for one coin. The page names only the domain and the coin; every figure in
+      // the prompt is read by the wallet from that domain, and nothing is signed until the owner approves inside the prompt.
+      if (!permissions.read) return { allowed: false, result: null };
+      const domain = payload && typeof payload === 'object' && typeof payload.domain === 'string' ? payload.domain.trim().toLowerCase() : '';
+      const coinId = payload && typeof payload === 'object' ? payload.coinId : null;
+      if (!/^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain) || !/^[0-9a-f]{32}$/.test(String(coinId))) {
+        return { allowed: false, result: null };
+      }
+      const result = await requestBridgeConfirmation('buy', domain, { domain, coinId });
+      return { allowed: true, result };
+    }
     if (action === 'previewAsset') {
       // SPEC.md §3.8.5 — display-only, so no confirmation; gated by the same
       // effective offer whitelist as offerAsset. Only a small flat view of
@@ -445,7 +457,9 @@
     // the iframe failing to ever load or run at all (a reload mid-flight,
     // a broken build), so a visitor is never left with a queue stuck behind
     // a prompt that can't resolve itself.
-    const hardTimeout = setTimeout(() => finish(null), 150000);
+    // A purchase prompt has several steps and a purchase that is running, so it gets a longer backstop; the prompt restarts its
+    // own inactivity timer on every interaction and stops it while a purchase is in flight.
+    const hardTimeout = setTimeout(() => finish(null), kind === 'buy' ? 900000 : 150000);
 
     function finish(result) {
       clearTimeout(hardTimeout);

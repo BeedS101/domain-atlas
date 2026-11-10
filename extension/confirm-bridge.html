@@ -69,6 +69,23 @@
   }
   #offerTrustLabel input { margin-top: 2px; flex: none; width: auto; }
   #offerTrustLabel b { color: #c9d3d6; font-weight: 600; }
+  #buyState { display: none; }
+  #buyBody .line { margin-top: 8px; font-size: 13px; line-height: 1.5; color: #c9d3d6; word-break: break-word; }
+  #buyBody .k { color: #8aa6b0; }
+  #buyBody .problem { color: #ffb4a0; }
+  #buyBody input, #buyBody select {
+    width: 100%; margin-top: 4px; padding: 8px; border-radius: 6px; border: 1px solid #2c3c44;
+    background: #0e161b; color: #e7edef; font-family: inherit; font-size: 13px;
+  }
+  #buyBody .label { margin-top: 10px; font-size: 12px; color: #8aa6b0; }
+  #buyBody .summary {
+    margin-top: 10px; background: #0e161b; border: 1px solid #22303a; border-radius: 8px;
+    padding: 10px 12px; font-size: 13px; line-height: 1.7; word-break: break-all;
+  }
+  #buyBody .buttons { display: flex; gap: 10px; margin-top: 16px; }
+  #buyBody .buttons button.primary { background: #1f6b3a; color: #eafff1; font-weight: 600; }
+  #buyBody .buttons button.secondary { background: #2c3c44; color: #e7edef; }
+  #buyBody button:disabled { opacity: 0.5; cursor: default; }
 </style>
 </head>
 <body>
@@ -105,6 +122,12 @@
           <button id="offerApproveBtn" type="button">Accept</button>
         </div>
       </div>
+      <div id="buyState">
+        <div id="buyIcon">🪙</div>
+        <div id="buyHeadline">Buy with Gold</div>
+        <div id="buyOrigin">…</div>
+        <div id="buyBody"></div>
+      </div>
       <div id="lockedState">
         <div id="iconLocked">🔒</div>
         <div id="headlineLocked">No wallet identity is unlocked right now</div>
@@ -118,6 +141,11 @@
   </div>
   <script src="item-standard.js"></script>
   <script src="item-effects.js"></script>
+  <script src="ledger-core.js"></script>
+  <script src="ledger-labs29.js"></script>
+  <script src="ledger-labs38.js"></script>
+  <script src="ledger-open.js"></script>
+  <script src="chain-labs-wallet.js"></script>
 <script src="wallet.js"></script>
   <script src="confirm-bridge.js"></script>
 </body>

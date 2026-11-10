@@ -268,5 +268,14 @@
     await render();
   }
 
+  // A purchase approved in the page prompt changes the cache from another extension page; the open tab redraws so the new
+  // coin appears without reopening the tab. A step the person is in the middle of is never replaced.
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes.atlasChainLabsCache || busy || panel || !root()) return;
+      render();
+    });
+  }
+
   window.AtlasChainLabsTab = { open, render };
 })();

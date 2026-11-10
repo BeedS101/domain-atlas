@@ -81,7 +81,7 @@ The folder `C:\gold-setup` then holds: `issuer\atlas-gold-hold-config.json`, `ev
 ## 6. The purchase
 
 1. Give your wallet key some test Gold the way you normally do (for example `tools/admin-mint.js <your wallet key> atlas.element.gold --quantity 10`).
-2. On the market page, signed in, press **Buy with Gold** on AETH and buy 1 Au. The wallet shows the exact price and amount before it signs.
+2. On the market page, signed in, press **Buy with Gold** on AETH and buy 1 Au. The wallet extension must be the current build (an older one says it is too old). Its prompt asks to add evtec.co.za to the wallet's list if needed, then shows the 10 AETH, the 1 Au cost, the Gold credential and your receiving key, and signs only when you press **Sign and buy**. AETH then appears in the wallet's Ledger tab.
 3. Expected: 10 AETH delivered to your wallet key; your 10 Au credential is replaced by one of 9 Au; the scanner shows one new AETH entry (a purchase, 1 Au,
    approved by both domains); the market shows price 0.1 Au per AETH, market cap 1 Au, 24h volume 1 Au.
 
