@@ -5743,12 +5743,14 @@ const AtlasWallet = (() => {
     // restore would resurrect mail/chat this identity explicitly deleted,
     // and without the "last domain used" pair Compose/Chat would forget a
     // pure convenience default.
-    const [deletedMailIdsAll, deletedChatIdsAll, lastChatSendDomainAll, lastPostOfficeSendDomainAll, lastPostOfficeSettingsDomainAll] = await Promise.all([
+    const [deletedMailIdsAll, deletedChatIdsAll, lastChatSendDomainAll, lastPostOfficeSendDomainAll, lastPostOfficeSettingsDomainAll, chainLabsDomainsAll] = await Promise.all([
       chrome.storage.local.get('atlasDeletedMailIds'),
       chrome.storage.local.get('atlasDeletedChatIds'),
       chrome.storage.local.get('atlasLastChatSendDomain'),
       chrome.storage.local.get('atlasLastPostOfficeSendDomain'),
-      chrome.storage.local.get('atlasLastPostOfficeSettingsDomain')
+      chrome.storage.local.get('atlasLastPostOfficeSettingsDomain'),
+      // The domains the person agreed to ask for chain labs coins, with the key pinned for each; the cache of answers is not carried.
+      chrome.storage.local.get('atlasChainLabsDomains')
     ]);
 
     // Device-level UI preferences — not identity-scoped at all, but
@@ -5772,7 +5774,8 @@ const AtlasWallet = (() => {
         deletedChatIds: (deletedChatIdsAll.atlasDeletedChatIds || {})[owner] || [],
         lastChatSendDomain: (lastChatSendDomainAll.atlasLastChatSendDomain || {})[owner] || null,
         lastPostOfficeSendDomain: (lastPostOfficeSendDomainAll.atlasLastPostOfficeSendDomain || {})[owner] || null,
-        lastPostOfficeSettingsDomain: (lastPostOfficeSettingsDomainAll.atlasLastPostOfficeSettingsDomain || {})[owner] || null
+        lastPostOfficeSettingsDomain: (lastPostOfficeSettingsDomainAll.atlasLastPostOfficeSettingsDomain || {})[owner] || null,
+        chainLabsDomains: (chainLabsDomainsAll.atlasChainLabsDomains || {})[owner] || []
       },
       settings: settingsRaw
     };
@@ -5902,7 +5905,8 @@ const AtlasWallet = (() => {
       restoreOwnerKeyedRaw('atlasDeletedChatIds', d.deletedChatIds),
       restoreOwnerKeyedRaw('atlasLastChatSendDomain', d.lastChatSendDomain),
       restoreOwnerKeyedRaw('atlasLastPostOfficeSendDomain', d.lastPostOfficeSendDomain),
-      restoreOwnerKeyedRaw('atlasLastPostOfficeSettingsDomain', d.lastPostOfficeSettingsDomain)
+      restoreOwnerKeyedRaw('atlasLastPostOfficeSettingsDomain', d.lastPostOfficeSettingsDomain),
+      restoreOwnerKeyedRaw('atlasChainLabsDomains', Array.isArray(d.chainLabsDomains) ? d.chainLabsDomains : undefined)
     ]);
 
     // Device-level UI settings — only the keys the backup actually
@@ -10060,6 +10064,76 @@ const AtlasWallet = (() => {
     };
   }
 
+  // ---------- chain labs coins ----------
+  //
+  // Coins kept by the chain labs domains (chain-labs-wallet.js holds the rules). The wallet adds the list of domains the
+  // person agreed to ask, stored per identity and carried by the backup; a cache of the last answers and the unfinished
+  // sends and purchases, encrypted like the wallet; and the signer. The signer makes raw ECDSA signatures only, so a passkey
+  // identity is refused rather than asked for a proof the domains cannot check, and it signs only the three message types
+  // below, each of which names the coin, domain or request it is for.
+  const CHAIN_LABS_DOMAINS_KEY = 'atlasChainLabsDomains';
+  const CHAIN_LABS_CACHE_KEY = 'atlasChainLabsCache';
+  const CHAIN_LABS_SIGNED = ['atlas.ledger.holdings.request', 'atlas.ledger.transfer', 'atlas.ledger.purchase.intent'];
+  let chainLabsInstance = null;
+
+  async function signChainLabs(payload) {
+    if (!payload || typeof payload !== 'object' || !CHAIN_LABS_SIGNED.includes(payload.type)) throw ledgerError('unknown', 'That is not a message the chain labs coins may sign.');
+    if ((await getIdentityMode()) !== 'local') throw ledgerError('proof-unsupported');
+    return signWithSelfUnchecked(payload);
+  }
+
+  async function chainLabsOwner() {
+    const identity = await getIdentity();
+    const key = identity ? ledgerOwnerKeyOrNull(identity) : null;
+    return identity && key ? { identity, key } : null;
+  }
+
+  async function chainLabsRead(storeKey, name, fallback) {
+    const who = await chainLabsOwner();
+    if (!who) return fallback;
+    const got = await chrome.storage.local.get(storeKey);
+    const stored = (got[storeKey] || {})[who.key];
+    if (stored === undefined) return fallback;
+    return name ? decryptAtRest(who.identity, name, stored, fallback) : stored;
+  }
+
+  async function chainLabsWrite(storeKey, name, value) {
+    const who = await chainLabsOwner();
+    if (!who) throw storageError('wallet-locked', WALLET_LOCKED_MESSAGE);
+    const got = await chrome.storage.local.get(storeKey);
+    const all = got[storeKey] || {};
+    all[who.key] = name ? await encryptAtRest(who.identity, name, value) : value;
+    await chrome.storage.local.set({ [storeKey]: all });
+  }
+
+  // The Gold credentials in the wallet, for the Buy with Gold step.
+  async function getChainLabsGold() {
+    const identity = await getIdentity();
+    if (!identity) return [];
+    const entries = await getWallet(identity.publicKey);
+    return entries
+      .filter((e) => e.credential && e.credential.asset && e.credential.asset.class === 'atlas.element.gold')
+      .map((e) => ({ credential: e.credential, quantity: Number(e.credential.asset.quantity), label: (e.credential.issuer && e.credential.issuer.domain ? e.credential.issuer.domain + ' \u00b7 ' : '') + e.credential.asset.quantity + ' Gold' }))
+      .filter((g) => Number.isInteger(g.quantity) && g.quantity > 0);
+  }
+
+  // The coins, bound to the active identity. Everything it does is a request the person started in the Ledger tab.
+  function getChainLabs() {
+    if (typeof AtlasChainLabs === 'undefined') throw new Error('The chain labs module is not loaded in this page.');
+    if (!chainLabsInstance) {
+      chainLabsInstance = AtlasChainLabs.create({
+        fetch: (url, init) => fetch(url, init),
+        sign: signChainLabs,
+        ownerKey: async () => { const who = await chainLabsOwner(); return who ? who.key : null; },
+        loadDomains: () => chainLabsRead(CHAIN_LABS_DOMAINS_KEY, null, []),
+        saveDomains: (list) => chainLabsWrite(CHAIN_LABS_DOMAINS_KEY, null, list),
+        loadCache: () => chainLabsRead(CHAIN_LABS_CACHE_KEY, 'chainLabsCache', {}),
+        saveCache: (cache) => chainLabsWrite(CHAIN_LABS_CACHE_KEY, 'chainLabsCache', cache)
+      });
+    }
+    return chainLabsInstance;
+  }
+
   // ---- the derived account ID ----
   const LEDGER_LABS29_NETWORK_PREFIX = 'chainblock-labs29-';
   async function ledgerDerivedAccountId(network, coin, ownerKey) {
@@ -10899,6 +10973,8 @@ const AtlasWallet = (() => {
     grantLedgerConsent, revokeLedgerConsent, approveLedgerEndpoint, setLedgerBackgroundSync,
     refreshLedgerAccount, refreshLedgerAccountsOnOpen, runLedgerBackgroundSync, rediscoverLedgerAccounts,
     // Opening an account (see "opening an account"): two separately approved steps.
-    getLedgerOpening, openLedgerAccount, requestLedgerCredential, forgetLedgerOpening
+    getLedgerOpening, openLedgerAccount, requestLedgerCredential, forgetLedgerOpening,
+    // Chain labs coins (see "chain labs coins"): the domain list, holdings, sending and buying with Gold.
+    getChainLabs, getChainLabsGold, signChainLabs
   };
 })();

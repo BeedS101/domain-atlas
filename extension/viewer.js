@@ -9278,6 +9278,7 @@ ledgerOpenBtn && ledgerOpenBtn.addEventListener('click', () => {
 
 // Opening the tab draws what is saved, then looks up only the accounts already allowed.
 async function openLedgerTab() {
+  if (window.AtlasChainLabsTab) AtlasChainLabsTab.open();
   await renderLedger();
   try { await AtlasWallet.refreshLedgerAccountsOnOpen(); } catch (err) { /* each account reports its own problem */ }
   await renderLedger();

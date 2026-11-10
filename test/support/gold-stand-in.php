@@ -24,7 +24,7 @@ function stand_in_credential(array $issuer, string $ownerKey, int $quantity, ?st
 
 function stand_in_intent(array $buyer, string $coinId, array $credential, int $price, string $requestId, ?string $recipient = null, ?int $expiresAt = null): array
 {
-    $payload = ['action' => 'purchase-coin', 'coinId' => $coinId, 'credentialId' => $credential['id'], 'price' => $price, 'recipient' => $recipient ?? $buyer['key'],
+    $payload = ['type' => 'atlas.ledger.purchase.intent', 'v' => 1, 'coinId' => $coinId, 'credentialId' => $credential['id'], 'price' => $price, 'recipient' => $recipient ?? $buyer['key'],
         'requestId' => $requestId, 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $expiresAt ?? time() + 300)];
     return ['payload' => $payload, 'signature' => ledger_owner_sign($buyer['priv'], $payload)];
 }
@@ -56,8 +56,8 @@ function stand_in_gold(string $statePath, array $issuer): array
             if (!is_array($payload)) return 'the intent has no payload';
             $k = array_keys($payload);
             sort($k);
-            if ($k !== ['action', 'coinId', 'credentialId', 'expiresAt', 'price', 'recipient', 'requestId']) return 'the intent has the wrong fields';
-            if ($payload['action'] !== 'purchase-coin') return 'the intent is not a purchase';
+            if ($k !== ['coinId', 'credentialId', 'expiresAt', 'price', 'recipient', 'requestId', 'type', 'v']) return 'the intent has the wrong fields';
+            if ($payload['type'] !== 'atlas.ledger.purchase.intent' || $payload['v'] !== 1) return 'the intent is not a purchase';
             if (!ledger_owner_verify(ledger_canonical($payload), (string) $body['owner'], $intent['signature'] ?? null)) return 'the intent is not signed by the credential\'s owner';
             if ($payload['credentialId'] !== $body['id']) return 'the intent names another credential';
             if (!is_int($payload['price'])) return 'the price is not a whole number';

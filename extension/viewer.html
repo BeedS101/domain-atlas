@@ -497,6 +497,11 @@
   @keyframes ledger-pulse { 50% { opacity: 0.35; } }
   @media (prefers-reduced-motion: reduce) { #ledgerSubscreen .ledger-ind.lvl-connecting .ledger-glyph { animation: none; } }
   #ledgerSubscreen .ledger-detail { font-size: 11px; color: #a9b8bf; margin-top: 4px; }
+  #ledgerSubscreen .chain-labs-balance { font-size: 14px; font-weight: 600; }
+  #ledgerSubscreen .chain-labs-domain-name { font-size: 15px; font-weight: 600; }
+  #ledgerSubscreen .chain-labs-coin { margin-top: 6px; }
+  #ledgerSubscreen .chain-labs-pending { border-style: dashed; margin-top: 6px; }
+  #ledgerSubscreen #chainLabsSection select, #ledgerSubscreen #chainLabsSection input[type="text"] { width: 100%; box-sizing: border-box; }
   #ledgerSubscreen .ledger-confirm { border-color: #e0b84c; margin: 8px 0; }
   #ledgerSubscreen button:focus-visible, #ledgerSubscreen input:focus-visible, #ledgerSubscreen textarea:focus-visible { outline: 2px solid #8fbfe8; outline-offset: 2px; }
   #ledgerSubscreen label.check-row { color: #cfdadf; }
@@ -2206,6 +2211,8 @@
                spendable from here. Cards are built in viewer.js (renderLedger). -->
           <div id="ledgerSubscreen" class="subscreen">
             <div id="ledgerIdentityBanner" class="info-card"></div>
+            <!-- Chain labs coins: the list of domains and what each says this key holds. Drawn by chain-labs-tab.js. -->
+            <div id="chainLabsSection" role="group" aria-labelledby="chainLabsHeading"></div>
             <p class="meta" id="ledgerExplainer">A ledger account is kept by the ledger that issued it. This wallet holds only a reference to it and shows the balance the ledger last reported. Removing a reference here never changes the account.</p>
             <div id="ledgerStatus" class="empty-note" role="status" aria-live="polite"></div>
             <div id="ledgerConfirm" class="info-card ledger-confirm" role="group" aria-labelledby="ledgerConfirmText" hidden>
@@ -2984,9 +2991,11 @@
   <script src="ledger-labs29.js"></script>
   <script src="ledger-labs38.js"></script>
   <script src="ledger-open.js"></script>
+  <script src="chain-labs-wallet.js"></script>
   <script src="item-standard.js"></script>
   <script src="item-effects.js"></script>
 <script src="wallet.js"></script>
+  <script src="chain-labs-tab.js"></script>
   <script src="compass-hud.js"></script>
   <script src="action-bar.js"></script>
   <script src="side-view.js"></script>

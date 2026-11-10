@@ -117,3 +117,8 @@ its line in `SOURCE.sha256`.
     node test/chain-labs-multi-http.js
     php test/chain-labs-purchase.php
     node test/chain-labs-purchase-http.js
+    node test/chain-labs-wallet.js
+
+The wallet screen is checked in the real extension (needs Chromium and a display; not part of the workflow):
+
+    xvfb-run -a node test/manual-chain-labs-tab.js

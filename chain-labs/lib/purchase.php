@@ -11,6 +11,8 @@ require_once __DIR__ . '/peer.php';
 
 // The price adapter is an array of callables; the code that holds the credentials supplies it.
 //   verify(intent, credential, policy, now): array|string
+//       The wallet's intent is {payload: {type: 'atlas.ledger.purchase.intent', v: 1, coinId, credentialId, price, recipient,
+//       requestId, expiresAt}, signature}, signed over the canonical text of the payload with the wallet key (raw r||s).
 //       Checks the buyer's signature on the intent and that the credential carries the issuer's signature named in the policy
 //       (issuerKey), is of the policy's class and belongs to the buyer. Returns requestId, coinId, price, recipient,
 //       credentialId, quantity and expiresAt (Unix time) of what was signed, or the reason it does not check out.

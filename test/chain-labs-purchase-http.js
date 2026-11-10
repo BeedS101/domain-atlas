@@ -130,7 +130,7 @@ function credential(quantity, w, id) {
   return { ...payload, signature: b64u(crypto.sign('sha256', Buffer.from(canon(payload)), issuer.privateKey)) };
 }
 function intent(w, coinId, cred, price, requestId, recipient) {
-  const payload = { action: 'purchase-coin', coinId, credentialId: cred.id, price, recipient: recipient || w.key, requestId, expiresAt: iso(NOW() + 300) };
+  const payload = { type: 'atlas.ledger.purchase.intent', v: 1, coinId, credentialId: cred.id, price, recipient: recipient || w.key, requestId, expiresAt: iso(NOW() + 300) };
   return { payload, signature: w.sign(payload) };
 }
 async function buy(n, w, coinId, quantity, price, o = {}) {

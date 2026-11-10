@@ -478,6 +478,33 @@ Each stage ships separately, with tests, on its own branch.
      operator cancels it with `purchase-cancel`, which frees the credential.
 8. Wallet: the Ledger tab as a list of domains with the `holdings` lookup, the transfer signing flow and Buy with Gold,
    in a new file with only small changes to `viewer.js`.
+   Built as `extension/chain-labs-wallet.js` (the rules, with no storage, network or page access of its own),
+   `extension/chain-labs-tab.js` (the section drawn above the existing account cards of the Ledger tab, which are unchanged)
+   and small hooks in `wallet.js`, `viewer.js` and `viewer.html`:
+   - The list holds host names and the key pinned for each domain when it was added. There is no independent source for a
+     chain labs domain's key yet (the labs 29/38 key document is the issuer's, not the ledger's), so the key a domain answers
+     `coins` with is pinned on first use and its fingerprint shown; a later statement signed by any other key is ignored. The
+     list is part of the backup and restore; the cache of answers and the unfinished sends and purchases are encrypted like the
+     rest of the wallet and are not backed up.
+   - A lookup is a signed request over a fresh challenge when the identity can make raw ECDSA signatures, and a plain one
+     (public coins only, never shown as proven) when it cannot. A statement is used only if it is signed by the pinned key, is
+     for this domain and this key, is not more than five minutes old or two minutes ahead, claims no more than was asked for
+     (`proven`) and has exactly the fields the wallet reads; anything else is ignored and the domain keeps its last answer,
+     shown with the problem and its age.
+   - The signer in `wallet.js` signs only `atlas.ledger.holdings.request`, `atlas.ledger.transfer` and
+     `atlas.ledger.purchase.intent`, raw r||s, for a password identity; a passkey identity is refused. The generic signer
+     still refuses all `atlas.ledger.*` messages.
+   - Send checks the recipient, the amount (exact decimal parsing against the coin's decimals, never rounded) and the balance
+     before signing, describes the transfer in words, signs against the balance and head the domain just reported, signs again
+     once if the base moved, and accepts the receipt only if it matches what was signed (for a private coin, whose entries name
+     accounts by reference, the coin and amount). A transfer through a partner is pointed at the authority. A transfer waiting
+     for approvals is kept and checked later.
+   - Buy with Gold reads the offer from the coin's public genesis on its authority, which must be on the list, checks price
+     against the minimum and the credential, signs an intent (`atlas.ledger.purchase.intent`: coin, credential id, price,
+     recipient, request id, expiry) and sends it with the credential. An unfinished purchase is kept with its request id and
+     resumed by signing a new intent for the same request. The Gold credentials come from the wallet's own items of class
+     `atlas.element.gold`; how the real Gold credential and intent are laid out is settled when the adapter is wired to the
+     issuer code.
 9. Scanner: the coin, entries, entry, account and domains pages of section 11.2, with tests that a private coin's pages
    never contain a key.
 
