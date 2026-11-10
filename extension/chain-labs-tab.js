@@ -66,7 +66,10 @@
     const actions = el('div', { className: 'item-actions' });
     if (coin.state === 'active') {
       actions.appendChild(button('Send…', () => { panel = { kind: 'send', domain: domain.domain, coin, step: 'form' }; render(); }));
-      actions.appendChild(button('Buy with Gold…', () => { panel = { kind: 'buy', domain: domain.domain, coin, step: 'form' }; render(); }));
+      // Buy with Gold is offered only where the authority has published terms and can take the Gold; otherwise the coin says it is not for sale.
+      const sale = offers.get(domain.domain + '/' + coin.coinId);
+      if (sale && sale.usable) actions.appendChild(button('Buy with Gold…', () => { panel = { kind: 'buy', domain: domain.domain, coin, step: 'form' }; render(); }));
+      else if (sale) line.appendChild(el('div', { className: 'meta', textContent: sale.code === 'no-purchase-policy' ? 'Not for sale: this coin has no purchase terms.' : 'Not for sale now: ' + sale.reason }));
     }
     line.appendChild(actions);
     return line;
@@ -137,6 +140,8 @@
     return box;
   }
 
+  let offers = new Map();
+
   async function buyPanel() {
     const p = panel;
     const box = el('div', { className: 'info-card ledger-confirm', role: 'group', 'aria-label': 'Buy ' + p.coin.symbol + ' with Gold' });
@@ -145,7 +150,7 @@
       let offer = null, golds = [];
       try { offer = await chain().offer(p.domain, p.coin.coinId); golds = await AtlasWallet.getChainLabsGold(); } catch (err) { box.appendChild(el('div', { className: 'ledger-problem', role: 'status', textContent: err.message })); }
       if (offer) {
-        box.appendChild(el('div', { className: 'meta', textContent: 'Each Gold buys ' + offer.unitsPerPrice + ' units of the coin (the smallest purchase is ' + offer.minPrice + ' Gold).' }));
+        box.appendChild(el('div', { className: 'meta', textContent: '1 Gold buys ' + AtlasChainLabs.formatUnits(String(offer.unitsPerPrice), offer.decimals) + ' ' + offer.symbol + '. The smallest purchase is ' + offer.minPrice + ' Gold for ' + AtlasChainLabs.formatUnits(String(offer.unitsPerPrice * offer.minPrice), offer.decimals) + ' ' + offer.symbol + '.' }));
         if (!golds.length) box.appendChild(el('div', { className: 'meta', textContent: 'This wallet holds no Gold to pay with.' }));
         else {
           box.appendChild(el('label', { className: 'ledger-open-label', for: 'chainLabsGold', textContent: 'Gold to pay with' }));
@@ -217,6 +222,9 @@
     const seq = ++renderSeq;
     let view;
     try { view = await chain().rows(); } catch (err) { host.textContent = ''; host.appendChild(el('div', { className: 'ledger-problem', role: 'status', textContent: 'Chain labs coins could not be loaded: ' + (err && err.message) })); return; }
+    if (seq !== renderSeq) return;
+    offers = new Map();
+    await Promise.all(view.domains.flatMap((d) => d.coins.filter((c) => c.state === 'active').map(async (c) => { offers.set(d.domain + '/' + c.coinId, await chain().offerState(d.domain, c.coinId)); })));
     if (seq !== renderSeq) return;
     let stepEl = null;
     if (panel && panel.kind === 'send') stepEl = await sendPanel();

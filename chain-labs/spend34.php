@@ -132,7 +132,8 @@ try {
     if ($method === 'GET' && $action === 'coin') {
         $coinId = arg34('coin', '/^[a-f0-9]{32}$/D');
         catchup34($db, $node, $peerConfig, $coinId, $now);
-        reply34(200, ['ok' => true] + ledger_public_coin($db, $coinId));
+        // Whether this domain can take a Gold purchase at all, so a wallet offers Buy only where it can work.
+        reply34(200, ['ok' => true] + ledger_public_coin($db, $coinId) + ['purchasesEnabled' => $gold !== null && is_callable($gold['lock'] ?? null) && is_callable($gold['release'] ?? null) && is_callable($gold['finish'] ?? null)]);
     }
     if ($method === 'GET' && $action === 'receipt') {
         $coinId = arg34('coin', '/^[a-f0-9]{32}$/D');

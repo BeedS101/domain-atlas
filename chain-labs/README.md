@@ -14,7 +14,7 @@ here is a demonstration with no monetary value.
 | 21, 22, 23 | `events21.*`, `events22.*`, `compare23.*` | Signed demo events, offline catch-up, and signed state-commitment comparison. No balances move. |
 | 25 | `supply25.*` | Read-only audit of each domain's own TEST-GOLD ledger. |
 | 26 | `coin26.*` | Coin registry. A coin is registered on one domain only. It is created as single or multi authority and as a public or private ledger; a multi coin names its partner domains and threshold and stays pending until they sign. Registering a coin does not open a ledger for it: the registry is `coin26.sqlite` and the ledger is `chain34.sqlite`, both in the private folder, and an operator opens a registered coin with the `open` route of `spend34.php`. The page lists where each coin stands on the ledger and has the operator buttons for it: open (or finish opening) a coin, and grant units from the treasury of an open one. |
-| 27, 28 | `index.html`, `market27.*`, `market-login28.php` | Read-only coin directory aggregating both registries; wallet login for it. |
+| 27, 28 | `index.html`, `market27.*`, `market-login28.php` | Read-only coin directory aggregating both registries, with the market figures of the coins that are open on a ledger (below); wallet login for it. |
 | 29 | `ledger29.php` | Read-only signed balance query. |
 | 30, 31 | `account30.php`, `accounts31.php` | Signed zero-balance account opening and account discovery. |
 | 33 | `account-test33.html` | Runs account opening, discovery and a balance read with a throwaway test key. |
@@ -93,6 +93,18 @@ is reached through `gold-adapter.php` in the private folder, which returns `veri
 callables (the contract is at the top of `lib/purchase.php`); each domain that approves sales needs `verify` and `revoked`.
 `test/support/gold-stand-in.php` is the stand-in the tests use. Sales are delivered one at a time per coin; a sale that meets
 another in flight answers 202 and is finished by repeating the request or by `purchase-recover`.
+
+The market page (`index.html`, `market27.php`, and the `market` route of `scan35.php`, with the figures in `lib/market.php`) shows
+Price, Market cap and 24h volume in demo Gold (Au) from the ledger, and a dash wherever a figure has no source. Each domain states
+the coins it is the authority of; `market27.php` takes a coin from its authority only, so a multi authority coin is one row. Issued
+supply is what the genesis put into the ledger and the treasury is its account, so circulating supply is the difference. The price is
+the offer price of the genesis purchase policy (`10^decimals / unitsPerPrice` Au per coin) and exists only when the coin is active,
+the domain has a `gold-adapter.php`, the treasury holds at least the smallest purchase and the 24 hour limit is not used up. Market
+cap is circulating supply times that price. 24h volume is the sum of the prices paid in the entries of the last 24 hours that carry a
+purchase reference, read newest first and bounded to 500 entries (past that the figure says it is a lower bound); grants and ordinary
+transfers carry no purchase reference and never count. A coin whose genesis has no purchase policy has no price, market cap or volume.
+Buy with Gold shows on the page and in the wallet only for a coin with a usable offer, and `spend34.php?action=coin` says whether
+the domain can take Gold at all (`purchasesEnabled`).
 
 The scanner shows only public forms. Entries are read from the public form of the log, so a private coin's pages hold references,
 amounts, hashes and signatures and nothing that names a key; the private form of an entry, and an owner's authorization, are

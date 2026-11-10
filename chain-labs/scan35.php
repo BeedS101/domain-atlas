@@ -12,6 +12,8 @@ declare(strict_types=1);
  *                                  an account by reference (the key itself in a public coin, a keyed hash in a private
  *                                  one) with a page of its entries
  *   domains&coin=ID                the signed head each roster domain states, and whether they agree
+ *   market                         the market figures of the coins this domain is the authority of (lib/market.php): supply, treasury,
+ *                                  offer, price, market cap and 24 hour volume, each null when it has no source
  * Only public forms are read. A private coin's pages carry references and amounts; the keys behind the references and the
  * private forms of the entries never leave the ledger. The page that shows all this is scan35.html.
  * Pages are at most LEDGER_PAGE_MAX entries, so a view never walks a whole coin. The domains route asks the other roster
@@ -28,6 +30,7 @@ $host = strtolower($_SERVER['HTTP_HOST'] ?? '');
 require __DIR__ . '/lib/hosts.php';
 if (!chainlabs_is_host($host)) reply35(400, ['ok' => false, 'error' => 'Unrecognized host']);
 require __DIR__ . '/lib/peer.php';
+require __DIR__ . '/lib/market.php';
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') reply35(405, ['ok' => false, 'error' => 'Read only']);
 $root = realpath($_SERVER['DOCUMENT_ROOT'] ?? '');
 $private = $root ? realpath(dirname($root) . '/chainblock-labs-private') : false;
@@ -156,7 +159,7 @@ $file = $private . '/chain34.sqlite';
 $action = $_GET['action'] ?? '';
 try {
     if (!is_file($file)) {
-        if ($action === 'coins') reply35(200, ['ok' => true, 'domain' => $host, 'coins' => []]);
+        if ($action === 'coins' || $action === 'market') reply35(200, ['ok' => true, 'domain' => $host, 'coins' => []]);
         reply35(404, ['ok' => false, 'code' => 'unknown-coin', 'error' => 'no such coin']);
     }
     // Read-only: a route that tried to write would fail.
@@ -176,6 +179,18 @@ try {
                 'state' => $coin['state'], 'authority' => $g['authority'], 'entries' => ledger_head($db, $id)['index'] + 1];
         }
         reply35(200, ['ok' => true, 'domain' => $host, 'coins' => $out]);
+    }
+    if ($action === 'market') {
+        // Only the authority's copy has the offer and the sales, so a partner domain leaves its coins to the authority and a
+        // multi authority coin is listed once, by the domain that sells it.
+        $now = time();
+        $ready = market_purchases_ready($private);
+        $out = [];
+        foreach ($db->query("SELECT coin_id FROM ledger_coins WHERE state IN ('active','frozen') ORDER BY coin_id LIMIT 100")->fetchAll(PDO::FETCH_COLUMN) as $id) {
+            $m = market_coin($db, $id, $ready, $now);
+            if ($m['authority'] === $host && count($out) < 40) $out[] = $m;
+        }
+        reply35(200, ['ok' => true, 'domain' => $host, 'coins' => $out, 'asOf' => gmdate('Y-m-d\TH:i:s\Z', $now), 'unit' => 'Au']);
     }
     if ($action === 'coin') {
         $coinId = scan35_arg('coin', '/^[a-f0-9]{32}$/D');

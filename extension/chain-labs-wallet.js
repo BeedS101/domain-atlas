@@ -224,6 +224,7 @@
     'not-enough-approvals': 'The partner domains did not approve the transfer.'
   };
 
+  const OFFER_STATE_TTL_MS = 30000;
   const BUY_PROBLEMS = {
     locked: 'That Gold is already being used for another purchase.',
     'request-reused': 'That purchase request was already used for something else.',
@@ -487,10 +488,27 @@
       const g = r.json && r.json.ok ? r.json.genesis : null;
       if (!g || !isObject(g.purchase)) throw Object.assign(new Error(BUY_PROBLEMS['no-purchase-policy']), { code: 'no-purchase-policy' });
       if (r.json.state !== 'active') throw Object.assign(new Error(BUY_PROBLEMS['not-active']), { code: 'not-active' });
+      // The authority says whether it has the code that takes the Gold; a coin whose genesis has terms but whose domain cannot take payment is not for sale.
+      if (r.json.purchasesEnabled !== true) throw Object.assign(new Error(BUY_PROBLEMS['purchases-off']), { code: 'purchases-off' });
       if (g.authority !== record.domain) throw Object.assign(new Error(BUY_PROBLEMS['not-authority'] + ' That is ' + g.authority + '.'), { code: 'not-authority', authority: g.authority });
       const p = g.purchase;
       if (!Number.isInteger(p.unitsPerPrice) || !Number.isInteger(p.minPrice) || p.unitsPerPrice < 1 || p.minPrice < 1) throw Object.assign(new Error('The coin\'s purchase terms are not readable.'), { code: 'unreadable' });
       return { domain: record.domain, coinId, symbol: g.symbol, decimals: g.decimals, private: g.visibility === 'private', priceClass: p.priceClass, unitsPerPrice: p.unitsPerPrice, minPrice: p.minPrice, perKeyUnits: p.perKeyUnits, perDayUnits: p.perDayUnits };
+    }
+
+    // Whether Buy with Gold may be offered for a coin: its authority publishes terms and can take the Gold. The answer is kept for
+    // a short while so drawing the list does not ask the domain every time. Never throws.
+    const offerStates = new Map();
+    async function offerState(domain, coinId) {
+      const key = domain + '/' + coinId;
+      const hit = offerStates.get(key);
+      if (hit && nowMs() - hit.at < OFFER_STATE_TTL_MS) return hit.state;
+      let state;
+      try { const terms = await offer(domain, coinId); state = { usable: true, terms }; }
+      catch (err) { state = { usable: false, code: err && err.code ? err.code : 'unreadable', reason: err && err.message ? err.message : 'Not for sale.' }; }
+      offerStates.set(key, { at: nowMs(), state });
+      if (offerStates.size > 200) offerStates.delete(offerStates.keys().next().value);
+      return state;
     }
 
     function credentialId(credential) {
@@ -561,7 +579,7 @@
       return mutateCache((c) => { c.pendingBuys = c.pendingBuys.filter((p) => p.requestId !== requestId); });
     }
 
-    return { addDomain, removeDomain, lookup, refresh, rows, prepareSend, send, checkPending, offer, prepareBuy, buy, resumeBuy, dropBuy, domains };
+    return { addDomain, removeDomain, lookup, refresh, rows, prepareSend, send, checkPending, offer, offerState, prepareBuy, buy, resumeBuy, dropBuy, domains };
   }
 
   return { create, canonical, formatUnits, parseAmount, normalizeDomain, isOwnerKey, derToRaw, checkHoldings, spkiOfPem, fingerprint, PATH, LIMITS: { MAX_DOMAINS, STALE_AFTER_MS, STATEMENT_MAX_AGE_S, MAX_BODY_CHARS } };

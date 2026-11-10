@@ -533,6 +533,23 @@ Each stage ships separately, with tests, on its own branch.
      buttons, which call the existing `open` and `grant` routes. Resuming `open` for a multi coin used to leave its partners
      without entry 0 until they were next read, because the unfinished read of the coin's row held a read lock on the
      authority while the partners were told to catch up; the row is now read to its end first.
+10. Market figures and the Gold gate (`lib/market.php`, the `market` route of `scan35.php`, `market27.php`, `index.html`).
+   - Price, market cap and 24 hour volume come from the authority's ledger and its genesis purchase policy, in demo Gold (Au);
+     a figure with no source is a dash. A coin is stated by its authority only, so a multi authority coin is one row. Volume
+     counts entries that carry a purchase reference, newest first, at most 500 entries, and says when it is a lower bound.
+   - A coin is sellable only if its genesis has a purchase policy. The genesis is immutable, so GOPH, MWC and OSC, opened without
+     one, cannot be sold through this route; a new coin gets a policy by passing `purchase` when the operator opens it.
+     Giving an existing coin one would need a new kind of entry (a set-once policy signed by the authority, approved by the
+     threshold of a multi coin, understood by the scanner's verifier and the wallet), which is not built.
+   - Wiring `gold-adapter.php` to `issuer-php` (audit). Every spend path of the issuer takes `atlas_spend_lock()` before it
+     checks a credential, but that lock is a file lock held for one request, so it cannot hold a credential across the journal
+     and the ledger delivery that the purchase needs, and a buyer could spend the same Gold elsewhere in between. The one
+     central place to add a persistent hold the issuer honours is `atlas_spend_lock()` itself. The issuer's intent is
+     `{payload, proof}` with a WebAuthn or raw ECDSA envelope and its credentials are `domain-atlas-asset/1.0` with an SPKI owner
+     key, where the ledger intent is `{payload, signature}` with a raw point key, so `verify` has to convert and to check the
+     issuer signature over `asset_payload_of()`. `finish` can use `atlas_commit_replacement()`, which is idempotent by request id.
+     Until this is built and reviewed, purchases against the real issuer stay off (no `gold-adapter.php`, so `purchasesEnabled` is
+     false and no Buy button is shown).
 
 ## 14. Open questions
 

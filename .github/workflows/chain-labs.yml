@@ -19,6 +19,8 @@ on:
       - 'test/chain-labs-wallet.js'
       - 'test/chain-labs-scan-http.js'
       - 'test/chain-labs-max-supply-http.js'
+      - 'test/chain-labs-market.php'
+      - 'test/chain-labs-market-http.js'
       - 'extension/chain-labs-wallet.js'
       - 'test/support/**'
       - '.github/workflows/chain-labs.yml'
@@ -38,6 +40,8 @@ on:
       - 'test/chain-labs-wallet.js'
       - 'test/chain-labs-scan-http.js'
       - 'test/chain-labs-max-supply-http.js'
+      - 'test/chain-labs-market.php'
+      - 'test/chain-labs-market-http.js'
       - 'extension/chain-labs-wallet.js'
       - 'test/support/**'
       - '.github/workflows/chain-labs.yml'
@@ -85,3 +89,5 @@ jobs:
           node test/chain-labs-wallet.js
           node test/chain-labs-scan-http.js
           node test/chain-labs-max-supply-http.js
+          php test/chain-labs-market.php
+          node test/chain-labs-market-http.js
