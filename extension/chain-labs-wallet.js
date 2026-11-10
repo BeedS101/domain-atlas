@@ -567,7 +567,13 @@
       if (r.status !== 0 && r.status < 500) {
         await dropBuy(prepared.requestId);
       }
-      throw Object.assign(new Error(r.status === 0 ? PROBLEMS.network : BUY_PROBLEMS[j.code] || 'The domain did not accept the purchase.'), { code: r.status === 0 ? 'network' : j.code || 'refused' });
+      throw Object.assign(new Error(r.status === 0 ? PROBLEMS.network : (BUY_PROBLEMS[j.code] || 'The domain did not accept the purchase.') + refusalDetail(j)), { code: r.status === 0 ? 'network' : j.code || 'refused', detail: refusalDetail(j).trim() });
+    }
+
+    // The domain's own words for why it refused, so a refusal can be told apart from the next one. Shown as text only.
+    function refusalDetail(j) {
+      const text = typeof j.error === 'string' ? j.error.replace(/[\u0000-\u001f]+/g, ' ').trim().slice(0, 300) : '';
+      return text ? ' The domain said: ' + text + (/[.!?]$/.test(text) ? '' : '.') : '';
     }
 
     // Repeats an unfinished purchase with the same request id.

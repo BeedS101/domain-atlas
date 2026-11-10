@@ -281,6 +281,7 @@ const freshState = () => ({ domains: [], cache: {}, skew: 0 });
     const forged = (() => { const other = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' }); const p = { id: hex(12), class: 'atlas.element.gold', quantity: 100, owner: alice.key }; return { ...p, signature: b64u(crypto.sign('sha256', Buffer.from(canon(p)), other.privateKey)) }; })();
     const fb = await chain.buy(await chain.prepareBuy(A, sgl.id, forged, 100, '20')).catch((e) => e);
     line(fb.code === 'bad-purchase', 'a credential the issuer did not sign is refused', fb.message);
+    line(/The domain said: .+/.test(fb.message) && fb.message.startsWith('The domain did not accept the credential or the purchase.'), 'and the message carries the domain\'s own reason', fb.message);
     const lim = await chain.buy(await chain.prepareBuy(A, sgl.id, credential(600, alice), 600, '600')).catch((e) => e);
     line(lim.code === 'purchase-key-limit', 'a purchase past the key\'s limit is refused with a plain message', lim.message);
     const wrongPlace = await chain.prepareBuy(B, twoOf.id, credential(100, alice), 100, '20').catch((e) => e);
