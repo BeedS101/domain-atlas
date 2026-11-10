@@ -34,7 +34,14 @@ function gold_issuer_canonical(mixed $value): string
     if (is_int($value)) return (string) $value;
     if (is_float($value)) {
         if ($value === 0.0) return '0';
-        return (string) preg_replace('/\.0e/', 'e', json_encode($value, JSON_THROW_ON_ERROR));
+        // A float is written with serialize_precision, which a host may leave at 17 or 14; the issuer signs the shortest round-trip form (-1).
+        $previous = ini_set('serialize_precision', '-1');
+        try {
+            $text = json_encode($value, JSON_THROW_ON_ERROR);
+        } finally {
+            if ($previous !== false) ini_set('serialize_precision', $previous);
+        }
+        return (string) preg_replace('/\.0e/', 'e', $text);
     }
     if (is_string($value)) {
         $out = '"';
