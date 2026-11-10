@@ -499,7 +499,8 @@ function atlas_assess_holdings($publicKeyB64url, $owner, $cls, $presentedBalance
 // `credentialId` let a wallet drop one spent balance and retry the rest.
 function atlas_spend_problem_body($problem, $credential) {
   $code = $problem === 'asset already revoked' ? 'revoked'
-    : (strpos($problem, 'being used by another request') !== false ? 'busy' : 'invalid');
+    : (strpos($problem, 'being used by another request') !== false ? 'busy'
+    : (strpos($problem, 'held for a purchase') !== false ? 'held' : 'invalid'));
   return ['error' => $problem, 'code' => $code, 'credentialId' => is_array($credential) && isset($credential['id']) ? $credential['id'] : null];
 }
 
@@ -518,7 +519,7 @@ function atlas_begin_replacement($publicKeyB64url, $requestId, $op, $presented, 
   ksort($stripes);
   foreach ($stripes as $stripeIds) {
     $busy = atlas_spend_lock($stripeIds[0]);
-    if ($busy !== null) send_json(400, ['error' => $busy, 'code' => 'busy', 'credentialId' => $stripeIds[0]]);
+    if ($busy !== null) send_json(400, ['error' => $busy, 'code' => strpos($busy, 'held for a purchase') !== false ? 'held' : 'busy', 'credentialId' => $stripeIds[0]]);
   }
   if ($requestId === null) return;
   $busy = atlas_request_lease($requestId);

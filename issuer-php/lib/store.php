@@ -3000,6 +3000,17 @@ function atlas_revoke_many($ids, $reason, $txn = null) {
   foreach ($ids as $id) {
     if (!is_string($id) || $id === '') throw new Exception('a revocation needs a credential id', 400);
   }
+  // Every revocation, the operator's own included, is ordered against holds (lib/gold-hold.php) by the credential's spend lock,
+  // and refused for a credential that is held for a purchase unless it is that purchase's own finalize.
+  require_once __DIR__ . '/gold-hold.php';
+  $stripes = [];
+  foreach ($ids as $id) $stripes[abs(crc32($id)) % 64] = $id;
+  ksort($stripes);
+  foreach ($stripes as $id) {
+    $busy = atlas_spend_lock_stripe($id);
+    if ($busy !== null) throw new Exception($busy, 503);
+  }
+  atlas_hold_assert_revocable($ids);
   $lock = @fopen(atlas_revocations_lock_file(), 'c');
   if ($lock === false) throw new Exception('could not take the revocation lock', 503);
   flock($lock, LOCK_EX);
@@ -3624,6 +3635,23 @@ function atlas_bearer_lock() {
 // bearer lock first, then this.
 // Returns null when held, or a message when it could not be taken.
 function atlas_spend_lock($credentialId) {
+  if (!is_string($credentialId) || $credentialId === '') return null;
+  require_once __DIR__ . '/gold-hold.php';
+  $busy = atlas_spend_lock_stripe($credentialId);
+  if ($busy !== null) return $busy;
+  // A credential reserved for a ledger purchase (lib/gold-hold.php) is spent by nothing but that purchase. Looked at after the
+  // stripe is held, so a reservation made a moment ago is seen, and one that cannot be read stops the spend rather than allowing it.
+  try {
+    if (atlas_hold_blocks($credentialId) !== null) return 'this item is held for a purchase and cannot be used until that is finished or cancelled';
+  } catch (Exception $e) {
+    return 'the list of held items cannot be read right now - try again later';
+  }
+  return null;
+}
+
+// The stripe lock alone, with no hold check. Holds are made, begun, finished and cancelled under it, so they are ordered against
+// every spend; callers other than gold-hold.php use atlas_spend_lock().
+function atlas_spend_lock_stripe($credentialId) {
   static $held = [];
   if (!is_string($credentialId) || $credentialId === '') return null;
   $stripe = abs(crc32($credentialId)) % 64;

@@ -22,7 +22,7 @@ function wallet() {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const jwk = publicKey.export({ format: 'jwk' });
   const key = b64u(Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]));
-  return { key, sign: (payload) => b64u(crypto.sign('sha256', Buffer.from(canon(payload)), { key: privateKey, dsaEncoding: 'ieee-p1363' })) };
+  return { key, privateKey, sign: (payload) => b64u(crypto.sign('sha256', Buffer.from(canon(payload)), { key: privateKey, dsaEncoding: 'ieee-p1363' })) };
 }
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'chain-labs-servers-'));
@@ -62,7 +62,7 @@ for (const n of Object.values(nodes)) {
   fs.writeFileSync(n.adapter, "<?php\nrequire_once '" + STAND_IN + "';\n$issuer = ['public' => file_get_contents(__DIR__ . '/issuer-public.pem')];\nif (is_file(__DIR__ . '/issuer-private.pem')) $issuer['private'] = file_get_contents(__DIR__ . '/issuer-private.pem');\nreturn stand_in_gold(__DIR__ . '/gold-state.sqlite', $issuer);\n");
 }
 function start(n) {
-  n.proc = spawn('php', ['-S', '127.0.0.1:' + n.port, '-t', n.root, '-d', 'auto_prepend_file=' + path.join(n.dir, 'prepend.php')], { stdio: 'ignore', env: { ...process.env, PHP_CLI_SERVER_WORKERS: '6' } });
+  n.proc = spawn('php', ['-S', '127.0.0.1:' + n.port, '-t', n.root, '-d', 'auto_prepend_file=' + path.join(n.dir, 'prepend.php')], { stdio: process.env.CHAIN_LABS_DEBUG ? ['ignore', 'inherit', 'inherit'] : 'ignore', env: { ...process.env, PHP_CLI_SERVER_WORKERS: '6' } });
   return waitUp(n);
 }
 // Waits until the server answers, up to ten seconds.

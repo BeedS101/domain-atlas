@@ -109,4 +109,5 @@ issuer-php/atlas/studio/inc/storage-root.php
 dist/
 
 issuer-php/lib/mint-allowance/
+issuer-php/lib/holds/
 issuer-server/mint-allowance/

@@ -28,7 +28,8 @@ function newOwner() {
 
 // An identity made with Web Crypto elsewhere ({ publicKey: raw base64url, kp: CryptoKeyPair } or { publicKey, privateKey }).
 function register(identity) {
-  KEYS.set(identity.publicKey, crypto.KeyObject.from((identity.kp || identity).privateKey));
+  const k = (identity.kp || identity).privateKey;
+  KEYS.set(identity.publicKey, k instanceof crypto.KeyObject ? k : crypto.KeyObject.from(k));
   return identity;
 }
 
@@ -83,4 +84,4 @@ function withSignedConsolidation(source) {
       "path: '/atlas/asset/consolidate', predecessors: credentials.map((c) => c.id), body: async (requestId) => { const intentPayload = { action: 'consolidate', credentialIds: credentials.map((c) => c.id), requestId, domain: credentials[0].issuer.domain }; return { credentials, intent: { payload: intentPayload, proof: await signAs('self', intentPayload) } }; }"), 'latin1');
 }
 
-module.exports = { withSignedConsolidation, newOwner, register, signSpend, spendPayload, ownerIntent, canonicalize };
+module.exports = { withSignedConsolidation, newOwner, register, signSpend, spendPayload, ownerIntent, canonicalize, proofFor };

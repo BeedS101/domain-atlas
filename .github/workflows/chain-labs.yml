@@ -24,6 +24,9 @@ on:
       - 'extension/chain-labs-wallet.js'
       - 'test/support/**'
       - '.github/workflows/chain-labs.yml'
+      - 'test/chain-labs-gold-issuer-http.js'
+      - 'issuer-php/lib/gold-hold.php'
+      - 'issuer-php/lib/store.php'
   pull_request:
     paths:
       - 'chain-labs/**'
@@ -45,7 +48,9 @@ on:
       - 'extension/chain-labs-wallet.js'
       - 'test/support/**'
       - '.github/workflows/chain-labs.yml'
-
+      - 'test/chain-labs-gold-issuer-http.js'
+      - 'issuer-php/lib/gold-hold.php'
+      - 'issuer-php/lib/store.php'
 permissions:
   contents: read
 
@@ -91,3 +96,4 @@ jobs:
           node test/chain-labs-max-supply-http.js
           php test/chain-labs-market.php
           node test/chain-labs-market-http.js
+          node test/chain-labs-gold-issuer-http.js

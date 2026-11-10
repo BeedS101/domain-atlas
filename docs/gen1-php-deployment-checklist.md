@@ -228,3 +228,6 @@ request answers 503 until it is restored (`docs/gen1-revocation-state.md`).
   growth before it gets there; do not truncate the list.
 - Under mod_php where several accounts share one PHP user, the private folders are only as private as the host's
   account separation. Moving them outside the web root helps against HTTP exposure, not against other accounts.
+- Gold holds for ledger purchases (`docs/gold-reservation.md`) are experimental and off. A deployment that never creates
+  `lib/atlas-gold-hold-config.json` has no hold endpoint and behaves as before; `lib/holds/` appears only once a hold is made. If it
+  is ever switched on, back up `lib/holds/` with the rest of the private state and pass the `Authorization` header to PHP.

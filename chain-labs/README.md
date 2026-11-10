@@ -94,6 +94,14 @@ callables (the contract is at the top of `lib/purchase.php`); each domain that a
 `test/support/gold-stand-in.php` is the stand-in the tests use. Sales are delivered one at a time per coin; a sale that meets
 another in flight answers 202 and is finished by repeating the request or by `purchase-recover`.
 
+`lib/gold-issuer.php` is the adapter for real Gold credentials held by a Domain Atlas issuer (`issuer-php`, test Gold only, not used by
+any live domain). The authority's adapter reserves the Gold at the issuer from the buyer's own signed intent (`lock`), tells it before
+each attempt to deliver (`begin`), and has it spend the credential once the units exist (`finish`); `release` is used only when the
+ledger has ruled delivery out. While a hold exists nothing else can spend the credential, and a hold that is delivering never lapses
+by time. The credential is kept in the ledger as `{id, gold}` (`pack`) because it carries numbers the ledger's canonical form refuses.
+Design, enforcement, crash recovery and the remaining limitations are in `docs/gold-reservation.md`. Tests:
+`node test/chain-labs-gold-issuer-http.js` (needs `php`) and `node test/manual-gold-hold.js` for the issuer side.
+
 The market page (`index.html`, `market27.php`, and the `market` route of `scan35.php`, with the figures in `lib/market.php`) shows
 Price, Market cap and 24h volume in demo Gold (Au) from the ledger, and a dash wherever a figure has no source. Each domain states
 the coins it is the authority of; `market27.php` takes a coin from its authority only, so a multi authority coin is one row. Issued

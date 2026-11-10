@@ -17,10 +17,19 @@ require_once __DIR__ . '/peer.php';
 //       (issuerKey), is of the policy's class and belongs to the buyer. Returns requestId, coinId, price, recipient,
 //       credentialId, quantity and expiresAt (Unix time) of what was signed, or the reason it does not check out.
 //   revoked(credentialId): bool                         every domain that approves a sale asks
-//   lock(requestId, credential): ?string                the authority only: a refusal, or null once the credential is held for this request
-//   release(requestId): void                            the authority only: lets the credential be used elsewhere again
+//   lock(requestId, credential, intent): ?string        the authority only: a refusal, or null once the credential is held for this request
+//                                                       (a real issuer keeps the hold itself and checks the intent once more)
+//   begin(requestId, credential): ?string               optional, the authority only: called before each attempt to deliver. Null once the
+//                                                       delivery may begin, from which the hold no longer lapses by time; a string means the
+//                                                       credential can no longer be used for this sale and the sale is ended
+//   release(requestId, credentialId): void              the authority only: lets the credential be used elsewhere again; called only once
+//                                                       the ledger has ruled the delivery out
 //   finish(requestId, credential, price): array         the authority only: spends the credential and issues the remainder, once per
 //                                                       request id however often it is called; returns what the buyer gets back
+//   pack(credential): array                             optional: the form in which the ledger keeps the credential (journal, entry evidence,
+//                                                       approvals) when the credential itself cannot be written as ledger JSON (a Gold
+//                                                       credential carries numbers with fractions, which the ledger's canonical form
+//                                                       refuses). It must keep `id`. Every callable above is then given this form.
 //   crash(point): void                                  optional, for tests: called between steps
 const PURCHASE_MAX_ATTEMPTS = 8;
 
@@ -51,7 +60,9 @@ function purchase_submit(PDO $db, array $node, array $gold, array $treasury, str
     if ($coin['state'] !== 'active') ledger_fail('not-active', 'the coin is ' . $coin['state']);
     if ($coin['genesis']['authority'] !== $node['domain']) ledger_fail('not-authority', 'only the authority sells');
     if ($coin['mode'] === 'multi' && $send === null) ledger_fail('bad-node', 'a multi authority coin sells through its partners');
-    $v = purchase_verify($gold, $coin, $intent, $credential, $now, true);
+    // A request already journaled is answered from its journal even when its credential is spent by now (that is what a finished
+    // sale looks like) or its intent has run out; only a new sale needs a live credential and a live intent.
+    $v = purchase_verify($gold, $coin, $intent, $credential, $now, false, false);
     $policy = $coin['genesis']['purchase'];
     $row = purchase_row($db, $coinId, $v['requestId']);
     if ($row !== null) {
@@ -60,11 +71,12 @@ function purchase_submit(PDO $db, array $node, array $gold, array $treasury, str
         // An abandoned request left the credential untouched, so the same request may be made again.
         $db->prepare('DELETE FROM ledger_purchases WHERE coin_id=? AND request_id=?')->execute([$coinId, $v['requestId']]);
     }
+    $v = purchase_verify($gold, $coin, $intent, $credential, $now, true);
     $units = $v['price'] * (int) $policy['unitsPerPrice'];
     $account = ledger_account_row($db, $coinId, $coin['treasury_key']);
     if (!$account || (int) $account['units'] < $units) ledger_fail('insufficient-treasury', 'the treasury holds fewer units than this purchase');
     ledger_purchase_rules($db, $coin, $v['requestId'], $v['recipient'], $units, max($now, ledger_head_time($db, $coinId)));
-    $refused = $gold['lock']($v['requestId'], $credential);
+    $refused = $gold['lock']($v['requestId'], $credential, $intent);
     if ($refused !== null) ledger_fail('locked', $refused);
     purchase_crash($gold, 'locked');
     $db->prepare("INSERT INTO ledger_purchases(coin_id,request_id,status,credential_id,price,units,recipient,intent_json,credential_json,created_at) VALUES(?,?,'decided',?,?,?,?,?,?,?)")
@@ -79,12 +91,29 @@ function purchase_run(PDO $db, array $node, array $gold, array $treasury, array 
     $coinId = $row['coin_id'];
     $rid = $row['request_id'];
     if ($row['status'] === 'done') return json_decode($row['result_json'], true);
+    // The credential is told that delivery is about to be tried, before anything that could deliver. From here its hold stays until
+    // the sale is done or the ledger has ruled the delivery out. Skipped once an entry exists: it was begun before that.
+    if ($row['status'] === 'decided' && isset($gold['begin']) && ledger_request_entry($db, $coinId, $rid) === null) {
+        $refused = $gold['begin']($rid, json_decode($row['credential_json'], true));
+        if ($refused !== null) {
+            purchase_abandon($db, $gold, $row, 'credential-unavailable');
+            ledger_fail('locked', $refused);
+        }
+        purchase_crash($gold, 'begun');
+    }
     try {
         $index = purchase_credit($db, $node, $treasury, $row, $send, $now, $gold);
     } catch (LedgerError $e) {
         if (purchase_transient($e)) throw $e;
-        purchase_abandon($db, $gold, $row, $e->reason);
-        throw $e;
+        // A proposal still pending must not be executable later, once the credential is released.
+        $latest = purchase_row($db, $coinId, $rid);
+        if ($latest !== null && $latest['proposal_digest'] !== null) spend_reject($db, $coinId, $latest['proposal_digest'], 'rejected', 'abandoned: ' . $e->reason);
+        $delivered = ledger_request_entry($db, $coinId, $rid);
+        if ($delivered === null) {
+            purchase_abandon($db, $gold, $row, $e->reason);
+            throw $e;
+        }
+        $index = $delivered;
     }
     $db->prepare("UPDATE ledger_purchases SET status='credited', entry_index=? WHERE coin_id=? AND request_id=? AND status='decided'")->execute([$index, $coinId, $rid]);
     purchase_crash($gold, 'credited');
@@ -139,8 +168,10 @@ function purchase_credit(PDO $db, array $node, array $treasury, array $row, ?cal
 // Ends a purchase that can no longer be delivered: the credential was never touched, so it is released.
 function purchase_abandon(PDO $db, array $gold, array $row, string $reason): void
 {
+    // The credential is freed first: when that cannot be done the sale stays journaled and the next attempt tries again, rather
+    // than being marked ended while the credential is still held.
+    $gold['release']($row['request_id'], $row['credential_id']);
     $db->prepare("UPDATE ledger_purchases SET status='abandoned', reason=? WHERE coin_id=? AND request_id=? AND status IN ('decided','credited')")->execute([$reason, $row['coin_id'], $row['request_id']]);
-    $gold['release']($row['request_id']);
 }
 
 // By hand: ends a journaled purchase that has no ledger entry and frees its credential. One already delivered cannot be cancelled.

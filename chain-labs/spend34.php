@@ -183,7 +183,7 @@ try {
         $coin = ledger_coin($db, $coinId);
         if ($coin['genesis']['authority'] !== $host) reply34(409, ['ok' => false, 'code' => 'not-authority', 'error' => 'Buy from the authority of this coin', 'authority' => $coin['genesis']['authority']]);
         try {
-            $result = purchase_submit($db, $node, $gold, ledger_treasury_key_load($private, $coinId), $coinId, $m['intent'], $m['credential'], $coin['mode'] === 'multi' ? $send : null, $now);
+            $result = purchase_submit($db, $node, $gold, ledger_treasury_key_load($private, $coinId), $coinId, $m['intent'], is_callable($gold['pack'] ?? null) ? $gold['pack']($m['credential']) : $m['credential'], $coin['mode'] === 'multi' ? $send : null, $now);
         } catch (LedgerError $e) {
             // The sale is journaled and the credential held: the same request, or recovery, finishes it.
             if (!purchase_transient($e)) throw $e;

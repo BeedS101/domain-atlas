@@ -234,7 +234,7 @@ function spend_verify_holdings(array $answer, string $domainPublicPem, string $d
 // Checks a buyer's intent and price credential through the price adapter and against the coin's purchase policy. The adapter
 // ($gold) is a set of callables, documented in lib/purchase.php. Returns what the intent asks for:
 // requestId, coinId, price, recipient, credentialId, quantity.
-function purchase_verify(?array $gold, array $coin, mixed $intent, mixed $credential, int $now, bool $checkExpiry): array
+function purchase_verify(?array $gold, array $coin, mixed $intent, mixed $credential, int $now, bool $checkExpiry, bool $checkRevoked = true): array
 {
     $policy = $coin['genesis']['purchase'] ?? null;
     if ($policy === null) ledger_fail('no-purchase-policy', 'this coin is not for sale');
@@ -250,7 +250,7 @@ function purchase_verify(?array $gold, array $coin, mixed $intent, mixed $creden
     if (!is_int($v['quantity']) || $v['price'] > $v['quantity']) ledger_fail('bad-purchase', 'the credential holds less than the price');
     if (!ledger_valid_owner_key($v['recipient']) || $v['recipient'] === $coin['treasury_key']) ledger_fail('bad-purchase', 'the recipient is not a wallet key that can receive');
     if ($checkExpiry && (!is_int($v['expiresAt']) || $v['expiresAt'] <= $now)) ledger_fail('expired', 'the intent has expired');
-    if ($gold['revoked']((string) $v['credentialId'])) ledger_fail('revoked-credential', 'the price credential is revoked');
+    if ($checkRevoked && $gold['revoked']((string) $v['credentialId'])) ledger_fail('revoked-credential', 'the price credential is revoked');
     return $v;
 }
 

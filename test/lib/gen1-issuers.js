@@ -93,7 +93,7 @@ async function startPhp(port, options) {
   // bundle is a fresh domain unless the caller seeds it.
   const isState = (src) => {
     const rel = path.relative(options.source || path.join(REPO, 'issuer-php'), src).split(path.sep).join('/');
-    return /^lib\/(replay|holdings|txn|mint-allowance)(\/|$)/.test(rel) || /^lib\/[^/]+\.(pem|lock)$/.test(rel) || /^lib\/atlas-[^/]*\.json(\.lock)?$/.test(rel) || /^\.well-known\/atlas-[^/]*\.json$/.test(rel);
+    return /^lib\/(replay|holdings|txn|mint-allowance|holds)(\/|$)/.test(rel) || /^lib\/[^/]+\.(pem|lock)$/.test(rel) || /^lib\/atlas-[^/]*\.json(\.lock)?$/.test(rel) || /^\.well-known\/atlas-[^/]*\.json$/.test(rel);
   };
   fs.cpSync(options.source || path.join(REPO, 'issuer-php'), bundle, { recursive: true, filter: (src) => options.keepState || !isState(src) });
   fs.mkdirSync(path.join(bundle, '.well-known'), { recursive: true });
