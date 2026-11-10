@@ -398,10 +398,14 @@ item, and there is no delivery path for it yet.
    extension, or a trusted origin. A request with no origin, or from another
    site's page, gets `mint-origin-refused`; a class not on the list gets
    `mint-not-offered`. Anything else is minted by an administrator only. To let
-   a sibling site's pages mint here (the federation demo does), list its origin
-   in `ATLAS_MINT_TRUSTED_ORIGINS` (`store.php`) or start the issuer with
-   `ATLAS_MINT_ORIGINS=https://sibling.example` (for the local demo, domain B's
-   issuer needs `ATLAS_MINT_ORIGINS=http://localhost:8001`). The origin header
+   a sibling site's pages mint any offered class here, list its origin in
+   `ATLAS_MINT_TRUSTED_ORIGINS` (`store.php`) or start the issuer with
+   `ATLAS_MINT_ORIGINS=https://sibling.example`. The federation demo needs only
+   a Post Office membership (`atlas.postoffice.membership`), which the two
+   deployed domains accept from each other's pages and no other class
+   (`ATLAS_FEDERATION_MINT_ORIGINS`: `https://evtec.co.za` and
+   `https://domain-atlas.co.za` built in, more comma-separated for a local
+   pair, for example `http://localhost:8001,http://localhost:8002`). The origin header
    is set by browsers; it stops other sites' pages, not a program that writes
    its own headers, which is why the class list and weekly limits also apply.
    Isolated test issuers switch the class and origin checks off with

@@ -56,7 +56,7 @@
     { "file": "federation-demo.html", "title": "Cross-domain federation demo", "group": "federation", "canonical": "demo-domain-a",
       "summary": "Two real domains exchange a Post Office message, each checking the other's published key.",
       "backend": ["atlas/postoffice/*", "atlas/mail/check", "atlas/asset/issue"],
-      "needs": "postOffice true in both manifests, and outbound https from each domain's PHP to the other. The second domain defaults to the other site." },
+      "needs": "postOffice true in both manifests, outbound https from each domain's PHP to the other, and lib/replacement.php and atlas/asset/issue.php from this release on both domains (each accepts the other's pages for a Post Office membership only). The second domain defaults to the other site." },
     { "file": "txlab.html", "title": "Multi-domain transaction authorization lab", "group": "federation", "canonical": "demo-domain-a",
       "summary": "Two independently keyed domains must both sign a test transfer before it executes.",
       "backend": ["atlas/demo/txlab/*"], "needs": "Its own private configuration, signing key and database per domain; off until configured (docs/txlab-deployment.md)." },

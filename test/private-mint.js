@@ -3,6 +3,7 @@
 //   - the request must come from the issuer's own origin, a browser extension or a listed trusted origin
 //   - the class must be one the domain offers; the generated elements (platinum and the rest) are not, so they cannot
 //     be minted and converted into gold
+//   - the other deployed domain's pages may mint a Post Office membership (the federation demo) and nothing else
 //   - restricted and unknown classes keep their own answers
 //   - the lists of offered classes in the two issuers are identical and cover every class the demo scenes mint
 //
@@ -76,6 +77,20 @@ async function suite(be, label) {
   const fromExt = await mint(be, 'atlas.element.iron', 1, ext);
   line(fromExt.status === 200, 'the wallet extension can mint an offered class', fromExt);
 
+  // The federation demo: the other deployed domain's pages, one class.
+  for (const origin of ['https://evtec.co.za', 'https://domain-atlas.co.za']) {
+    const po = await mint(be, 'atlas.postoffice.membership', undefined, origin);
+    line(po.status === 200 && po.body.asset.class === 'atlas.postoffice.membership', origin + ' may mint a Post Office membership here', po);
+    for (const cls of ['atlas.membership', 'atlas.tradingstation.membership', 'atlas.demo.governance.membership', 'atlas.element.gold', 'atlas.wearable.ring']) {
+      const r = await mint(be, cls, 1, origin);
+      line(r.status === 403 && r.body.code === 'mint-origin-refused', origin + ' may not mint ' + cls.split('.').slice(1).join('.'), r);
+    }
+  }
+  for (const origin of ['https://evtec.co.za.attacker.example', 'http://evtec.co.za', 'https://evtec.co.za:8443', 'https://stranger.example']) {
+    const r = await mint(be, 'atlas.postoffice.membership', undefined, origin);
+    line(r.status === 403 && r.body.code === 'mint-origin-refused', origin + ' may not mint a Post Office membership', r);
+  }
+
   // Class.
   for (const cls of ['atlas.element.platinum', 'atlas.element.hydrogen', 'atlas.element.uranium']) {
     const r = await mint(be, cls, 100, own);
@@ -117,6 +132,15 @@ async function suite(be, label) {
       const no = await mint(be, 'atlas.element.gold', 1, 'https://stranger.example');
       line(ok.status === 200 && no.status === 403, name + ': a listed trusted origin may mint, another site may not', [ok.status, no.status]);
     }
+    const fed = { env: { ATLAS_PRIVATE_MINT: 'on', ATLAS_FEDERATION_MINT_ORIGINS: 'https://test-sibling.example' } };
+    const node3 = await startNode(base + 5, fed), php3 = await startPhp(base + 6, fed);
+    try {
+      for (const [be, name] of [[node3, 'Node'], [php3, 'PHP']]) {
+        const ok = await mint(be, 'atlas.postoffice.membership', undefined, 'https://test-sibling.example');
+        const other = await mint(be, 'atlas.element.gold', 1, 'https://test-sibling.example');
+        line(ok.status === 200 && other.status === 403, name + ': an origin added for federation may mint a Post Office membership and nothing else', [ok.status, other.status]);
+      }
+    } finally { node3.stop(); php3.stop(); }
     const sw = await mint(off, 'atlas.element.platinum', 100);
     line(sw.status === 200, 'ATLAS_PRIVATE_MINT=off lets a test instance mint without origin or class checks (live issuers never set it)', sw);
   } finally {

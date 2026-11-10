@@ -45,7 +45,7 @@ address, such as a local test copy, they keep the default in their markup.
 | Governance and voting demo | `atlas/demo/governance/propose`, `atlas/demo/governance/vote`, `atlas/demo/governance/finalize` | Page `governance-demo.html` | Page `governance-demo.html` | Reviewer key created on first use in the domain's own private storage. |
 | Oracle-triggered payout demo | `atlas/demo/oracle/attest`, `atlas/demo/oracle/policy/issue`, `atlas/demo/oracle/payout/claim` | Page `oracle-demo.html` | Page `oracle-demo.html` | Reviewer key created on first use in the domain's own private storage. |
 | Reserve bank demo | `atlas/demo/reserve/*`, `atlas/demo/attestation/issue`, `atlas/demo/clawback/*`, `atlas/trade/*` | Page `reserve-bank-demo.html` | Page `reserve-bank-demo.html` | Act 8 (consortium mint) needs an administrator login on each domain; the sibling field defaults to the other domain. The pinned example reads evtec.co.za. |
-| Cross-domain federation demo | `atlas/postoffice/*`, `atlas/mail/check`, `atlas/asset/issue` | Page `federation-demo.html` | Page `federation-demo.html` | postOffice true in both manifests, and outbound https from each domain's PHP to the other. The second domain defaults to the other site. |
+| Cross-domain federation demo | `atlas/postoffice/*`, `atlas/mail/check`, `atlas/asset/issue` | Page `federation-demo.html` | Page `federation-demo.html` | postOffice true in both manifests, outbound https from each domain's PHP to the other, and lib/replacement.php and atlas/asset/issue.php from this release on both domains (each accepts the other's pages for a Post Office membership only). The second domain defaults to the other site. |
 | Multi-domain transaction authorization lab | `atlas/demo/txlab/*` | Page `txlab.html` | Page `txlab.html` | Its own private configuration, signing key and database per domain; off until configured (docs/txlab-deployment.md). |
 | Multi-issuer portable asset lab | `atlas/demo/multi-issuer/*` | Page `multi-issuer.html` | Page `multi-issuer.html` | Its own private configuration and signing key per domain; off until configured (docs/multi-issuer-deployment.md). |
 | Wallet bridge demo | `atlas/asset/issue` | Link only, to domain-atlas.co.za | Page `wallet-bridge-demo.html` | Wallet extension. It needs the ring offer in that domain's wallet-bridge policy, which evtec.co.za does not grant. |
@@ -72,8 +72,8 @@ part of this table; their home page section is unchanged.
 
 ## 4. What to upload
 
-Public static files only, into each domain's web root (the folder that holds `.well-known` and `atlas`), in binary mode. Nothing from
-`issuer-php/`, `lib/`, `.well-known/` or any private folder is part of this change.
+Public static pages, plus two issuer files for the federation demo (below), into each domain's web root (the folder that holds
+`.well-known` and `atlas`), in binary mode. Nothing from `.well-known/`, a private folder or any configuration is part of this change.
 
 **evtec.co.za**
 
@@ -95,6 +95,19 @@ Public static files only, into each domain's web root (the folder that holds `.w
 `txlab.html`, `multi-issuer.html`, `wallet-bridge-demo.html`, `compass-listing.html` and `blog-post.html` are unchanged and stay where
 they are.
 
+**Both domains, for the federation demo (Act 2 onwards)**
+
+| File | Status |
+| --- | --- |
+| `lib/replacement.php` | changed |
+| `atlas/asset/issue.php` | changed |
+
+The federation demo has a page on one domain create Bob's Post Office membership on the other domain, which the public mint refuses
+from any page that is not the domain's own. These two files let each deployed domain accept the other's pages for that one class,
+`atlas.postoffice.membership`, and nothing else; every other class and every other origin is refused exactly as before. Upload them to
+both domains, otherwise the demo stops at Act 2 with "minting is open to this domain's own pages only". They hold no key, state or
+configuration. A site doctor run that reported no differing code before this change is on the matching "before" versions.
+
 ## 5. Before uploading the new pages to domain-atlas.co.za
 
 The pages call the domain's own backend, so the backend routes in the table must already be deployed there: the same `issuer-php`
@@ -113,7 +126,9 @@ Things the pages need that are per domain and are not set up by this change:
 
 - **Public minting** is decided by the issuer, not by the pages: `ATLAS_PUBLIC_MINT_CLASSES` in `lib/store.php` lists the demo classes,
   and the route accepts requests from the domain's own pages only. A page copied to a domain mints on that domain, under that domain's
-  key, and nowhere else. Do not add the other domain to `ATLAS_MINT_ORIGINS` or `ATLAS_MINT_TRUSTED_ORIGINS`; no demo needs it.
+  key, and nowhere else. The one exception is the Post Office membership, which the other deployed domain's pages may also mint (the
+  federation demo); it is built into `lib/replacement.php` (`ATLAS_FEDERATION_MINT_ORIGINS`) and needs no setting. Do not add the
+  other domain to `ATLAS_MINT_ORIGINS` or `ATLAS_MINT_TRUSTED_ORIGINS`: that would let its pages mint every offered class.
 - **Reviewer key** (attestation, governance, oracle, reserve bank): created on first use in the domain's own private storage. The
   private folder must be writable, as it already is for the issuer key. Never copy one domain's key to the other.
 - **Federation demo**: `postOffice` must be true in both manifests (it is) and each domain's PHP must be able to make https requests to
@@ -143,6 +158,8 @@ on `domain-atlas.co.za`), and delete the newly added pages. No data or configura
 
 ## 8. Tests
 
+- `node test/private-mint.js`: who may use the public mint on the Node and PHP issuers, including the Post Office exception for the other domain.
+- `xvfb-run -a node test/manual-federation-demo-php-browser.js`: the federation demo end to end between two PHP issuers.
 - `node test/demo-directory.js`: the list is consistent, and each way the collection can drift is reported and repaired.
 - `xvfb-run -a node test/manual-demo-collection-browser.js [screenshot-dir]`: two throw-away PHP issuers laid out like the live
   sites, a real browser; the directory, every page and its local files, desktop and phone, the host-based defaults, a demo end to end,

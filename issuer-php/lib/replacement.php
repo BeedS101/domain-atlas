@@ -306,7 +306,19 @@ function atlas_public_mint_offered($assetClass) {
   return atlas_private_mint_off() || in_array($assetClass, ATLAS_PUBLIC_MINT_CLASSES, true);
 }
 
-function atlas_mint_origin_allowed() {
+// The Post Office federation demo has a page on one deployed domain create a member on the other, so each deployed
+// domain also accepts the other's pages for this one class and no other. The list is the two deployed domains
+// (ATLAS_FEDERATION_MINT_ORIGINS adds more, comma-separated, for test instances); the origin header only stops other
+// sites' pages, and the class is public and limited either way.
+const ATLAS_FEDERATION_MINT_CLASSES = ['atlas.postoffice.membership'];
+const ATLAS_FEDERATION_MINT_ORIGINS = ['https://evtec.co.za', 'https://domain-atlas.co.za'];
+
+function atlas_origin_listed($scheme, $hostPort, $origins) {
+  foreach ($origins as $o) if ($o !== '' && strtolower(rtrim($o, '/')) === strtolower($scheme . '://' . $hostPort)) return true;
+  return false;
+}
+
+function atlas_mint_origin_allowed($assetClass = null) {
   if (atlas_private_mint_off()) return true;
   $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
   if (!is_string($origin) || $origin === '' || $origin === 'null') return false;
@@ -320,7 +332,13 @@ function atlas_mint_origin_allowed() {
   $extra = ATLAS_MINT_TRUSTED_ORIGINS;
   $env = getenv('ATLAS_MINT_ORIGINS');
   if ($env !== false && $env !== '') foreach (explode(',', $env) as $o) $extra[] = trim($o);
-  foreach ($extra as $o) if ($o !== '' && strtolower(rtrim($o, '/')) === strtolower($scheme . '://' . $hostPort)) return true;
+  if (atlas_origin_listed($scheme, $hostPort, $extra)) return true;
+  if ($assetClass !== null && in_array($assetClass, ATLAS_FEDERATION_MINT_CLASSES, true)) {
+    $federation = ATLAS_FEDERATION_MINT_ORIGINS;
+    $env = getenv('ATLAS_FEDERATION_MINT_ORIGINS');
+    if ($env !== false && $env !== '') foreach (explode(',', $env) as $o) $federation[] = trim($o);
+    if (atlas_origin_listed($scheme, $hostPort, $federation)) return true;
+  }
   return false;
 }
 

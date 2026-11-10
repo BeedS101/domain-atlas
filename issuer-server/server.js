@@ -3471,7 +3471,12 @@ const PUBLIC_MINT_CLASSES = new Set([
 // Other sites whose pages may call the public mint, as full origins; ATLAS_MINT_ORIGINS adds more, comma-separated.
 const MINT_TRUSTED_ORIGINS = [];
 function publicMintOffered(assetClass) { return PRIVATE_MINT_OFF || PUBLIC_MINT_CLASSES.has(assetClass); }
-function mintOriginAllowed(req) {
+// The Post Office federation demo has a page on one deployed domain create a member on the other, so each deployed
+// domain also accepts the other's pages for this one class and no other (ATLAS_FEDERATION_MINT_ORIGINS adds more,
+// comma-separated, for test instances).
+const FEDERATION_MINT_CLASSES = new Set(['atlas.postoffice.membership']);
+const FEDERATION_MINT_ORIGINS = ['https://evtec.co.za', 'https://domain-atlas.co.za'];
+function mintOriginAllowed(req, assetClass) {
   if (PRIVATE_MINT_OFF) return true;
   const origin = req.headers.origin;
   if (typeof origin !== 'string' || origin === '' || origin === 'null') return false;
@@ -3481,8 +3486,9 @@ function mintOriginAllowed(req) {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
   const hostPort = u.host.toLowerCase();
   if (hostPort === String(req.headers.host || '').toLowerCase()) return true;
-  const extra = MINT_TRUSTED_ORIGINS.concat((process.env.ATLAS_MINT_ORIGINS || '').split(',').map((s) => s.trim()));
-  return extra.some((o) => o && o.replace(/\/+$/, '').toLowerCase() === u.protocol + '//' + hostPort);
+  const listed = (list) => list.some((o) => o && o.replace(/\/+$/, '').toLowerCase() === u.protocol + '//' + hostPort);
+  if (listed(MINT_TRUSTED_ORIGINS.concat((process.env.ATLAS_MINT_ORIGINS || '').split(',').map((s) => s.trim())))) return true;
+  return FEDERATION_MINT_CLASSES.has(assetClass) && listed(FEDERATION_MINT_ORIGINS.concat((process.env.ATLAS_FEDERATION_MINT_ORIGINS || '').split(',').map((s) => s.trim())));
 }
 
 const MINT_ALLOWANCE_DIR = path.join(STATE_DIR, 'mint-allowance');
@@ -6346,7 +6352,7 @@ async function main() {
         }
 
         // The public route serves this domain's own pages only, and only for classes the domain offers.
-        if (!mintOriginAllowed(req)) {
+        if (!mintOriginAllowed(req, assetClass)) {
           return sendJson(res, 403, { error: "minting is open to this domain's own pages only", code: 'mint-origin-refused' });
         }
         if (!publicMintOffered(assetClass)) {

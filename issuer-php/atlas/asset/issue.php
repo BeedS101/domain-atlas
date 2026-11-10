@@ -69,7 +69,7 @@ if (!empty(ATLAS_ASSET_CATALOG[$assetClass]['restrictedIssuance'])) {
 
 // The public route serves this domain's own pages only, and only for classes the domain offers. Checked before
 // any lease, reservation or signing.
-if (!atlas_mint_origin_allowed()) {
+if (!atlas_mint_origin_allowed($assetClass)) {
   send_json(403, ['error' => 'minting is open to this domain\'s own pages only', 'code' => 'mint-origin-refused']);
 }
 if (!atlas_public_mint_offered($assetClass)) {

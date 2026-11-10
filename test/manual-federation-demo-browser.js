@@ -49,7 +49,8 @@ const BASE_A = 'http://' + DOMAIN_A;
 function startNodeServer(port, domain, docroot, stateDir) {
   const proc = spawn('node', ['issuer-server/server.js'], {
     cwd: path.resolve(__dirname, '..'),
-    env: { ...process.env, PORT: String(port), ATLAS_DOMAIN: domain, ATLAS_STATE_DIR: stateDir, ATLAS_DOCROOT: docroot },
+    // Each instance accepts the other's pages for a Post Office membership, as the two deployed domains do for each other.
+    env: { ...process.env, PORT: String(port), ATLAS_DOMAIN: domain, ATLAS_STATE_DIR: stateDir, ATLAS_DOCROOT: docroot, ATLAS_FEDERATION_MINT_ORIGINS: 'http://localhost:' + PORT_A + ',http://localhost:' + PORT_B },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   return new Promise((resolve, reject) => {
