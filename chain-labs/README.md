@@ -142,6 +142,7 @@ the limits cannot cover and a per-key limit above the daily one.
 * `create` with a policy needs `purchaseDigest`, the fingerprint of the policy that was shown for the same name, symbol, decimals and supply, otherwise 409 `policy-not-confirmed`. The form shows the review first and creates on a second press; changing any field withdraws the review.
 * The registry keeps the policy in the `purchase` column. `spend34.php?action=open` uses only that policy, re-validates it, and writes it into the signed genesis; a policy sent with the request that differs from the registered one is refused (`policy-mismatch`). A coin registered without a policy opens with the genesis it always had, so existing registered coins do not change unless the operator registers a new one.
 * `chainlabs-gold-issuers.json` in the private folder (optional) lists the issuers whose keys and classes may be chosen: `{"issuers": [{"name": "...", "domain": "...", "key": "<raw public key>", "classes": ["atlas.element.gold"]}]}`. Without it only `atlas.element.gold` is accepted, with any well-formed key, and the review says the key is not checked. A list that cannot be read, or an empty one, authorises nobody. The list is checked again when the coin is opened.
+* `docs/chain-labs-gold-purchase-runbook.md` is the step by step for one controlled purchase, and `tools/chainlabs-gold-setup.js` writes its configuration files.
 * Having a policy does not turn real purchases on. Buying needs a `gold-adapter.php` in the private folder and an issuer with its hold endpoint enabled (see `docs/gold-reservation.md`); neither exists on the live domains.
 
 Every commit runs in one `BEGIN IMMEDIATE` transaction that re-checks the entry index, previous hash, signatures, nonce,
@@ -178,3 +179,5 @@ The wallet screen and the scanner page are checked in a real browser (needs Chro
     xvfb-run -a node test/manual-chain-labs-scanner.js
     xvfb-run -a node test/manual-chain-labs-studio.js
     xvfb-run -a node test/manual-chain-labs-studio-policy.js
+    xvfb-run -a node test/manual-chain-labs-gold-e2e.js
+    xvfb-run -a node test/manual-chain-labs-aeth-rehearsal.js

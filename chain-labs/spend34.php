@@ -62,7 +62,7 @@ const SPEND34_STATUS = [
     'unknown-peer' => 403, 'not-in-roster' => 403, 'not-authority' => 409, 'equivocation' => 409, 'exists' => 409, 'not-pending' => 409,
     'peer-down' => 502, 'peer-bad-answer' => 502, 'bad-history' => 502, 'not-enough-approvals' => 503,
     'locked' => 409, 'request-reused' => 409, 'insufficient-treasury' => 409, 'duplicate-purchase' => 409, 'purchase-key-limit' => 409, 'purchase-day-limit' => 409,
-    'no-purchase-policy' => 409, 'revoked-credential' => 409, 'cannot-cancel' => 409, 'unknown-request' => 404, 'no-purchase-verifier' => 503,
+    'no-purchase-policy' => 409, 'revoked-credential' => 409, 'cannot-cancel' => 409, 'cannot-close' => 409, 'sale-closed' => 409, 'unknown-request' => 404, 'no-purchase-verifier' => 503,
 ];
 function fail34(LedgerError $e): never
 {
@@ -284,7 +284,7 @@ try {
         if ($action === 'purchase-cancel') {
             $requestId = $m['requestId'] ?? null;
             if (!is_string($requestId) || !preg_match('/^[a-f0-9]{32,64}$/D', $requestId)) reply34(400, ['ok' => false, 'error' => 'Invalid requestId']);
-            purchase_cancel($db, $gold, $coinId, $requestId, $node);
+            purchase_cancel($db, $gold, $coinId, $requestId, $node, $coin['mode'] === 'multi' ? $send : null);
             reply34(200, ['ok' => true]);
         }
         reply34(200, ['ok' => true, 'results' => purchase_recover($db, $node, $gold, ledger_treasury_key_load($private, $coinId), $coinId, $coin['mode'] === 'multi' ? $send : null, $now)]);

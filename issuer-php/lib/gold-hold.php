@@ -337,11 +337,16 @@ function atlas_hold_finalize($kp, $credId, $requestId, $holdId, $now) {
     }
 }
 
-// What a ledger domain signs when it has closed a sale: no entry delivers the request, the pending transfer was rejected, and the
-// request can no longer be delivered. {payload: {type, v, domain, coinId, requestId, credentialId, price, headIndex, headHash,
-// closedAt}, signature} with the domain's key (DER, base64url, over the canonical payload). Returns a reason, or null.
+// What the ledger gives to end a hold whose delivery was begun. The authority's own statement is not enough: the authority could be the
+// one that is lying. So the closure also carries a witness from the other domains of the coin, enough of them that the entry can no
+// longer be committed: a partner witnesses only if it never approved an entry for the request, and it approves nothing for it afterwards.
+//   closure = {payload: {type: 'atlas.ledger.purchase.closure', v: 1, domain, coinId, requestId, credentialId, price, headIndex, headHash, closedAt},
+//              signature, witnesses: [{payload: {type: 'atlas.ledger.purchase.witness', v: 1, domain, authority, coinId, requestId, credentialId,
+//              price, genesisDigest, roster: [domains], threshold, closedAt}, signature}]}
+// Signatures are the domains' DER ECDSA over the canonical payload, checked against the keys in ledgerAuthorities. A coin of one domain has
+// no one to witness, so a begun sale of such a coin is never cancelled this way. Returns a reason, or null.
 function atlas_hold_closure_problem($closure, $rec, $now) {
-    if (!is_array($closure) || !is_array($closure['payload'] ?? null) || !is_string($closure['signature'] ?? null)) return 'no closure was given';
+    if (!is_array($closure) || !is_array($closure['payload'] ?? null) || !is_string($closure['signature'] ?? null) || !is_array($closure['witnesses'] ?? null)) return 'no closure was given';
     $p = $closure['payload'];
     $keys = array_keys($p);
     sort($keys);
@@ -354,6 +359,38 @@ function atlas_hold_closure_problem($closure, $rec, $now) {
     if ($at === false || $at < $now - 900 || $at > $now + 60) return 'the closure is not recent';
     $sig = b64url_decode($closure['signature']);
     if (!is_string($sig) || !ecdsa_verify_der($authorities[$p['domain']], $sig, canonicalize($p))) return 'the closure is not signed by that ledger domain';
+    $witnesses = $closure['witnesses'];
+    if (count($witnesses) < 1 || count($witnesses) > 8) return 'no other domain witnessed the closure';
+    $seen = [];
+    $genesis = null;
+    foreach ($witnesses as $w) {
+        $wp = is_array($w) ? ($w['payload'] ?? null) : null;
+        if (!is_array($wp) || !is_string($w['signature'] ?? null)) return 'a witness is malformed';
+        $wk = array_keys($wp);
+        sort($wk);
+        if ($wk !== ['authority', 'closedAt', 'coinId', 'credentialId', 'domain', 'genesisDigest', 'price', 'requestId', 'roster', 'threshold', 'type', 'v']) return 'a witness has the wrong fields';
+        if ($wp['type'] !== 'atlas.ledger.purchase.witness' || $wp['v'] !== 1) return 'a witness is not a ledger witness';
+        if (!is_string($wp['domain']) || !isset($authorities[$wp['domain']])) return 'a witness is from a domain this issuer does not trust';
+        if ($wp['domain'] === $p['domain'] || isset($seen[$wp['domain']])) return 'a domain witnessed twice, or the authority witnessed for itself';
+        if ($wp['authority'] !== $p['domain']) return 'a witness names another authority';
+        if ($wp['coinId'] !== $rec['coinId'] || $wp['requestId'] !== $rec['requestId'] || $wp['credentialId'] !== $rec['credentialId'] || $wp['price'] !== $rec['price']) return 'a witness is for another sale';
+        if (!is_array($wp['roster']) || !array_is_list($wp['roster']) || count($wp['roster']) > 5 || count(array_unique(array_filter($wp['roster'], 'is_string'))) !== count($wp['roster']) || !in_array($p['domain'], $wp['roster'], true) || !in_array($wp['domain'], $wp['roster'], true)) return 'a witness names a roster without both domains';
+        if (!is_int($wp['threshold']) || $wp['threshold'] < 2 || $wp['threshold'] > count($wp['roster'])) return 'a witness names an impossible threshold';
+        if (!is_string($wp['genesisDigest']) || !preg_match('/^[a-f0-9]{64}$/D', $wp['genesisDigest'])) return 'a witness names no genesis';
+        $wat = is_string($wp['closedAt']) && preg_match('/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/D', $wp['closedAt']) ? strtotime($wp['closedAt']) : false;
+        if ($wat === false || $wat > $now + 60) return 'a witness is dated in the future';
+        $wsig = b64url_decode($w['signature']);
+        if (!is_string($wsig) || !ecdsa_verify_der($authorities[$wp['domain']], $wsig, canonicalize($wp))) return 'a witness is not signed by its domain';
+        $shape = canonicalize([$wp['genesisDigest'], $wp['roster'], $wp['threshold']]);
+        if ($genesis === null) $genesis = $shape;
+        elseif ($genesis !== $shape) return 'the witnesses do not describe the same coin';
+        $seen[$wp['domain']] = true;
+    }
+    // The authority and this many partners can still commit unless enough partners witnessed: all but (threshold - 2) of them.
+    $first = $witnesses[0]['payload'];
+    $partners = count($first['roster']) - 1;
+    $needed = $partners - $first['threshold'] + 2;
+    if (count($seen) < $needed) return 'only ' . count($seen) . ' of the ' . $needed . ' domains that must witness did';
     return null;
 }
 

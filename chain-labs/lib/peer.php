@@ -74,6 +74,7 @@ function peer_handle(PDO $db, array $node, array $envelope, int $now, callable $
         'notify' => peer_on_notify($db, $node, $from, $body, $now, $send),
         'head' => peer_on_head($db, $node, $from, $body, $now),
         'freeze' => peer_on_freeze($db, $node, $from, $body, $now, $send),
+        'close-sale' => peer_on_close_sale($db, $node, $from, $body, $now, $send),
         default => ledger_fail('unknown-action', 'unknown peer action'),
     };
 }
@@ -242,12 +243,25 @@ function peer_on_approve(PDO $db, array $node, string $from, array $body, int $n
     peer_catch_up($db, $node, $coinId, $send, $now);
     peer_compare_heads($db, $node, $coinId, $send, $now);
     $checked = ledger_validate_prepared($db, $coinId, $prepared, $now);
+    $saleId = $checked['public']['purchase']['requestId'] ?? null;
+    if ($saleId !== null) {
+        $closedSale = $db->prepare('SELECT 1 FROM ledger_closed_sales WHERE coin_id=? AND request_id=?');
+        $closedSale->execute([$coinId, $saleId]);
+        if ($closedSale->fetchColumn() !== false) ledger_fail('sale-closed', 'this sale was closed; this domain approves nothing for it');
+    }
     purchase_check_entry($node['gold'] ?? null, $coin, $checked['public'], $checked['private'], $now);
     $index = $checked['public']['index'];
     $hash = $checked['hash'];
     $at = strtotime($checked['public']['executedAt']);
+    $requestId = $checked['public']['purchase']['requestId'] ?? null;
     $db->exec('BEGIN IMMEDIATE');
     try {
+        if ($requestId !== null) {
+            $closed = $db->prepare('SELECT 1 FROM ledger_closed_sales WHERE coin_id=? AND request_id=?');
+            $closed->execute([$coinId, $requestId]);
+            if ($closed->fetchColumn() !== false) ledger_fail('sale-closed', 'this sale was closed; this domain approves nothing for it');
+            $db->prepare('INSERT OR IGNORE INTO ledger_purchase_approvals(coin_id,request_id,idx,hash) VALUES(?,?,?,?)')->execute([$coinId, $requestId, $index, $hash]);
+        }
         $prior = $db->prepare('SELECT hash,executed_at FROM ledger_approved WHERE coin_id=? AND idx=?');
         $prior->execute([$coinId, $index]);
         $row = $prior->fetch(PDO::FETCH_ASSOC);
@@ -261,6 +275,47 @@ function peer_on_approve(PDO $db, array $node, string $from, array $body, int $n
         throw $e;
     }
     return ['decision' => 'approve', 'domain' => $node['domain'], 'signature' => ledger_sign($node['private'], ledger_approval_bytes($coinId, $index, $hash))];
+}
+
+// The authority asks a roster domain to witness that a sale is closed: this domain never approved an entry for the request and now
+// never will. That is what lets the code holding the price credential free it after delivery was begun without taking the
+// authority's word. Refused when this domain approved an entry for the request at any time (the authority may have committed it),
+// or already has one in its own log. The record that closes the request and the check are one transaction with the approvals.
+function peer_on_close_sale(PDO $db, array $node, string $from, array $body, int $now, callable $send): array
+{
+    $coinId = $body['coinId'] ?? null;
+    $requestId = $body['requestId'] ?? null;
+    $credentialId = $body['credentialId'] ?? null;
+    $price = $body['price'] ?? null;
+    if (!is_string($coinId) || !preg_match('/^[a-f0-9]{32}$/D', $coinId) || !is_string($requestId) || !preg_match('/^[a-f0-9]{32,64}$/D', $requestId)
+        || !is_string($credentialId) || $credentialId === '' || strlen($credentialId) > 200 || !is_int($price) || $price < 1) ledger_fail('bad-request', 'a coin, a request, a credential and a price are needed');
+    $coin = ledger_coin($db, $coinId);
+    $genesis = $coin['genesis'];
+    if ($genesis['authority'] !== $from) ledger_fail('not-authority', 'only the authority closes a sale');
+    if (ledger_roster_key($genesis, $node['domain']) === null) ledger_fail('not-in-roster', 'this domain is not in the roster');
+    if (!is_array($genesis['purchase'] ?? null)) ledger_fail('no-purchase-policy', 'this coin is not for sale');
+    try {
+        peer_catch_up($db, $node, $coinId, $send, $now);
+    } catch (LedgerError $e) {
+        // A copy that cannot be brought up to date does not change the check below, which rests on what this domain itself approved.
+    }
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        if (ledger_request_entry($db, $coinId, $requestId) !== null) ledger_fail('cannot-close', 'an entry for this request is in this domain\'s log');
+        $approved = $db->prepare('SELECT COUNT(*) FROM ledger_purchase_approvals WHERE coin_id=? AND request_id=?');
+        $approved->execute([$coinId, $requestId]);
+        if ((int) $approved->fetchColumn() > 0) ledger_fail('cannot-close', 'this domain approved an entry for this request, which may have been committed');
+        $db->prepare('INSERT OR IGNORE INTO ledger_closed_sales(coin_id,request_id,closed_at) VALUES(?,?,?)')->execute([$coinId, $requestId, $now]);
+        $db->exec('COMMIT');
+    } catch (Throwable $e) {
+        ledger_rollback($db);
+        throw $e;
+    }
+    $domains = array_map(static fn(array $m): string => (string) $m['domain'], $genesis['roster']);
+    sort($domains);
+    $payload = ['type' => 'atlas.ledger.purchase.witness', 'v' => 1, 'domain' => $node['domain'], 'authority' => $genesis['authority'], 'coinId' => $coinId, 'requestId' => $requestId,
+        'credentialId' => $credentialId, 'price' => $price, 'genesisDigest' => $coin['genesis_digest'], 'roster' => $domains, 'threshold' => (int) $coin['threshold'], 'closedAt' => gmdate('Y-m-d\TH:i:s\Z', $now)];
+    return ['payload' => $payload, 'signature' => ledger_sign($node['private'], ledger_canonical($payload))];
 }
 
 // The authority asks the roster domains it has no approval from yet. Returns [approvals, refusals by domain]. Asking stops

@@ -38,7 +38,7 @@ const crashed = (r) => r.status === 0 || (r.status === 200 && r.json === null);
   const issuer = await startPhp(8961 + Math.floor(Math.random() * 100), { workers: 0 });
   const IA = api(issuer);
   const issuerKey = JSON.parse(fs.readFileSync(issuer.keyFile, 'utf8')).keys[0].publicKey;
-  fs.writeFileSync(path.join(issuer.bundle, 'lib', 'atlas-gold-hold-config.json'), JSON.stringify({ enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: { [A]: nodes[A].pair.publicKey.export({ type: 'spki', format: 'pem' }) } }));
+  fs.writeFileSync(path.join(issuer.bundle, 'lib', 'atlas-gold-hold-config.json'), JSON.stringify({ enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: { [A]: nodes[A].pair.publicKey.export({ type: 'spki', format: 'pem' }), [B]: nodes[B].pair.publicKey.export({ type: 'spki', format: 'pem' }) } }));
   const holdsPath = path.join(issuer.bundle, 'lib', 'holds', 'holds.json');
   const holds = () => { try { return JSON.parse(fs.readFileSync(holdsPath, 'utf8')).holds; } catch (e) { return {}; } };
   const holdOf = (cred) => holds()[cred.id];
@@ -306,6 +306,54 @@ const crashed = (r) => r.status === 0 || (r.status === 200 && r.json === null);
       line(fake.status === 409 && holdOf(g3).state === 'delivering', 'a closure signed with another domain\'s key is refused', fake);
       fs.rmSync(path.join(b.priv, 'issuer-key-override.txt'));
       await op(a, 'purchase-cancel', { coinId: osc.id, requestId: stuck3.requestId });
+    }
+
+    console.log('\n== the partner witnesses that a begun sale is closed');
+    {
+      const { execFileSync } = require('child_process');
+      const bdb = (sql, args = []) => JSON.parse(execFileSync('php', ['-r', '$d=new PDO("sqlite:"."' + path.join(b.priv, 'chain34.sqlite') + '");$s=$d->prepare($argv[1]);$s->execute(array_slice($argv,2));echo json_encode($s->columnCount()?$s->fetchAll(PDO::FETCH_ASSOC):[]);', sql, ...args]).toString());
+      const wd = wallet();
+      const sold = await buy(a, wd, osc.id, await mint(wd, 100), 20);
+      line(sold.res.status === 201 && bdb('SELECT COUNT(*) AS c FROM ledger_purchase_approvals WHERE request_id=?', [sold.requestId])[0].c === 1, 'a delivered sale leaves a record of the entry the partner approved for it', sold.res.status);
+      const w = wallet();
+      const g = await mint(w, 100);
+      fs.writeFileSync(path.join(b.priv, 'issuer-key-override.txt'), issuerKey.slice(0, -2) + 'AA');
+      const stuck = await buy(a, w, osc.id, g, 20);
+      line(stuck.res.status !== 201 && holdOf(g).state === 'delivering' && bdb('SELECT COUNT(*) AS c FROM ledger_purchase_approvals WHERE request_id=?', [stuck.requestId])[0].c === 0, 'a begun sale the partner refused to approve: the Gold is held, delivering, and the partner approved nothing', stuck.res.status);
+
+      // A compromised authority signs a closure itself and tells the issuer nobody else needs to agree.
+      const claim = { type: 'atlas.ledger.purchase.closure', v: 1, domain: A, coinId: osc.id, requestId: stuck.requestId, credentialId: g.id, price: 20, headIndex: 0, headHash: '0'.repeat(64), closedAt: iso(NOW()) };
+      const alone = { payload: claim, signature: crypto.sign('sha256', Buffer.from(canon(claim)), nodes[A].pair.privateKey).toString('base64url'), witnesses: [] };
+      const forged = await holdCall({ action: 'cancel', credentialId: g.id, requestId: stuck.requestId, holdId: holdIdOf(g.id, stuck.requestId), closure: alone });
+      line(forged.status === 409 && forged.body.code === 'closure-required' && holdOf(g).state === 'delivering', 'the authority\'s own signed closure, without its partner, frees nothing', forged);
+
+      // The partner did approve an entry for this request (which the authority could have committed): it will not witness, and the sale is not cancelled.
+      bdb('INSERT INTO ledger_purchase_approvals(coin_id,request_id,idx,hash) VALUES(?,?,?,?)', [osc.id, stuck.requestId, 9, 'd'.repeat(64)]);
+      const refusedByPartner = await op(a, 'purchase-cancel', { coinId: osc.id, requestId: stuck.requestId });
+      line(refusedByPartner.status === 409 && refusedByPartner.json.code === 'cannot-cancel' && holdOf(g).state === 'delivering' && bdb('SELECT COUNT(*) AS c FROM ledger_closed_sales WHERE request_id=?', [stuck.requestId])[0].c === 0,
+        'a partner that approved an entry for the request will not witness: the sale is not cancelled and the Gold stays held', refusedByPartner);
+      bdb('DELETE FROM ledger_purchase_approvals WHERE request_id=?', [stuck.requestId]);
+
+      // The partner cannot be reached: the cancel waits, it does not fall back to the authority's word.
+      await stop(b);
+      const waiting = await op(a, 'purchase-cancel', { coinId: osc.id, requestId: stuck.requestId });
+      line(waiting.status !== 200 && holdOf(g).state === 'delivering', 'with the partner down the sale cannot be closed and the Gold stays held', waiting);
+      await start(b);
+
+      const closed = await op(a, 'purchase-cancel', { coinId: osc.id, requestId: stuck.requestId });
+      const h = holdOf(g);
+      line(closed.status === 200 && h.state === 'cancelled' && h.closure.witnesses.length === 1 && h.closure.witnesses[0].payload.domain === B && h.closure.witnesses[0].payload.requestId === stuck.requestId,
+        'with the partner back it witnesses and the hold is cancelled; the hold keeps the witness', [closed, h && h.closure && h.closure.witnesses]);
+      line(bdb('SELECT COUNT(*) AS c FROM ledger_closed_sales WHERE request_id=?', [stuck.requestId])[0].c === 1, 'the partner recorded the request as closed');
+
+      // The closed request is never approved again, whatever the authority's own adapter says.
+      fs.rmSync(path.join(b.priv, 'issuer-key-override.txt'));
+      fs.writeFileSync(path.join(a.priv, 'rogue-mode.txt'), 'nolockbegin');
+      const again = await buy(a, w, osc.id, g, 20, { requestId: stuck.requestId, intent: stuck.intent });
+      line(again.res.status !== 201 && /sale-closed/.test(JSON.stringify(again.res.json)) && await units(a, w, osc.id) === '0', 'the same request tried again is refused by the partner as closed, even though the authority no longer holds anything', again.res);
+      await op(a, 'purchase-cancel', { coinId: osc.id, requestId: stuck.requestId });
+      fs.rmSync(path.join(a.priv, 'rogue-mode.txt'), { force: true });
+      line((await trySplit(g, w)).status === 200, 'the owner can spend the Gold');
     }
 
     console.log('\n== the operator\'s token is not the owner');

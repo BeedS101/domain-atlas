@@ -160,6 +160,9 @@ function ledger_schema(PDO $db): void
         credential_json TEXT NOT NULL, proposal_digest TEXT, entry_index INTEGER, result_json TEXT, reason TEXT, created_at INTEGER NOT NULL,
         PRIMARY KEY(coin_id,request_id))");
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_requests(coin_id TEXT NOT NULL, request_id TEXT NOT NULL, idx INTEGER NOT NULL, to_key TEXT NOT NULL, units INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(coin_id,request_id))');
+    // A roster domain's record of the purchase requests it approved an entry for, and of those it has closed: a closed request is never approved.
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_purchase_approvals(coin_id TEXT NOT NULL, request_id TEXT NOT NULL, idx INTEGER NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(coin_id,request_id,idx))');
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_closed_sales(coin_id TEXT NOT NULL, request_id TEXT NOT NULL, closed_at INTEGER NOT NULL, PRIMARY KEY(coin_id,request_id))');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT, coin_id TEXT NOT NULL, kind TEXT NOT NULL, detail_json TEXT NOT NULL, created_at INTEGER NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_peer_nonces(sender TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(sender,nonce))');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_challenges(challenge TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0)');

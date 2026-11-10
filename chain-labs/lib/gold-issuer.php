@@ -12,8 +12,10 @@ declare(strict_types=1);
 //            wallet signed it, signature and key re-labelled for the issuer's envelope, not re-signed).
 //   begin    tells the issuer that delivery is about to be tried; from there the hold no longer lapses.
 //   finish   asks the issuer to spend the held credential: the price is burned and the rest goes back to the owner.
-//   release  asks the issuer to free the hold. After delivery was begun the issuer frees it only against the closure this ledger signs
-//            (lib/purchase.php purchase_closure) and that the issuer's own configuration trusts; the token alone cannot.
+//   release  asks the issuer to free the hold. A hold whose delivery was never begun is freed at once. After delivery was begun the issuer
+//            frees it only against the ledger's closure (lib/purchase.php purchase_closure): the authority's signed statement plus the
+//            witnesses of the other domains, all of which the issuer's own configuration must trust; the token alone cannot. The
+//            closure is made only when the issuer asks for it.
 //   holding  every domain that approves a sale asks the issuer, not the authority, for its signed status of the hold (public, read-only,
 //            answered only to someone who knows the request id) and approves only if it says this credential is held for exactly this
 //            sale: same coin, price, receiving key, owner and signed intent, and delivering or already spent.
@@ -177,8 +179,10 @@ function gold_issuer_adapter(array $config): array
             $remainder = $body['result']['balance']['credential'] ?? null;
             return ['balance' => is_array($remainder) ? gold_issuer_pack($remainder) : null];
         },
-        'release' => static function (string $requestId, string $credentialId = '', ?array $closure = null) use ($hold, $holdId): void {
-            [$status, $body] = $hold(['action' => 'cancel', 'requestId' => $requestId, 'credentialId' => $credentialId, 'holdId' => $holdId($credentialId, $requestId), 'closure' => $closure]);
+        'release' => static function (string $requestId, string $credentialId = '', ?callable $closure = null) use ($hold, $holdId, $code): void {
+            $ask = static fn(?array $c): array => $hold(['action' => 'cancel', 'requestId' => $requestId, 'credentialId' => $credentialId, 'holdId' => $holdId($credentialId, $requestId), 'closure' => $c]);
+            [$status, $body] = $ask(null);
+            if ($status === 409 && $code($body) === 'closure-required' && $closure !== null) [$status, $body] = $ask($closure());
             if ($status !== 200) ledger_fail('busy', 'the issuer could not free the hold yet');
         },
         'holding' => static function (string $requestId, array $held, array $intent, int $now) use ($http, $base, $timeout, $domain, $issuerKey): ?string {

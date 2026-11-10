@@ -30,11 +30,18 @@ const LEDGER = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const OTHER_LEDGER = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const LEDGER_DOMAIN = 'ledger.example';
 const canon = (v) => Array.isArray(v) ? '[' + v.map(canon).join(',') + ']' : (v && typeof v === 'object') ? '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}' : JSON.stringify(v);
-const authorities = () => ({ [LEDGER_DOMAIN]: LEDGER.publicKey.export({ type: 'spki', format: 'pem' }) });
-const closureFor = (cred, intent, over, key) => {
-  const payload = { type: 'atlas.ledger.purchase.closure', v: 1, domain: LEDGER_DOMAIN, coinId: intent.payload.coinId, requestId: intent.payload.requestId, credentialId: cred.id, price: intent.payload.price,
-    headIndex: 3, headHash: 'f'.repeat(64), closedAt: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), ...(over || {}) };
-  return { payload, signature: crypto.sign('sha256', Buffer.from(canon(payload)), (key || LEDGER).privateKey).toString('base64url') };
+const PARTNER = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+const PARTNER_DOMAIN = 'partner.example';
+const authorities = () => ({ [LEDGER_DOMAIN]: LEDGER.publicKey.export({ type: 'spki', format: 'pem' }), [PARTNER_DOMAIN]: PARTNER.publicKey.export({ type: 'spki', format: 'pem' }) });
+const signed = (payload, key) => ({ payload, signature: crypto.sign('sha256', Buffer.from(canon(payload)), key.privateKey).toString('base64url') });
+const stamp = (t) => new Date((t === undefined ? Date.now() : t) * (t === undefined ? 1 : 1000)).toISOString().replace(/\.\d+Z$/, 'Z');
+// What a partner domain signs when it witnesses that it never approved an entry for the request and now never will.
+const witnessFor = (cred, intent, over, key) => signed({ type: 'atlas.ledger.purchase.witness', v: 1, domain: PARTNER_DOMAIN, authority: LEDGER_DOMAIN, coinId: intent.payload.coinId, requestId: intent.payload.requestId,
+  credentialId: cred.id, price: intent.payload.price, genesisDigest: 'a'.repeat(64), roster: [LEDGER_DOMAIN, PARTNER_DOMAIN], threshold: 2, closedAt: stamp(), ...(over || {}) }, key || PARTNER);
+const closureFor = (cred, intent, over, key, witnesses) => {
+  const c = signed({ type: 'atlas.ledger.purchase.closure', v: 1, domain: LEDGER_DOMAIN, coinId: intent.payload.coinId, requestId: intent.payload.requestId, credentialId: cred.id, price: intent.payload.price,
+    headIndex: 3, headHash: 'f'.repeat(64), closedAt: stamp(), ...(over || {}) }, key || LEDGER);
+  return { ...c, witnesses: witnesses === undefined ? [witnessFor(cred, intent)] : witnesses };
 };
 const holdId = (credId, rid) => crypto.createHash('sha256').update('atlas-gold-hold|' + credId + '|' + rid).digest('hex').slice(0, 32);
 
@@ -277,6 +284,23 @@ async function setup(be) {
       ['with a field changed after signing', (() => { const c = closureFor(g6, i6); c.payload.headIndex = 4; return c; })()],
       ['with a broken signature', (() => { const c = closureFor(g6, i6); c.signature = 'AAAA' + c.signature.slice(4); return c; })()],
       ['that is not an object', 'closed'],
+      ['from the authority alone, with no witness', closureFor(g6, i6, {}, null, [])],
+      ['whose witness is the authority itself', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { domain: LEDGER_DOMAIN }, LEDGER)])],
+      ['whose witness is signed with another key', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, {}, OTHER_LEDGER)])],
+      ['whose witness is from a domain the issuer does not list', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { domain: 'stranger.example', roster: [LEDGER_DOMAIN, 'stranger.example'] })])],
+      ['whose witness is for another request', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { requestId: hex(16) })])],
+      ['whose witness is for another credential', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { credentialId: 'x' + g6.id })])],
+      ['whose witness is for another price', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { price: 19 })])],
+      ['whose witness names another authority', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { authority: PARTNER_DOMAIN })])],
+      ['whose witness names a roster without the authority', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { roster: [PARTNER_DOMAIN, 'c.example'] })])],
+      ['whose witness names a threshold of one', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { threshold: 1 })])],
+      ['whose witness is dated in the future', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { closedAt: stamp(now() + 900) })])],
+      ['whose witness has a field added', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { extra: 1 })])],
+      ['whose witness repeats a domain in the roster', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { roster: [LEDGER_DOMAIN, PARTNER_DOMAIN, PARTNER_DOMAIN] })])],
+      ['whose one witness is not enough for a coin of three domains needing two', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { roster: [LEDGER_DOMAIN, PARTNER_DOMAIN, 'c.example'] })])],
+      ['whose witnesses describe different coins', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { roster: [LEDGER_DOMAIN, PARTNER_DOMAIN, 'c.example'] }), witnessFor(g6, i6, { domain: LEDGER_DOMAIN, authority: LEDGER_DOMAIN })])],
+      ['whose witness was changed after signing', (() => { const c = closureFor(g6, i6); c.witnesses[0].payload.threshold = 3; return c; })()],
+      ['with the witness repeated', closureFor(g6, i6, {}, null, [witnessFor(g6, i6), witnessFor(g6, i6)])],
     ];
     for (const [name, closure] of badClosures) {
       r = await act(be, 'cancel', g6, i6, { closure });
@@ -291,6 +315,17 @@ async function setup(be) {
     config(be, { enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: authorities() });
     r = await raw(be, { action: 'cancel', ...ref(g6, i6, holdId(g6.id, i6.payload.requestId)), closure: closureFor(g6, i6) }, 'z'.repeat(48));
     line(r.status === 401, 'a closure does not stand in for the token', r);
+    // Three domains need two witnesses: with only the authority and one partner left, the others could still commit.
+    const C_DOMAIN = 'c.example';
+    const C = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    config(be, { enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: { ...authorities(), [C_DOMAIN]: C.publicKey.export({ type: 'spki', format: 'pem' }) } });
+    const three = { roster: [LEDGER_DOMAIN, PARTNER_DOMAIN, C_DOMAIN], threshold: 2 };
+    r = await act(be, 'cancel', g6, i6, { closure: closureFor(g6, i6, {}, null, [witnessFor(g6, i6, three)]) });
+    line(r.status === 409 && r.body.code === 'closure-required' && /1 of the 2/.test(r.body.error), 'in a coin of three domains with two needed, one witness does not cancel it', r);
+    r = await act(be, 'cancel', g6, i6, { closure: closureFor(g6, i6, {}, null, [witnessFor(g6, i6, three), witnessFor(g6, i6, { ...three, domain: C_DOMAIN }, C)]) });
+    line(r.status === 200 && r.body.hold.state === 'cancelled', 'two witnesses do', r);
+    editHolds(be, (h) => { h[g6.id].state = 'delivering'; delete h[g6.id].cancelledAt; delete h[g6.id].closure; });
+    config(be, { enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: authorities() });
     const good = closureFor(g6, i6);
     r = await act(be, 'cancel', g6, i6, { closure: good });
     line(r.status === 200 && r.body.hold.state === 'cancelled' && JSON.stringify(readHolds(be)[g6.id].closure) === JSON.stringify(good), 'a closure signed by the trusted ledger for this sale cancels it, and is kept in the record', r);
