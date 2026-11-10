@@ -327,6 +327,7 @@ function peer_collect_approvals(PDO $db, array $node, string $coinId, array $pre
     $have = [];
     foreach ($approvals as $a) $have[$a['domain']] = true;
     $refused = [];
+    $detail = [];
     foreach ($coin['genesis']['roster'] as $member) {
         if (count($approvals) >= $needed) break;
         $domain = $member['domain'];
@@ -341,9 +342,11 @@ function peer_collect_approvals(PDO $db, array $node, string $coinId, array $pre
             $approvals[] = ['domain' => $domain, 'signature' => $signature];
         } catch (LedgerError $e) {
             $refused[$domain] = $e->reason;
+            // The other domain's own words are kept beside its code, so an operator can see what it is waiting on.
+            $detail[$domain] = substr(trim((string) preg_replace('/\\s+/', ' ', $e->getMessage())), 0, 160);
         }
     }
-    return [$approvals, $refused];
+    return [$approvals, $refused, $detail];
 }
 
 // ---------- executing on a multi authority coin ----------
@@ -394,7 +397,7 @@ function peer_execute(PDO $db, array $node, string $coinId, string $digest, call
                 peer_store_entry($db, $coinId, $digest, $prepared, $approvals);
             }
             if (count($approvals) < $needed) {
-                [$approvals, $refused] = peer_collect_approvals($db, $node, $coinId, $prepared, $approvals, $send, $now);
+                [$approvals, $refused, $detail] = peer_collect_approvals($db, $node, $coinId, $prepared, $approvals, $send, $now);
                 peer_store_entry($db, $coinId, $digest, $prepared, $approvals);
                 if (count($approvals) < $needed) {
                     // Partners that refuse because another entry for this index is being approved, or because the head has
@@ -405,7 +408,7 @@ function peer_execute(PDO $db, array $node, string $coinId, string $digest, call
                         usleep(random_int(20000, 60000) * min($attempt + 1, 4));
                         continue;
                     }
-                    ledger_fail('not-enough-approvals', 'the entry has ' . (count($approvals) + 1) . ' of ' . $coin['threshold'] . ' approvals' . ($refused ? '; refused by ' . implode(', ', array_map(fn($d, $r) => $d . ' (' . $r . ')', array_keys($refused), $refused)) : ''));
+                    ledger_fail('not-enough-approvals', 'the entry has ' . (count($approvals) + 1) . ' of ' . $coin['threshold'] . ' approvals' . ($refused ? '; refused by ' . implode(', ', array_map(fn($d, $r) => $d . ' (' . $r . (($detail[$d] ?? '') !== '' && $r !== 'bad-approval' ? ': ' . $detail[$d] : '') . ')', array_keys($refused), $refused)) : ''));
                 }
             }
             $done = ledger_commit($db, $coinId, $prepared, ledger_sign($node['private'], $prepared['hash']), $approvals, $clock);

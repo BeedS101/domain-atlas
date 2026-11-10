@@ -69,10 +69,30 @@ function gold_issuer_asset_payload(array $c): array
 }
 
 // Plain HTTP exchange for the adapter, replaceable in tests. Returns [status, decoded body or null]; status 0 when the issuer cannot be reached.
+// cURL is used when the host has it, since many hosts switch off allow_url_fopen; a request always names itself, because a host in front
+// of the issuer may turn away a request that sends no User-Agent.
 function gold_issuer_http(string $method, string $url, ?array $body, ?string $token, int $timeout): array
 {
-    $headers = "Accept: application/json\r\n" . ($body !== null ? "Content-Type: application/json\r\n" : '') . ($token !== null ? 'Authorization: Bearer ' . $token . "\r\n" : '');
-    $context = stream_context_create(['http' => ['method' => $method, 'header' => $headers, 'content' => $body === null ? '' : json_encode($body, JSON_UNESCAPED_SLASHES),
+    $headers = ['Accept: application/json', 'User-Agent: domain-atlas-chainlabs/1'];
+    if ($body !== null) $headers[] = 'Content-Type: application/json';
+    if ($token !== null) $headers[] = 'Authorization: Bearer ' . $token;
+    $content = $body === null ? '' : json_encode($body, JSON_UNESCAPED_SLASHES);
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_CUSTOMREQUEST => $method, CURLOPT_HTTPHEADER => $headers, CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_CONNECTTIMEOUT => min(5, $timeout), CURLOPT_TIMEOUT => $timeout, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_PROTOCOLS => CURLPROTO_HTTPS | CURLPROTO_HTTP,
+        ]);
+        if ($body !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, $content);
+        $text = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        if ($text === false || $status === 0) return [0, null];
+        $decoded = json_decode((string) $text, true);
+        return [$status, is_array($decoded) ? $decoded : null];
+    }
+    $context = stream_context_create(['http' => ['method' => $method, 'header' => implode("\r\n", $headers) . "\r\n", 'content' => $content,
         'timeout' => $timeout, 'ignore_errors' => true, 'follow_location' => 0]]);
     $text = @file_get_contents($url, false, $context);
     if ($text === false) return [0, null];
@@ -201,7 +221,7 @@ function gold_issuer_adapter(array $config): array
             $query = http_build_query(['credentialId' => $credential['id'], 'requestId' => $requestId]);
             [$status, $body] = $http('GET', $base . '/atlas/ledger/gold-hold-status?' . $query, null, null, $timeout);
             if ($status === 404) return 'the issuer holds no Gold for this sale';
-            if ($status !== 200 || !is_array($body['attestation'] ?? null)) ledger_fail('busy', 'the issuer\'s hold status cannot be read yet');
+            if ($status !== 200 || !is_array($body['attestation'] ?? null)) ledger_fail('busy', 'the issuer\'s hold status cannot be read yet (' . ($status === 0 ? 'no answer from the issuer' : 'HTTP ' . $status) . ')');
             $a = $body['attestation'];
             $p = $a['payload'] ?? null;
             if (!is_array($p) || !is_string($a['signature'] ?? null)) return 'the issuer\'s hold status is malformed';
