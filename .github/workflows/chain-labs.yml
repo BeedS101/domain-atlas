@@ -26,7 +26,10 @@ on:
       - '.github/workflows/chain-labs.yml'
       - 'test/chain-labs-gold-issuer-http.js'
       - 'issuer-php/lib/gold-hold.php'
+      - 'issuer-php/lib/replacement.php'
       - 'issuer-php/lib/store.php'
+      - 'issuer-php/atlas/ledger/gold-hold.php'
+      - 'test/lib/**'
   pull_request:
     paths:
       - 'chain-labs/**'
@@ -50,7 +53,11 @@ on:
       - '.github/workflows/chain-labs.yml'
       - 'test/chain-labs-gold-issuer-http.js'
       - 'issuer-php/lib/gold-hold.php'
+      - 'issuer-php/lib/replacement.php'
       - 'issuer-php/lib/store.php'
+      - 'issuer-php/atlas/ledger/gold-hold.php'
+      - 'test/lib/**'
+
 permissions:
   contents: read
 
