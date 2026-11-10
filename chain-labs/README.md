@@ -13,7 +13,7 @@ here is a demonstration with no monetary value.
 | 19, 20 | `federation.html`, `federation.php`, `federation20.html`, `federation20.php` | Two domains exchange signed ping messages. |
 | 21, 22, 23 | `events21.*`, `events22.*`, `compare23.*` | Signed demo events, offline catch-up, and signed state-commitment comparison. No balances move. |
 | 25 | `supply25.*` | Read-only audit of each domain's own TEST-GOLD ledger. |
-| 26 | `coin26.*` | Coin registry. A coin is registered on one domain only. It is created as single or multi authority and as a public or private ledger; a multi coin names its partner domains and threshold and stays pending until they sign. |
+| 26 | `coin26.*` | Coin registry. A coin is registered on one domain only. It is created as single or multi authority and as a public or private ledger; a multi coin names its partner domains and threshold and stays pending until they sign. Registering a coin does not open a ledger for it: the registry is `coin26.sqlite` and the ledger is `chain34.sqlite`, both in the private folder, and an operator opens a registered coin with the `open` route of `spend34.php`. The page lists where each coin stands on the ledger and has the operator buttons for it: open (or finish opening) a coin, and grant units from the treasury of an open one. |
 | 27, 28 | `index.html`, `market27.*`, `market-login28.php` | Read-only coin directory aggregating both registries; wallet login for it. |
 | 29 | `ledger29.php` | Read-only signed balance query. |
 | 30, 31 | `account30.php`, `accounts31.php` | Signed zero-balance account opening and account discovery. |
@@ -103,6 +103,13 @@ private folder) and the page checks every statement's signature itself. The scan
 authority; it shows this domain's copy, and the domains page shows how far each other domain is. Limits per address are left to
 the web server in front of it.
 
+Opening a registered coin: the operator calls `open` on the authority domain with the operator token (the studio page has the
+button). The coin is opened once; a second call is refused, and a multi coin that stopped because a partner did not answer is
+finished by the same call, which asks only the domains that have not signed. A multi coin is open only when every roster
+domain has signed its genesis. A partner needs the authority's key pinned (`chainlabs-peers.json` in its private folder, or
+`peer_public_pem_b64` of its federation configuration for the two-domain pair) and the authority needs the partner's; `open`
+names a partner with no pinned key. Nothing is minted into any wallet: a key holds units only after a `grant` from the treasury.
+
 Every commit runs in one `BEGIN IMMEDIATE` transaction that re-checks the entry index, previous hash, signatures, nonce,
 sequence number and balance, so concurrent commits of one index have exactly one winner. Amounts are decimal strings of
 whole units, at most 10^12. The `lib` folder must be uploaded with the PHP files; the library refuses a direct request.
@@ -134,3 +141,4 @@ The wallet screen and the scanner page are checked in a real browser (needs Chro
 
     xvfb-run -a node test/manual-chain-labs-tab.js
     xvfb-run -a node test/manual-chain-labs-scanner.js
+    xvfb-run -a node test/manual-chain-labs-studio.js

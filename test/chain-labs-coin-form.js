@@ -91,6 +91,17 @@ const hashOf = (g) => crypto.createHash('sha256').update(JSON.stringify(g)).dige
     const find = (x) => coins.find((c) => c.symbol === x);
     line(coins.length === 5 && find('MUL').state === 'pending' && find('MUL').mode === 'multi' && find('PRV').visibility === 'private' && find('MPR').threshold === 2 && find('DEF').mode === 'single', 'the list carries the choices of every coin', coins.map((c) => [c.symbol, c.mode, c.visibility, c.state]));
 
+    console.log('\n== where each coin stands on the ledger');
+    line(coins.every((c) => c.ledger === 'none'), 'with no ledger yet, every registered coin says it is not open', coins.map((c) => c.ledger));
+    const ledgerFile = path.join(s.work, 'chainblock-labs-private', 'chain34.sqlite');
+    const seed = "$p=new PDO('sqlite:" + ledgerFile + "');$p->exec('CREATE TABLE ledger_coins(coin_id TEXT PRIMARY KEY, state TEXT)');$q=$p->prepare('INSERT INTO ledger_coins VALUES(?,?)');$q->execute([$argv[1],'active']);$q->execute([$argv[2],'pending']);$q->execute([$argv[3],'frozen']);";
+    spawnSync('php', ['-r', seed, '--', find('DEF').id, find('MUL').id, find('PRV').id]);
+    const states = Object.fromEntries((await list(s)).map((c) => [c.symbol, c.ledger]));
+    line(states.DEF === 'active' && states.MUL === 'pending' && states.PRV === 'frozen' && states.MPR === 'none' && states.OLD === 'none', 'a coin the ledger holds shows the ledger\'s state and the others are not open', states);
+    fs.writeFileSync(ledgerFile, 'not a database');
+    line((await list(s)).every((c) => c.ledger === 'unknown'), 'a ledger that cannot be read is reported as unavailable, not as empty');
+    fs.rmSync(ledgerFile);
+
     console.log('\n== refused choices');
     const bad = {
       'an unknown mode': { mode: 'triple' },

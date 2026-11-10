@@ -1,6 +1,6 @@
 <?php
 declare(strict_types=1);
-/** Labs 26 — isolated experimental coin genesis studio. No wallet or ledger integration. A coin also records its authority mode (single or multi), its visibility (public or private) and, for multi, its partner domains and threshold; the ledger store (lib/ledger.php) opens from that record later. */
+/** Labs 26 — isolated experimental coin genesis studio. The registry only records coins; spend34.php opens one as a ledger when an operator asks it to, and this list shows where each stands. A coin also records its authority mode (single or multi), its visibility (public or private) and, for multi, its partner domains and threshold; the ledger store (lib/ledger.php) opens from that record later. */
 ini_set('display_errors','0');
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
@@ -40,10 +40,20 @@ function units26(mixed $raw,int $d):int|false{
 }
 $action=$_GET['action']??'';
 if($_SERVER['REQUEST_METHOD']==='GET'&&$action==='options')done26(200,['ok'=>true,'node'=>$host,'partners'=>partners26($host),'modes'=>['single','multi'],'visibilities'=>['public','private']]);
+// Where each coin stands on the ledger, which spend34.php opens from this registry: none, pending (the partner domains have not all signed), active or frozen.
+function ledger26(string $private):array{
+ $file=$private.'/chain34.sqlite';
+ if(!is_file($file))return [];
+ try{
+  $l=new PDO('sqlite:file:'.$file.'?mode=ro',null,null,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_TIMEOUT=>5]);
+  return $l->query('SELECT coin_id,state FROM ledger_coins')->fetchAll(PDO::FETCH_KEY_PAIR);
+ }catch(Throwable $e){return ['*'=>'unknown'];}
+}
 if($_SERVER['REQUEST_METHOD']==='GET'&&$action==='list'){
+ $ledger=ledger26($private);
  $rows=$db->query('SELECT id,domain,name,symbol,decimals,max_units,initial_units,treasury_units,description,created_at,genesis_hash,mode,visibility,roster,threshold,state FROM coins ORDER BY rowid DESC LIMIT 40')->fetchAll(PDO::FETCH_ASSOC);
  $coins=[];
- foreach($rows as $r)$coins[]=['id'=>$r['id'],'domain'=>$r['domain'],'name'=>$r['name'],'symbol'=>$r['symbol'],'decimals'=>(int)$r['decimals'],'maxSupply'=>display26((int)$r['max_units'],(int)$r['decimals']),'initialSupply'=>display26((int)$r['initial_units'],(int)$r['decimals']),'treasurySupply'=>display26((int)$r['treasury_units'],(int)$r['decimals']),'description'=>$r['description'],'createdAt'=>$r['created_at'],'genesisHash'=>$r['genesis_hash'],'mode'=>$r['mode'],'visibility'=>$r['visibility'],'roster'=>json_decode($r['roster'],true)?:[],'threshold'=>(int)$r['threshold'],'state'=>$r['state']];
+ foreach($rows as $r)$coins[]=['id'=>$r['id'],'domain'=>$r['domain'],'name'=>$r['name'],'symbol'=>$r['symbol'],'decimals'=>(int)$r['decimals'],'maxSupply'=>display26((int)$r['max_units'],(int)$r['decimals']),'initialSupply'=>display26((int)$r['initial_units'],(int)$r['decimals']),'treasurySupply'=>display26((int)$r['treasury_units'],(int)$r['decimals']),'description'=>$r['description'],'createdAt'=>$r['created_at'],'genesisHash'=>$r['genesis_hash'],'mode'=>$r['mode'],'visibility'=>$r['visibility'],'roster'=>json_decode($r['roster'],true)?:[],'threshold'=>(int)$r['threshold'],'state'=>$r['state'],'ledger'=>$ledger[$r['id']]??$ledger['*']??'none'];
  done26(200,['ok'=>true,'node'=>$host,'coins'=>$coins,'testOnly'=>true,'notice'=>'Local unsigned demo registry; not minted into wallet balances']);
 }
 if($_SERVER['REQUEST_METHOD']!=='POST'||$action!=='create')done26(404,['ok'=>false,'error'=>'Unknown action']);

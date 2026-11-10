@@ -125,6 +125,9 @@ function peer_open_multi(PDO $db, array $node, array $genesis, string $treasuryK
     $known = $db->prepare('SELECT genesis_digest FROM ledger_coins WHERE coin_id=?');
     $known->execute([$coinId]);
     $digest = $known->fetchColumn();
+    // The row is read and the statement finished, or its read lock would stay until this function returns and make the
+    // partners' requests to this domain wait while they are asked to catch up below.
+    $known->closeCursor();
     if ($digest === false) ledger_register($db, $genesis, $treasuryKey, $refSecret);
     elseif ($digest !== ledger_genesis_digest($genesis)) ledger_fail('exists', 'a different coin has this id');
     $coin = ledger_coin($db, $coinId);

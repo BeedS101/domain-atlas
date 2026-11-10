@@ -138,6 +138,8 @@ const levelOk = (v) => typeof v === 'string' && v !== 'none';
     await start(c);
     const o1 = await op(a, 'open', { coinId: allOf.id });
     line(o1.status === 201 && o1.json.coin.state === 'active' && o1.json.coin.genesis.roster.length === 3 && o1.json.coin.genesis.threshold === 3, 'repeating the request opens it with the same genesis', o1.json);
+    const listed = await Promise.all([b, c].map(async (n) => ((await get(n, 'action=coins')).json.coins || []).some((x) => x.coinId === allOf.id && x.state === 'active')));
+    line(listed.every(Boolean), 'and both partners hold it as open at once, before anyone reads it from them (the notice reached them)', listed);
     line((await op(a, 'open', { coinId: allOf.id })).status === 409, 'a coin opens once');
     const o2 = await op(a, 'open', { coinId: twoOf.id });
     const o3 = await op(a, 'open', { coinId: priv3.id });

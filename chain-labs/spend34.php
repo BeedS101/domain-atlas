@@ -216,6 +216,7 @@ try {
         $known = $db->prepare('SELECT state FROM ledger_coins WHERE coin_id=?');
         $known->execute([$coinId]);
         $state = $known->fetchColumn();
+        $known->closeCursor();
         if ($state !== false && !($multi && $state === 'pending')) reply34(409, ['ok' => false, 'code' => 'already-open', 'error' => 'This coin already has a ledger']);
         if ($multi) {
             // A coin that is waiting for signatures keeps its genesis and reference secret, so opening can be repeated.

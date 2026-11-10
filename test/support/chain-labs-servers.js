@@ -40,7 +40,7 @@ for (const n of Object.values(nodes)) {
   fs.mkdirSync(root, { recursive: true });
   fs.mkdirSync(priv);
   n.root = root; n.priv = priv;
-  for (const f of ['coin26.php', 'spend34.php', 'scan35.php', 'scan35.html']) fs.copyFileSync(path.join(DIR, f), path.join(root, f));
+  for (const f of ['coin26.php', 'spend34.php', 'scan35.php', 'scan35.html', 'coin26.html']) fs.copyFileSync(path.join(DIR, f), path.join(root, f));
   fs.cpSync(path.join(DIR, 'lib'), path.join(root, 'lib'), { recursive: true });
   fs.writeFileSync(path.join(priv, 'federation20-config.php'), "<?php return ['private_pem_b64' => '" + Buffer.from(n.pair.privateKey.export({ type: 'pkcs8', format: 'pem' })).toString('base64') + "', 'admin_token_hex' => '" + n.token + "'];\n");
   const keys = {}, urls = {};

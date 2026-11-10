@@ -527,6 +527,12 @@ Each stage ships separately, with tests, on its own branch.
      statements, verified in the page); the record of an invalid entry shows only its index and reason, since it holds the
      private form.
    - The scanner does not catch a partner up with the authority before it answers; it shows this domain's copy.
+   - A registered coin is not on the ledger until an operator opens it (stage 5, `open`): the registry (`coin26.sqlite`) and the
+     ledger (`chain34.sqlite`) are separate, so a domain with registered coins and no `open` has an empty scanner. The Coin
+     Creation Studio page lists each coin's ledger state (none, pending, active, frozen) and has the open and grant operator
+     buttons, which call the existing `open` and `grant` routes. Resuming `open` for a multi coin used to leave its partners
+     without entry 0 until they were next read, because the unfinished read of the coin's row held a read lock on the
+     authority while the partners were told to catch up; the row is now read to its end first.
 
 ## 14. Open questions
 
