@@ -15,6 +15,16 @@
   .callout a{ color: #2a5fa8; font-weight: 600; }
   .callout ol{ margin: 0.5rem 0 0.7rem; padding-left: 1.3rem; }
   .callout li{ margin: 0.2rem 0; }
+  .labs{ margin-top: 2rem; }
+  .labs h2{ margin: 0 0 0.3rem; font-size: 1.25rem; }
+  .labs .labs-note{ margin: 0 0 0.9rem; color: #6b7d87; font-size: 0.95rem; }
+  .labs-grid{ list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.75rem; }
+  .labs-card{ display: block; height: 100%; box-sizing: border-box; padding: 0.9rem 1rem; border: 1px solid #dfe6ea; border-radius: 10px; background: #fbfcfd; color: inherit; text-decoration: none; }
+  .labs-card:hover{ border-color: #2a5fa8; background: #f3f7fc; }
+  .labs-card:focus-visible{ outline: 2px solid #2a5fa8; outline-offset: 2px; }
+  .labs-name{ display: block; color: #2a5fa8; font-weight: 600; }
+  .labs-badge{ display: inline-block; margin: 0.25rem 0 0.35rem; padding: 0.05rem 0.5rem; border: 1px solid rgba(214,158,46,.7); border-radius: 999px; background: rgba(214,158,46,.14); font-size: 0.75rem; }
+  .labs-desc{ display: block; font-size: 0.92rem; }
 </style>
 <!-- atlas-site:head:start -->
 <style>
@@ -38,6 +48,17 @@
      workshop (the default world), which portals back to Example Plaza's
      <code>plaza</code> world on port 8001 and into the Atlas Showcase
      Gallery, a 3D world on the same domain that portals back here.</p>
+
+  <section class="labs" aria-labelledby="labsHeading">
+    <h2 id="labsHeading">Explore the Labs</h2>
+    <p class="labs-note"><strong>Experimental demos.</strong> The coins, Gold (Au) and assets in the Labs are demonstrations with no monetary value and no promise of redemption.</p>
+    <ul class="labs-grid">
+      <li><a class="labs-card" href="/atlas/studio/"><span class="labs-name">Asset Studio</span><span class="labs-badge">Experimental</span><span class="labs-desc">Design a trophy, badge or key, preview it in 3D and, where minting is switched on, mint it to your wallet.</span></a></li>
+      <li><a class="labs-card" href="/chain-labs/index.html"><span class="labs-name">Chainblock Labs market</span><span class="labs-badge">Experimental</span><span class="labs-desc">Browse the demo coins listed across both domains. Buying with demo Gold uses the wallet extension.</span></a></li>
+      <li><a class="labs-card" href="/chain-labs/scan35.html"><span class="labs-name">Ledger Scanner</span><span class="labs-badge">Experimental</span><span class="labs-desc">A read-only view of each demo coin's log, accounts and the holdings every domain reports.</span></a></li>
+      <li><a class="labs-card" href="/chain-labs/coin26.html"><span class="labs-name">Coin Creation Studio</span><span class="labs-badge">Experimental</span><span class="labs-desc">Register a demo coin. The page is public; creating a coin needs this domain's operator token.</span></a></li>
+    </ul>
+  </section>
 
   <div class="callout">
     <h2>Walking into these spaces needs the wallet extension</h2>

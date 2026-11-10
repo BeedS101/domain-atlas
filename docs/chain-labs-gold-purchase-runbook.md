@@ -88,6 +88,28 @@ The folder `C:\gold-setup` then holds: `issuer\atlas-gold-hold-config.json`, `ev
 If the reply is "pending" (for example the partner did not answer), the sale is journaled and the Gold is held; repeating the same purchase, or the operator
 action `purchase-recover` on the authority, finishes it once. The Gold is never spent without the AETH and never released while the AETH could still be delivered.
 
+## 6a. What to check if a sale hangs
+
+A hanging sale shows in the wallet as "The sale is waiting for the other domains", and in the Ledger tab as a waiting card carrying the domain's own note,
+for example "the entry has 1 of 2 approvals; refused by domain-atlas.co.za (busy)". Nothing is lost: the Gold is held, not spent.
+
+1. **Press Try again (or Check again) on the waiting card. Do not start a new purchase.** A new request fails with "already held for another purchase"
+   while the first is waiting; the retry resumes the same request.
+2. **Read the note.** It names the partner that did not approve and why. "busy" followed by an HTTP status is the partner failing to reach the issuer.
+3. **The partner's files are current.** `chain-labs/lib/gold-issuer.php` and `chain-labs/lib/peer.php` match the repository, and `gold-adapter.php` is in the
+   partner's `chainblock-labs-private` folder. A partner on older files answers "the credential is not signed by the issuer" or "busy".
+4. **The partner can reach the issuer.** It reads `https://<issuer>/atlas/ledger/gold-hold-status` over https: cURL or `allow_url_fopen` must be on, and the
+   host's firewall must let PHP out. The request carries a User-Agent; some hosts block requests without one.
+5. **The issuer answers.** Open the read-only check from step 5.3 in a browser: JSON with HTTP 404 `unknown-hold` is healthy (404 means the issuer holds no
+   Gold for that sale). Any other status, or nothing, is what the partner sees too.
+6. **The peers are set up.** Each domain's `chainlabs-peers.json` (private folder) holds the other's key and address (see `chain-labs/README.md`), and the
+   clocks are right (an intent and a hold carry expiry times).
+7. **The hold.** A hold that was only `held` lapses by itself after 900 seconds and the credential is free again. A hold already `delivering` never lapses,
+   because the delivery may have committed: finish it with the operator action `purchase-recover` on the authority, or, if the sale must be abandoned, with
+   `purchase-cancel` for that request id (the partner witnesses it). Cancel only after the retry has failed and the partner has been fixed or taken out.
+
+Changing PHP settings or uploading a fixed file on the partner needs no change on the authority; then press Try again.
+
 ## 7. Switching it off
 
 * Immediately, per domain: delete `gold-adapter.php` from that domain's `chainblock-labs-private` folder. `purchasesEnabled` goes false, the price and the
