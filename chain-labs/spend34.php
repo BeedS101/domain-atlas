@@ -7,13 +7,17 @@ declare(strict_types=1);
  * Wallet: POST challenge, holdings (public coins to anyone, private coins to a key-signed challenge), propose (an
  *         owner-signed transfer: executed at once by this domain for a single authority coin; for a multi authority coin the
  *         authority collects approvals from the other domains first and answers 202 while it waits for them).
+ *         purchase (an owner-signed intent and a price credential: the authority of a coin that has a purchase policy delivers
+ *         the units and spends the credential, see lib/purchase.php; 202 while a multi authority sale waits for approvals).
  *         GET head: this domain's signed statement of the newest entry it holds, for anyone comparing domains.
  * Operator (private operator token): POST open (opens a coin of the coin registry as a ledger, a multi authority coin with
- *         its partner domains), grant (a treasury spend), recover (finishes pending multi authority proposals), compare
- *         (compares heads with the other domains and freezes the coin on a disagreement), evidence (why a coin is frozen).
+ *         its partner domains and an optional faucet or purchase policy), grant (a treasury spend), recover (finishes pending
+ *         multi authority proposals), compare (compares heads with the other domains and freezes the coin on a disagreement),
+ *         evidence (why a coin is frozen), purchase-recover (finishes journaled sales), purchase-cancel (ends one that has no entry).
  * Domains: POST peer, a request signed by another domain of the coin (genesis, sync, approve, notify, head, freeze).
- * Storage: chain34.sqlite, the treasury key files and chainlabs-peers.json (pinned partner keys) in the private folder beside
- *          the web root, never inside it.
+ * Storage: chain34.sqlite, the treasury key files, chainlabs-peers.json (pinned partner keys) and gold-adapter.php (returns the
+ *          callables of lib/purchase.php that reach the code holding price credentials) in the private folder beside the web
+ *          root, never inside it.
  */
 ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
@@ -25,7 +29,7 @@ if (empty($_SERVER['HTTPS']) || $_SERVER['HTTPS'] === 'off') reply34(403, ['ok' 
 $host = strtolower($_SERVER['HTTP_HOST'] ?? '');
 require __DIR__.'/lib/hosts.php';
 if (!chainlabs_is_host($host)) reply34(400, ['ok' => false, 'error' => 'Unrecognized host']);
-require __DIR__ . '/lib/peer.php';
+require __DIR__ . '/lib/purchase.php';
 $root = realpath($_SERVER['DOCUMENT_ROOT'] ?? '');
 $private = $root ? realpath(dirname($root) . '/chainblock-labs-private') : false;
 if (!$private || str_starts_with($private . '/', $root . '/')) reply34(503, ['ok' => false, 'error' => 'Private storage unavailable']);
@@ -38,7 +42,12 @@ $domainKey = $domainPrivate ? openssl_pkey_get_private($domainPrivate) : false;
 if (!$domainKey || !is_string($admin) || !preg_match('/^[a-f0-9]{64}$/D', $admin)) reply34(503, ['ok' => false, 'error' => 'Invalid operator configuration']);
 $domainPublic = openssl_pkey_get_details($domainKey)['key'];
 $peerConfig = peer_load_config($host, $private, $c, chainlabs_peer_map());
-$node = ['domain' => $host, 'private' => $domainPrivate, 'pinned' => $peerConfig['pinned']];
+$gold = null;
+if (is_file($private . '/gold-adapter.php')) {
+    $adapter = require $private . '/gold-adapter.php';
+    if (is_array($adapter) && is_callable($adapter['verify'] ?? null) && is_callable($adapter['revoked'] ?? null)) $gold = $adapter;
+}
+$node = ['domain' => $host, 'private' => $domainPrivate, 'pinned' => $peerConfig['pinned'], 'gold' => $gold];
 try {
     $db = ledger_open($private . '/chain34.sqlite');
 } catch (Throwable $e) {
@@ -51,6 +60,8 @@ const SPEND34_STATUS = [
     'wrong-index' => 409, 'wrong-prev' => 409, 'key-exists' => 409, 'busy' => 429, 'needs-approvals' => 202,
     'unknown-peer' => 403, 'not-in-roster' => 403, 'not-authority' => 409, 'equivocation' => 409, 'exists' => 409, 'not-pending' => 409,
     'peer-down' => 502, 'peer-bad-answer' => 502, 'bad-history' => 502, 'not-enough-approvals' => 503,
+    'locked' => 409, 'request-reused' => 409, 'insufficient-treasury' => 409, 'duplicate-purchase' => 409, 'purchase-key-limit' => 409, 'purchase-day-limit' => 409,
+    'no-purchase-policy' => 409, 'revoked-credential' => 409, 'cannot-cancel' => 409, 'unknown-request' => 404, 'no-purchase-verifier' => 503,
 ];
 function fail34(LedgerError $e): never
 {
@@ -163,6 +174,23 @@ try {
         reply34(201, ['ok' => true, 'receipt' => spend_submit_and_execute($db, $payload['coinId'], $authorization, $domainPrivate, $now)]);
     }
 
+    if ($action === 'purchase') {
+        $m = body34(32768);
+        $coinId = $m['coinId'] ?? null;
+        if (!is_string($coinId) || !preg_match('/^[a-f0-9]{32}$/D', $coinId) || !is_array($m['intent'] ?? null) || !is_array($m['credential'] ?? null)) reply34(400, ['ok' => false, 'error' => 'Expected coinId, intent and credential']);
+        if ($gold === null || !is_callable($gold['lock'] ?? null) || !is_callable($gold['release'] ?? null) || !is_callable($gold['finish'] ?? null)) reply34(503, ['ok' => false, 'code' => 'purchases-off', 'error' => 'Gold purchases are not enabled on this domain']);
+        $coin = ledger_coin($db, $coinId);
+        if ($coin['genesis']['authority'] !== $host) reply34(409, ['ok' => false, 'code' => 'not-authority', 'error' => 'Buy from the authority of this coin', 'authority' => $coin['genesis']['authority']]);
+        try {
+            $result = purchase_submit($db, $node, $gold, ledger_treasury_key_load($private, $coinId), $coinId, $m['intent'], $m['credential'], $coin['mode'] === 'multi' ? $send : null, $now);
+        } catch (LedgerError $e) {
+            // The sale is journaled and the credential held: the same request, or recovery, finishes it.
+            if (!purchase_transient($e)) throw $e;
+            reply34(202, ['ok' => true, 'code' => 'pending', 'note' => $e->getMessage(), 'reason' => $e->reason]);
+        }
+        reply34(201, ['ok' => true] + $result);
+    }
+
     // Another domain of a coin. The request is signed with that domain's key and checked against the key pinned here.
     if ($action === 'peer') {
         $envelope = body34(65536);
@@ -170,7 +198,7 @@ try {
     }
 
     // Operator actions.
-    if (in_array($action, ['open', 'grant', 'recover', 'compare', 'evidence'], true)) {
+    if (in_array($action, ['open', 'grant', 'recover', 'compare', 'evidence', 'purchase-recover', 'purchase-cancel'], true)) {
         $m = body34();
         operator34($m, $admin);
         $coinId = $m['coinId'] ?? null;
@@ -206,7 +234,7 @@ try {
                 $members = array_map(fn($d) => ['domain' => $d, 'key' => $d === $host ? $domainPublic : $peerConfig['pinned'][$d]], $roster);
                 $genesis = ledger_genesis(['coinId' => $coinId, 'symbol' => $row['symbol'], 'name' => $row['name'], 'decimals' => (int) $row['decimals'], 'maxUnits' => (string) $row['max_units'],
                     'initialUnits' => (string) $row['initial_units'], 'treasuryKey' => $treasury['key'], 'mode' => 'multi', 'visibility' => $isPrivate ? 'private' : 'public',
-                    'roster' => $members, 'threshold' => (int) $row['threshold'], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null]);
+                    'roster' => $members, 'threshold' => (int) $row['threshold'], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null, 'purchase' => $m['purchase'] ?? null]);
             }
             peer_open_multi($db, $node, $genesis, $treasury['key'], $secret, $send, $now);
             reply34(201, ['ok' => true, 'coin' => ledger_public_coin($db, $coinId), 'treasuryRef' => $genesis['treasuryRef']]);
@@ -217,7 +245,7 @@ try {
         $treasury = is_file($private . '/treasury-' . $coinId . '.json') ? ledger_treasury_key_load($private, $coinId) : ledger_treasury_key_create($private, $coinId);
         $genesis = ledger_genesis(['coinId' => $coinId, 'symbol' => $row['symbol'], 'name' => $row['name'], 'decimals' => (int) $row['decimals'], 'maxUnits' => (string) $row['max_units'],
             'initialUnits' => (string) $row['initial_units'], 'treasuryKey' => $treasury['key'], 'mode' => 'single', 'visibility' => $isPrivate ? 'private' : 'public',
-            'roster' => [['domain' => $host, 'key' => $domainPublic]], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null]);
+            'roster' => [['domain' => $host, 'key' => $domainPublic]], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null, 'purchase' => $m['purchase'] ?? null]);
         ledger_register($db, $genesis, $treasury['key'], $secret);
         ledger_add_genesis_signature($db, $coinId, $host, ledger_genesis_sign($genesis, $domainPrivate));
         ledger_activate($db, $coinId, $domainPrivate);
@@ -235,6 +263,18 @@ try {
         $coin = ledger_coin($db, $coinId);
         if ($coin['mode'] !== 'multi' || $coin['genesis']['authority'] !== $host) reply34(409, ['ok' => false, 'code' => 'not-authority', 'error' => 'Only the authority of a multi authority coin recovers']);
         reply34(200, ['ok' => true, 'results' => peer_recover($db, $node, $coinId, $send, $now)]);
+    }
+    if ($action === 'purchase-recover' || $action === 'purchase-cancel') {
+        $coin = ledger_coin($db, $coinId);
+        if ($coin['genesis']['authority'] !== $host) reply34(409, ['ok' => false, 'code' => 'not-authority', 'error' => 'Only the authority sells']);
+        if ($gold === null || !is_callable($gold['release'] ?? null) || !is_callable($gold['finish'] ?? null)) reply34(503, ['ok' => false, 'code' => 'purchases-off', 'error' => 'Gold purchases are not enabled on this domain']);
+        if ($action === 'purchase-cancel') {
+            $requestId = $m['requestId'] ?? null;
+            if (!is_string($requestId) || !preg_match('/^[a-f0-9]{32,64}$/D', $requestId)) reply34(400, ['ok' => false, 'error' => 'Invalid requestId']);
+            purchase_cancel($db, $gold, $coinId, $requestId);
+            reply34(200, ['ok' => true]);
+        }
+        reply34(200, ['ok' => true, 'results' => purchase_recover($db, $node, $gold, ledger_treasury_key_load($private, $coinId), $coinId, $coin['mode'] === 'multi' ? $send : null, $now)]);
     }
     if ($action === 'grant') {
         $to = $m['to'] ?? null;

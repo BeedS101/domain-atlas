@@ -454,6 +454,28 @@ Each stage ships separately, with tests, on its own branch.
      Resuming a frozen coin is an operator's review of the kept evidence; no function does it.
    - A domain that claims entries nobody signed, or an old statement replayed as a new one, proves nothing and freezes nothing.
 7. Purchase with Gold, with the limits in the genesis, tested with crash injection at each step of 10.3.
+   Built on the chain-labs side as `lib/purchase.php` and the `purchase`, `purchase-recover` and `purchase-cancel` routes of
+   `spend34.php`. The code that holds Gold is reached through an adapter (`gold-adapter.php` in the private folder, which returns
+   the callables listed at the top of `lib/purchase.php`) and is not changed here; the tests use a stand-in
+   (`test/support/gold-stand-in.php`). Wiring the adapter to `issuer-php` is a separate, reviewed step.
+   - The genesis may carry a `purchase` policy: the price class, the issuer key that signs the credentials, `unitsPerPrice` (units
+     delivered per unit of price, so the rate is fixed in the genesis), `minPrice`, and the limits `perKeyUnits` (ever, per
+     receiving key) and `perDayUnits` (in any 24 hours, all keys). A sale is exempt from the faucet policy.
+   - A sale is a treasury transfer whose authorization carries `purchase: {requestId, price}`; the buyer's signed intent and the
+     credential travel in the private form of the entry. The ledger itself refuses a second entry for one request id, a price
+     below the minimum, an amount that is not price times rate, and a sale past either limit, so the authority cannot bypass
+     these; every approver re-checks them against its own copy of the log.
+   - The authority verifies the intent and credential, takes the lock on the credential, journals the decision, delivers the
+     units, then spends the credential and issues the remainder. Every step is repeated safely after a crash, and the result is
+     stored per request id. The tests inject a crash after each of the lock, the journal, the submitted transfer, the entry and
+     the credential step, on single and multi coins.
+   - An approver in multi mode runs the adapter's `verify` and `revoked` for itself (`no-purchase-verifier` when it has none),
+     and checks that the verified request id, price and recipient are those of the entry. The intent's expiry is checked when
+     the request arrives, not again by approvers, so a sale that waited for a partner can still be finished.
+   - Treasury spends share one pending proposal per sender, so sales are delivered one at a time. A sale that meets another
+     in flight is journaled and answered 202; the same request, or `purchase-recover`, finishes it, and a request id repeated
+     returns the stored result. A sale that partners keep refusing (a credential on their revocation list) waits until the
+     operator cancels it with `purchase-cancel`, which frees the credential.
 8. Wallet: the Ledger tab as a list of domains with the `holdings` lookup, the transfer signing flow and Buy with Gold,
    in a new file with only small changes to `viewer.js`.
 9. Scanner: the coin, entries, entry, account and domains pages of section 11.2, with tests that a private coin's pages

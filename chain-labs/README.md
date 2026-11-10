@@ -18,7 +18,7 @@ here is a demonstration with no monetary value.
 | 29 | `ledger29.php` | Read-only signed balance query. |
 | 30, 31 | `account30.php`, `accounts31.php` | Signed zero-balance account opening and account discovery. |
 | 33 | `account-test33.html` | Runs account opening, discovery and a balance read with a throwaway test key. |
-| 34 | `spend34.php` | Spending, receipts and holdings. An owner-signed transfer is executed at once by a single authority coin and answered with a signed receipt; a multi authority coin's authority collects approvals from the other domains first (HTTP 202 while it waits); a signed `holdings` lookup lists a key's coins, private coins only to a key-signed challenge; the operator opens a registered coin as a ledger (a multi coin together with its partner domains), makes treasury grants, recovers waiting proposals, compares heads with the other domains and reads the evidence behind a frozen coin; `GET head` is the domain's signed head statement; the `peer` route takes requests from the other domains of a coin. Not imported: written for the chain build. |
+| 34 | `spend34.php` | Spending, receipts and holdings. An owner-signed transfer is executed at once by a single authority coin and answered with a signed receipt; a multi authority coin's authority collects approvals from the other domains first (HTTP 202 while it waits); a signed `holdings` lookup lists a key's coins, private coins only to a key-signed challenge; the operator opens a registered coin as a ledger (a multi coin together with its partner domains), makes treasury grants, recovers waiting proposals, compares heads with the other domains and reads the evidence behind a frozen coin; `GET head` is the domain's signed head statement; the `peer` route takes requests from the other domains of a coin. A coin whose genesis has a purchase policy is sold for a price credential through `purchase` (the authority only; the code that holds the credentials is reached through `gold-adapter.php` in the private folder, and without it the route answers 503); the operator finishes or cancels waiting sales with `purchase-recover` and `purchase-cancel`. Not imported: written for the chain build. |
 
 ## Running state
 
@@ -83,6 +83,16 @@ head`, the `compare` operator route and the check an approver makes before it si
 authority or an invalid entry freezes the coin on every domain that checks the evidence. Resuming a frozen coin is an
 operator's review of the kept evidence (`evidence`); nothing resumes it by itself.
 
+`lib/purchase.php` sells a coin for a price credential held elsewhere. The genesis carries the policy (price class, issuer key,
+units per unit of price, minimum price, a limit per receiving key and a limit per 24 hours); the ledger refuses a request id
+delivered twice, a price below the minimum, an amount that is not price times rate and a sale past either limit, and every
+approver checks them again. The authority locks the credential, journals the decision, delivers the units through the normal
+spend path and then spends the credential, and every step can be repeated after a crash. The code that holds the credentials
+is reached through `gold-adapter.php` in the private folder, which returns `verify`, `revoked`, `lock`, `release` and `finish`
+callables (the contract is at the top of `lib/purchase.php`); each domain that approves sales needs `verify` and `revoked`.
+`test/support/gold-stand-in.php` is the stand-in the tests use. Sales are delivered one at a time per coin; a sale that meets
+another in flight answers 202 and is finished by repeating the request or by `purchase-recover`.
+
 Every commit runs in one `BEGIN IMMEDIATE` transaction that re-checks the entry index, previous hash, signatures, nonce,
 sequence number and balance, so concurrent commits of one index have exactly one winner. Amounts are decimal strings of
 whole units, at most 10^12. The `lib` folder must be uploaded with the PHP files; the library refuses a direct request.
@@ -105,3 +115,5 @@ its line in `SOURCE.sha256`.
     node test/chain-labs-spend-http.js
     php test/chain-labs-multi.php
     node test/chain-labs-multi-http.js
+    php test/chain-labs-purchase.php
+    node test/chain-labs-purchase-http.js

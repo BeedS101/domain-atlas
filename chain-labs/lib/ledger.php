@@ -153,6 +153,13 @@ function ledger_schema(PDO $db): void
     foreach (['prepared_json', 'approvals_json'] as $column) if (!in_array($column, $have, true)) $db->exec('ALTER TABLE ledger_proposals ADD COLUMN ' . $column . ' TEXT');
     $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS ledger_one_pending ON ledger_proposals(coin_id,from_key) WHERE status='pending'");
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_approved(coin_id TEXT NOT NULL, idx INTEGER NOT NULL, hash TEXT NOT NULL, executed_at INTEGER NOT NULL, PRIMARY KEY(coin_id,idx))');
+    // The authority's journal of purchases it has decided: kept until the price credential has been dealt with.
+    $db->exec("CREATE TABLE IF NOT EXISTS ledger_purchases(
+        coin_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('decided','credited','done','abandoned')),
+        credential_id TEXT NOT NULL, price INTEGER NOT NULL, units INTEGER NOT NULL, recipient TEXT NOT NULL, intent_json TEXT NOT NULL,
+        credential_json TEXT NOT NULL, proposal_digest TEXT, entry_index INTEGER, result_json TEXT, reason TEXT, created_at INTEGER NOT NULL,
+        PRIMARY KEY(coin_id,request_id))");
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_requests(coin_id TEXT NOT NULL, request_id TEXT NOT NULL, idx INTEGER NOT NULL, to_key TEXT NOT NULL, units INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(coin_id,request_id))');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT, coin_id TEXT NOT NULL, kind TEXT NOT NULL, detail_json TEXT NOT NULL, created_at INTEGER NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_peer_nonces(sender TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(sender,nonce))');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_challenges(challenge TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0)');
@@ -222,11 +229,14 @@ function ledger_genesis(array $in): array
     $createdAt = $in['createdAt'] ?? null;
     if (!is_string($createdAt) || !preg_match('/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/D', $createdAt)) ledger_fail('bad-genesis', 'createdAt must be a UTC time');
     $faucet = ledger_faucet_policy($in['faucet'] ?? null, $max);
+    $purchase = ledger_purchase_policy($in['purchase'] ?? null, $max);
     $genesis = [
         'type' => 'atlas.ledger.genesis', 'v' => 1, 'coinId' => $coinId, 'symbol' => $symbol, 'name' => $name, 'decimals' => $decimals,
         'maxUnits' => (string) $max, 'initialUnits' => (string) $initial, 'mode' => $mode, 'visibility' => $visibility,
         'authority' => $clean[0]['domain'], 'threshold' => $threshold, 'roster' => $clean, 'faucet' => $faucet, 'createdAt' => $createdAt,
     ];
+    // A coin without a purchase policy has the same genesis, and so the same digest, as before the policy existed.
+    if ($purchase !== null) $genesis['purchase'] = $purchase;
     if ($visibility === 'private') {
         $secret = $in['refSecret'] ?? null;
         if (!is_string($secret) || !preg_match('/^[a-f0-9]{64}$/D', $secret)) ledger_fail('bad-genesis', 'a private coin needs a 64 hex character reference secret');
@@ -236,6 +246,31 @@ function ledger_genesis(array $in): array
         $genesis['treasuryRef'] = $treasury;
     }
     return $genesis;
+}
+
+// The terms on which the authority sells units of the coin for a price credential held elsewhere (see lib/purchase.php).
+// The rate is whole ledger units per price unit, so no price needs rounding. `issuerKey` names the key that signs the price
+// credentials; what it means is up to the price adapter.
+function ledger_purchase_policy(mixed $policy, int $max): ?array
+{
+    if ($policy === null) return null;
+    if (!is_array($policy) || array_is_list($policy)) ledger_fail('bad-genesis', 'the purchase policy must be null or an object');
+    $keys = array_keys($policy);
+    sort($keys);
+    if ($keys !== ['issuerKey', 'minPrice', 'perDayUnits', 'perKeyUnits', 'priceClass', 'unitsPerPrice']) ledger_fail('bad-genesis', 'the purchase policy needs priceClass, issuerKey, unitsPerPrice, minPrice, perKeyUnits and perDayUnits');
+    if (!is_string($policy['priceClass']) || !preg_match('/^[a-z][a-z0-9.]{2,63}$/D', $policy['priceClass'])) ledger_fail('bad-genesis', 'the purchase priceClass is not a class name');
+    if (!is_string($policy['issuerKey']) || !preg_match('/^[A-Za-z0-9_=-]{16,1500}$/D', $policy['issuerKey'])) ledger_fail('bad-genesis', 'the purchase issuerKey is not a key');
+    $rate = $policy['unitsPerPrice'];
+    $min = $policy['minPrice'];
+    if (!is_int($rate) || $rate < 1 || $rate > $max) ledger_fail('bad-genesis', 'unitsPerPrice must be a whole number of units within the coin');
+    if (!is_int($min) || $min < 1 || $min > 1000000) ledger_fail('bad-genesis', 'minPrice must be 1 to 1000000');
+    $least = $rate * $min;
+    $perKey = ledger_parse_units($policy['perKeyUnits'], 'perKeyUnits');
+    $perDay = ledger_parse_units($policy['perDayUnits'], 'perDayUnits');
+    if ($least > $max) ledger_fail('bad-genesis', 'the smallest purchase is more than the coin');
+    if ($perKey < $least || $perKey > $max) ledger_fail('bad-genesis', 'perKeyUnits must cover the smallest purchase and stay within the coin');
+    if ($perDay < $least || $perDay > $max) ledger_fail('bad-genesis', 'perDayUnits must cover the smallest purchase and stay within the coin');
+    return ['priceClass' => $policy['priceClass'], 'issuerKey' => $policy['issuerKey'], 'unitsPerPrice' => $rate, 'minPrice' => $min, 'perKeyUnits' => (string) $perKey, 'perDayUnits' => (string) $perDay];
 }
 
 function ledger_faucet_policy(mixed $faucet, int $max): ?array
@@ -273,7 +308,7 @@ function ledger_register(PDO $db, array $genesis, string $treasuryKey, ?string $
         'decimals' => $genesis['decimals'] ?? null, 'maxUnits' => $genesis['maxUnits'] ?? null, 'initialUnits' => $genesis['initialUnits'] ?? null,
         'mode' => $genesis['mode'] ?? null, 'visibility' => $genesis['visibility'] ?? null, 'treasuryKey' => $treasuryKey,
         'roster' => $genesis['roster'] ?? null, 'threshold' => $genesis['threshold'] ?? null, 'createdAt' => $genesis['createdAt'] ?? null,
-        'faucet' => $genesis['faucet'] ?? null, 'refSecret' => $refSecret,
+        'faucet' => $genesis['faucet'] ?? null, 'purchase' => $genesis['purchase'] ?? null, 'refSecret' => $refSecret,
     ]);
     if (ledger_canonical($again) !== ledger_canonical($genesis)) ledger_fail('bad-genesis', 'the genesis does not match its treasury key and reference secret');
     if ($genesis['visibility'] === 'public' && $refSecret !== null) ledger_fail('bad-genesis', 'a public coin has no reference secret');
@@ -474,11 +509,19 @@ function ledger_check_authorization(array $coin, array $authorization, int $now)
     $signature = $authorization['signature'] ?? null;
     if (!is_array($payload) || array_is_list($payload)) ledger_fail('bad-authorization', 'the authorization has no payload');
     $expected = ['type', 'v', 'coinId', 'from', 'to', 'amount', 'baseSeq', 'baseHead', 'nonce', 'issuedAt', 'expiresAt'];
-    $keys = array_keys($payload);
+    $keys = array_values(array_diff(array_keys($payload), ['purchase']));
     sort($keys);
     $sorted = $expected;
     sort($sorted);
     if ($keys !== $sorted) ledger_fail('bad-authorization', 'the payload has the wrong fields');
+    $purchase = null;
+    if (array_key_exists('purchase', $payload)) {
+        $purchase = $payload['purchase'];
+        $shape = is_array($purchase) ? array_keys($purchase) : [];
+        sort($shape);
+        if ($shape !== ['price', 'requestId'] || !is_int($purchase['price']) || $purchase['price'] < 1 || $purchase['price'] > 1000000000
+            || !is_string($purchase['requestId']) || !preg_match('/^[a-f0-9]{32,64}$/D', $purchase['requestId'])) ledger_fail('bad-authorization', 'the purchase reference is malformed');
+    }
     if ($payload['type'] !== 'atlas.ledger.transfer' || $payload['v'] !== 1 || $payload['coinId'] !== $coin['coin_id']) ledger_fail('bad-authorization', 'the payload is not a transfer for this coin');
     if (!ledger_valid_owner_key($payload['from']) || !ledger_valid_owner_key($payload['to'])) ledger_fail('bad-authorization', 'from and to must be wallet public keys');
     if ($payload['from'] === $payload['to']) ledger_fail('bad-authorization', 'a transfer to the same account is not allowed');
@@ -496,7 +539,7 @@ function ledger_check_authorization(array $coin, array $authorization, int $now)
     if ($issued > $now + LEDGER_CLOCK_SKEW_SECONDS) ledger_fail('not-yet-valid', 'the proposal is dated in the future');
     if ($now >= $expires) ledger_fail('expired', 'the proposal has expired');
     if (!ledger_owner_verify(ledger_canonical($payload), $payload['from'], $signature)) ledger_fail('bad-signature', 'the owner signature does not verify');
-    return ['from' => $payload['from'], 'to' => $payload['to'], 'amount' => $amount, 'baseSeq' => $payload['baseSeq'], 'nonce' => $payload['nonce']];
+    return ['from' => $payload['from'], 'to' => $payload['to'], 'amount' => $amount, 'baseSeq' => $payload['baseSeq'], 'nonce' => $payload['nonce'], 'purchase' => $purchase];
 }
 
 function ledger_account_row(PDO $db, string $coinId, string $key): ?array
@@ -523,11 +566,20 @@ function ledger_prepare_transfer(PDO $db, string $coinId, array $authorization, 
     if ((int) $from['units'] < $t['amount']) ledger_fail('insufficient', 'the sender holds less than the amount');
     $head = ledger_head($db, $coinId);
     $at = ledger_check_executed_at(gmdate('Y-m-d\TH:i:s\Z', $now), $authorization['payload'], ledger_head_time($db, $coinId));
-    ledger_faucet_check($db, $coin, $t['from'], $t['to'], $t['amount'], $at);
     $public = ['type' => 'transfer', 'coinId' => $coinId, 'index' => $head['index'] + 1, 'prevHash' => $head['hash'], 'executedAt' => gmdate('Y-m-d\TH:i:s\Z', $now),
         'amount' => (string) $t['amount'], 'from' => ledger_account_ref($coin, $t['from']), 'to' => ledger_account_ref($coin, $t['to'])];
+    $private = ['from' => $t['from'], 'to' => $t['to'], 'authorization' => ['payload' => $authorization['payload'], 'signature' => $authorization['signature']]];
+    if ($t['purchase'] !== null) {
+        // The buyer's intent and the price credential travel in the private form so that every approving domain can check them.
+        $evidence = $authorization['evidence'] ?? null;
+        if (!is_array($evidence)) ledger_fail('bad-purchase', 'a purchase carries the buyer\'s intent and the price credential');
+        $public['purchase'] = $t['purchase'];
+        $private['purchase'] = $evidence;
+    }
+    ledger_state_checks($db, $coin, $t, $public, $private, $at);
     $hash = ledger_digest($public);
-    return ['public' => $public, 'private' => ['hash' => $hash, 'from' => $t['from'], 'to' => $t['to'], 'authorization' => $authorization], 'hash' => $hash];
+    $private = ['hash' => $hash] + $private;
+    return ['public' => $public, 'private' => $private, 'hash' => $hash];
 }
 
 // The form of an entry for the next index: both forms present, extending the head, the hash matching the public form.
@@ -542,7 +594,7 @@ function ledger_check_frame(PDO $db, array $coin, array $prepared): array
     if (($public['index'] ?? null) !== $head['index'] + 1) ledger_fail('wrong-index', 'the entry does not follow the head');
     if (($public['prevHash'] ?? null) !== $head['hash']) ledger_fail('wrong-prev', 'the entry does not extend the head hash');
     if (($public['coinId'] ?? null) !== $coinId || ($public['type'] ?? null) !== 'transfer') ledger_fail('bad-entry', 'only transfers can be committed');
-    $shape = array_keys($public);
+    $shape = array_values(array_diff(array_keys($public), ['purchase']));
     sort($shape);
     if ($shape !== ['amount', 'coinId', 'executedAt', 'from', 'index', 'prevHash', 'to', 'type']) ledger_fail('bad-entry', 'the public form has the wrong fields');
     $hash = ledger_digest($public);
@@ -573,8 +625,54 @@ function ledger_validate_state(PDO $db, array $coin, array $public, array $priva
     if ((int) $from['units'] < $t['amount']) ledger_fail('insufficient', 'the sender holds less than the amount');
     $at = ledger_check_executed_at($public['executedAt'], $authorization['payload'], ledger_head_time($db, $coinId));
     if (abs($at - $now) > LEDGER_CLOCK_SKEW_SECONDS) ledger_fail('bad-time', 'executedAt is not close to the current time');
-    ledger_faucet_check($db, $coin, $t['from'], $t['to'], $t['amount'], $at);
+    ledger_state_checks($db, $coin, $t, $public, $private, $at);
     return ['t' => $t, 'at' => $at, 'fromRef' => $fromRef, 'toRef' => $toRef];
+}
+
+// What limits a spend beyond balances: the faucet policy on a grant from the treasury, or the purchase policy on a sale.
+// A sale is a spend from the treasury that carries a purchase reference; it is not a grant and the faucet does not apply.
+function ledger_state_checks(PDO $db, array $coin, array $t, array $public, array $private, int $at): void
+{
+    $purchase = $t['purchase'];
+    if (($public['purchase'] ?? null) !== $purchase) ledger_fail('bad-entry', 'the public purchase reference does not match the authorization');
+    if ($purchase === null) {
+        if (array_key_exists('purchase', $private)) ledger_fail('bad-entry', 'a transfer has no purchase evidence');
+        ledger_faucet_check($db, $coin, $t['from'], $t['to'], $t['amount'], $at);
+        return;
+    }
+    $policy = $coin['genesis']['purchase'] ?? null;
+    if ($policy === null) ledger_fail('no-purchase-policy', 'this coin is not for sale');
+    if ($t['from'] !== $coin['treasury_key']) ledger_fail('bad-purchase', 'only the treasury sells');
+    $evidence = $private['purchase'] ?? null;
+    if (!is_array($evidence) || array_is_list($evidence) || !is_array($evidence['intent'] ?? null) || !is_array($evidence['credential'] ?? null) || strlen(ledger_canonical($evidence)) > 16384) ledger_fail('bad-purchase', 'the purchase evidence is missing or too large');
+    if ($purchase['price'] < (int) $policy['minPrice']) ledger_fail('purchase-too-small', 'the price is below ' . $policy['minPrice']);
+    if ($t['amount'] !== $purchase['price'] * (int) $policy['unitsPerPrice']) ledger_fail('bad-purchase', 'the amount is not the price at the coin\'s rate');
+    ledger_purchase_rules($db, $coin, $purchase['requestId'], $t['to'], $t['amount'], $at);
+}
+
+// The sale limits against what the log already holds: a request id sells once, one key buys at most perKeyUnits ever, and the
+// coin sells at most perDayUnits in any 24 hours.
+function ledger_purchase_rules(PDO $db, array $coin, string $requestId, string $toKey, int $units, int $at): void
+{
+    $policy = $coin['genesis']['purchase'];
+    $seen = $db->prepare('SELECT 1 FROM ledger_requests WHERE coin_id=? AND request_id=?');
+    $seen->execute([$coin['coin_id'], $requestId]);
+    if ($seen->fetchColumn()) ledger_fail('duplicate-purchase', 'this request was already delivered');
+    $key = $db->prepare('SELECT COALESCE(SUM(units),0) FROM ledger_requests WHERE coin_id=? AND to_key=?');
+    $key->execute([$coin['coin_id'], $toKey]);
+    if ((int) $key->fetchColumn() + $units > (int) $policy['perKeyUnits']) ledger_fail('purchase-key-limit', 'one key can buy at most ' . $policy['perKeyUnits'] . ' units');
+    $day = $db->prepare('SELECT COALESCE(SUM(units),0) FROM ledger_requests WHERE coin_id=? AND at>?');
+    $day->execute([$coin['coin_id'], $at - 86400]);
+    if ((int) $day->fetchColumn() + $units > (int) $policy['perDayUnits']) ledger_fail('purchase-day-limit', 'the coin sells at most ' . $policy['perDayUnits'] . ' units in 24 hours');
+}
+
+// The index of the entry that delivered a purchase request, or null.
+function ledger_request_entry(PDO $db, string $coinId, string $requestId): ?int
+{
+    $q = $db->prepare('SELECT idx FROM ledger_requests WHERE coin_id=? AND request_id=?');
+    $q->execute([$coinId, $requestId]);
+    $idx = $q->fetchColumn();
+    return $idx === false ? null : (int) $idx;
 }
 
 // What a co-approver runs before signing: the entry is whole, extends its own head and is valid against its own accounts.
@@ -628,7 +726,9 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
         $supply = $db->prepare('SELECT COALESCE(SUM(units),0) FROM ledger_accounts WHERE coin_id=?');
         $supply->execute([$coinId]);
         if ((int) $supply->fetchColumn() !== (int) $coin['initial_units']) ledger_fail('supply-changed', 'the entry would change the total supply');
-        if (($genesis['faucet'] ?? null) !== null && $t['from'] === $coin['treasury_key']) {
+        if ($t['purchase'] !== null) {
+            $db->prepare('INSERT INTO ledger_requests(coin_id,request_id,idx,to_key,units,at) VALUES(?,?,?,?,?,?)')->execute([$coinId, $t['purchase']['requestId'], $public['index'], $t['to'], $t['amount'], $at]);
+        } elseif (($genesis['faucet'] ?? null) !== null && $t['from'] === $coin['treasury_key']) {
             $db->prepare('INSERT INTO ledger_faucet(coin_id,account_key,total,last_at) VALUES(?,?,?,?) ON CONFLICT(coin_id,account_key) DO UPDATE SET total=total+excluded.total, last_at=excluded.last_at')
                 ->execute([$coinId, $t['to'], $t['amount'], $at]);
         }
@@ -768,6 +868,7 @@ function ledger_check(PDO $db, string $coinId): array
     $nonces = [];
     $treasury = null;
     $given = [];
+    $sold = [];
     $previousAt = 0;
     $private = $genesis['visibility'] === 'private';
     $refFor = static fn(string $key): string => $private ? ledger_ref((string) $coin['ref_secret'], $key) : $key;
@@ -817,7 +918,22 @@ function ledger_check(PDO $db, string $coinId): array
             $at = ledger_check_executed_at($public['executedAt'] ?? null, $payload, $previousAt);
             $previousAt = $at;
             $policy = $genesis['faucet'] ?? null;
-            if ($policy !== null && $from === $treasury) {
+            $sale = $payload['purchase'] ?? null;
+            if (($public['purchase'] ?? null) !== $sale) throw new LedgerError('bad-entry', 'the public purchase reference does not match the authorization');
+            if ($sale !== null) {
+                $terms = $genesis['purchase'] ?? null;
+                if ($terms === null || $from !== $treasury) throw new LedgerError('bad-purchase', 'a sale the coin does not allow');
+                if (!is_array($priv['purchase'] ?? null)) throw new LedgerError('bad-purchase', 'a sale without its evidence');
+                if (!is_int($sale['price'] ?? null) || $sale['price'] < (int) $terms['minPrice'] || $amount !== $sale['price'] * (int) $terms['unitsPerPrice']) throw new LedgerError('bad-purchase', 'the amount is not the price at the coin\'s rate');
+                if (isset($sold[$sale['requestId']])) throw new LedgerError('duplicate-purchase', 'a request delivered twice');
+                $keyTotal = 0;
+                foreach ($sold as $s) if ($s['to'] === $to) $keyTotal += $s['units'];
+                $dayTotal = 0;
+                foreach ($sold as $s) if ($s['at'] > $at - 86400) $dayTotal += $s['units'];
+                if ($keyTotal + $amount > (int) $terms['perKeyUnits']) throw new LedgerError('purchase-key-limit', 'over the limit for one key');
+                if ($dayTotal + $amount > (int) $terms['perDayUnits']) throw new LedgerError('purchase-day-limit', 'over the limit for 24 hours');
+                $sold[$sale['requestId']] = ['idx' => $i, 'to' => $to, 'units' => $amount, 'at' => $at];
+            } elseif ($policy !== null && $from === $treasury) {
                 if ($amount > (int) $policy['maxAmount']) throw new LedgerError('faucet-amount', 'over the grant limit');
                 $g = $given[$to] ?? ['total' => 0, 'last' => 0];
                 ledger_faucet_rules($policy, $g['total'], $g['last'], $amount, $at);
@@ -866,6 +982,11 @@ function ledger_check(PDO $db, string $coinId): array
     ksort($storedGiven);
     ksort($given);
     if ($storedGiven !== $given) $problems[] = 'the stored faucet totals do not match the log';
+    $requestRows = $db->prepare('SELECT request_id,idx,to_key,units,at FROM ledger_requests WHERE coin_id=? ORDER BY idx');
+    $requestRows->execute([$coinId]);
+    $storedSold = [];
+    foreach ($requestRows->fetchAll(PDO::FETCH_ASSOC) as $r) $storedSold[$r['request_id']] = ['idx' => (int) $r['idx'], 'to' => $r['to_key'], 'units' => (int) $r['units'], 'at' => (int) $r['at']];
+    if ($storedSold !== $sold) $problems[] = 'the stored sales do not match the log';
     $stored = $db->prepare('SELECT COUNT(*) FROM ledger_nonces WHERE coin_id=?');
     $stored->execute([$coinId]);
     if ((int) $stored->fetchColumn() !== count($nonces)) $problems[] = 'the stored nonces do not match the log';
@@ -925,7 +1046,7 @@ function ledger_treasury_key_load(string $dir, string $coinId): array
 // An operator grant: a transfer from the treasury, signed by the treasury key. It is prepared and checked like any other
 // transfer, including the faucet limits; the authority and approvers then sign and commit it. A multi authority coin
 // submits the signed authorization as a proposal instead.
-function ledger_grant_authorization(PDO $db, string $coinId, array $treasury, string $recipientKey, string $amount, int $now): array
+function ledger_grant_authorization(PDO $db, string $coinId, array $treasury, string $recipientKey, string $amount, int $now, ?array $purchase = null, ?array $evidence = null): array
 {
     $coin = ledger_coin($db, $coinId);
     if (($treasury['key'] ?? null) !== $coin['treasury_key']) ledger_fail('not-treasury', 'that is not the coin\'s treasury key');
@@ -934,7 +1055,10 @@ function ledger_grant_authorization(PDO $db, string $coinId, array $treasury, st
     $payload = ['type' => 'atlas.ledger.transfer', 'v' => 1, 'coinId' => $coinId, 'from' => $coin['treasury_key'], 'to' => $recipientKey, 'amount' => $amount,
         'baseSeq' => (int) $row['seq'], 'baseHead' => ledger_head($db, $coinId)['hash'], 'nonce' => bin2hex(random_bytes(16)),
         'issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $now), 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $now + 300)];
-    return ['payload' => $payload, 'signature' => ledger_owner_sign($treasury['private'], $payload)];
+    if ($purchase !== null) $payload['purchase'] = $purchase;
+    $authorization = ['payload' => $payload, 'signature' => ledger_owner_sign($treasury['private'], $payload)];
+    if ($evidence !== null) $authorization['evidence'] = $evidence;
+    return $authorization;
 }
 
 function ledger_grant(PDO $db, string $coinId, array $treasury, string $recipientKey, string $amount, int $now): array

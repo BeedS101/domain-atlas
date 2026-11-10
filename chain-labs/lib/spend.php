@@ -11,6 +11,10 @@ const SPEND_MAX_OPEN_CHALLENGES = 5000;
 const SPEND_HOLDINGS_MAX_COINS = 50;
 
 // The digest that names a proposal: the canonical payload the owner signed.
+// Reasons that close a proposal for good, as opposed to failures that leave it pending for a retry.
+const SPEND_FINAL_REASONS = ['expired', 'stale', 'insufficient', 'replayed', 'bad-signature', 'bad-authorization', 'no-account', 'faucet-amount', 'faucet-limit',
+    'duplicate-purchase', 'purchase-key-limit', 'purchase-day-limit', 'purchase-too-small', 'bad-purchase', 'no-purchase-policy', 'revoked-credential'];
+
 function spend_digest(array $authorization): string
 {
     $payload = $authorization['payload'] ?? null;
@@ -99,7 +103,7 @@ function spend_execute(PDO $db, string $coinId, string $digest, string $authorit
             if ($current && $current['status'] === 'executed') return spend_receipt($db, $coinId, (int) $current['executed_index']);
             if (in_array($e->reason, ['wrong-index', 'wrong-prev'], true) && $attempt < 8) { usleep(10000 * ($attempt + 1)); continue; }
             // A transient failure leaves the proposal pending for a retry; a final one closes it.
-            if (in_array($e->reason, ['expired', 'stale', 'insufficient', 'replayed', 'bad-signature', 'bad-authorization', 'no-account', 'faucet-amount', 'faucet-limit'], true)) {
+            if (in_array($e->reason, SPEND_FINAL_REASONS, true)) {
                 spend_reject($db, $coinId, $digest, $e->reason === 'expired' ? 'expired' : 'rejected', $e->reason);
             }
             throw $e;
@@ -223,4 +227,41 @@ function spend_verify_holdings(array $answer, string $domainPublicPem, string $d
     if (!ledger_verify($domainPublicPem, ledger_canonical($statement), $answer['signature'] ?? null)) return false;
     $at = strtotime((string) ($statement['asOf'] ?? ''));
     return $at !== false && $at <= $now + LEDGER_CLOCK_SKEW_SECONDS && $now - $at <= $maxAge;
+}
+
+// ---------- checking a purchase ----------
+
+// Checks a buyer's intent and price credential through the price adapter and against the coin's purchase policy. The adapter
+// ($gold) is a set of callables, documented in lib/purchase.php. Returns what the intent asks for:
+// requestId, coinId, price, recipient, credentialId, quantity.
+function purchase_verify(?array $gold, array $coin, mixed $intent, mixed $credential, int $now, bool $checkExpiry): array
+{
+    $policy = $coin['genesis']['purchase'] ?? null;
+    if ($policy === null) ledger_fail('no-purchase-policy', 'this coin is not for sale');
+    if ($gold === null) ledger_fail('no-purchase-verifier', 'this domain cannot check price credentials');
+    if (!is_array($intent) || !is_array($credential)) ledger_fail('bad-purchase', 'a purchase needs an intent and a credential');
+    $v = $gold['verify']($intent, $credential, $policy, $now);
+    if (is_string($v)) ledger_fail('bad-purchase', $v);
+    $need = ['requestId', 'coinId', 'price', 'recipient', 'credentialId', 'quantity', 'expiresAt'];
+    foreach ($need as $field) if (!array_key_exists($field, $v)) ledger_fail('bad-purchase', 'the price adapter answered without ' . $field);
+    if ($v['coinId'] !== $coin['coin_id']) ledger_fail('bad-purchase', 'the intent is for another coin');
+    if (!is_string($v['requestId']) || !preg_match('/^[a-f0-9]{32,64}$/D', $v['requestId'])) ledger_fail('bad-purchase', 'the request id is malformed');
+    if (!is_int($v['price']) || $v['price'] < (int) $policy['minPrice']) ledger_fail('purchase-too-small', 'the price is below ' . $policy['minPrice']);
+    if (!is_int($v['quantity']) || $v['price'] > $v['quantity']) ledger_fail('bad-purchase', 'the credential holds less than the price');
+    if (!ledger_valid_owner_key($v['recipient']) || $v['recipient'] === $coin['treasury_key']) ledger_fail('bad-purchase', 'the recipient is not a wallet key that can receive');
+    if ($checkExpiry && (!is_int($v['expiresAt']) || $v['expiresAt'] <= $now)) ledger_fail('expired', 'the intent has expired');
+    if ($gold['revoked']((string) $v['credentialId'])) ledger_fail('revoked-credential', 'the price credential is revoked');
+    return $v;
+}
+
+// What every approving domain runs on a sale before it signs: the buyer's intent and the price credential in the entry check
+// out, and they are the ones the entry sells against. An intent's own expiry is not rechecked, since an approval may come
+// after a crash long after the buyer signed.
+function purchase_check_entry(?array $gold, array $coin, array $public, array $private, int $now): void
+{
+    if (!isset($public['purchase'])) return;
+    $evidence = $private['purchase'] ?? null;
+    $v = purchase_verify($gold, $coin, $evidence['intent'] ?? null, $evidence['credential'] ?? null, $now, false);
+    if ($v['requestId'] !== $public['purchase']['requestId'] || $v['price'] !== $public['purchase']['price']) ledger_fail('bad-purchase', 'the entry is not the sale the buyer asked for');
+    if ($v['recipient'] !== ($private['to'] ?? null)) ledger_fail('bad-purchase', 'the entry delivers to another key than the buyer named');
 }

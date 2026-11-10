@@ -239,6 +239,7 @@ function peer_on_approve(PDO $db, array $node, string $from, array $body, int $n
     peer_catch_up($db, $node, $coinId, $send, $now);
     peer_compare_heads($db, $node, $coinId, $send, $now);
     $checked = ledger_validate_prepared($db, $coinId, $prepared, $now);
+    purchase_check_entry($node['gold'] ?? null, $coin, $checked['public'], $checked['private'], $now);
     $index = $checked['public']['index'];
     $hash = $checked['hash'];
     $at = strtotime($checked['public']['executedAt']);
@@ -360,7 +361,7 @@ function peer_execute(PDO $db, array $node, string $coinId, string $digest, call
                 usleep(random_int(10000, 40000) * min($attempt + 1, 4));
                 continue;
             }
-            if (in_array($e->reason, ['expired', 'stale', 'insufficient', 'replayed', 'bad-signature', 'bad-authorization', 'no-account', 'faucet-amount', 'faucet-limit'], true)) {
+            if (in_array($e->reason, SPEND_FINAL_REASONS, true)) {
                 spend_reject($db, $coinId, $digest, $e->reason === 'expired' ? 'expired' : 'rejected', $e->reason);
             }
             throw $e;
