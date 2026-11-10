@@ -11,6 +11,8 @@ const PEER_MAX_AGE_SECONDS = 120;
 const PEER_MAX_PENDING_COINS = 100;
 const PEER_SYNC_PAGE = 50;
 const PEER_MAX_ATTEMPTS = 12;
+// Failures of applying an entry that say nothing about the authority's history.
+const PEER_NOT_EVIDENCE = ['wrong-index', 'wrong-prev', 'not-pending', 'not-active', 'busy'];
 
 // A node: ['domain' => this domain, 'private' => its private key PEM, 'pinned' => [other domain => public key PEM]].
 // $send is callable(string $domain, array $envelope): array, returning the decoded answer or throwing a LedgerError.
@@ -70,6 +72,8 @@ function peer_handle(PDO $db, array $node, array $envelope, int $now, callable $
         'sync' => peer_on_sync($db, $from, $body),
         'approve' => peer_on_approve($db, $node, $from, $body, $now, $send),
         'notify' => peer_on_notify($db, $node, $from, $body, $now, $send),
+        'head' => peer_on_head($db, $node, $from, $body, $now),
+        'freeze' => peer_on_freeze($db, $node, $from, $body, $now, $send),
         default => ledger_fail('unknown-action', 'unknown peer action'),
     };
 }
@@ -153,11 +157,12 @@ function peer_on_sync(PDO $db, string $from, array $body): array
 }
 
 // Pulls the entries this copy lacks from the authority and applies each one with every check. Returns how many it applied.
+// An entry that fails a check freezes this copy of the coin and the other domains are told; a frozen copy takes nothing more.
 function peer_catch_up(PDO $db, array $node, string $coinId, callable $send, int $now): int
 {
     $coin = ledger_coin($db, $coinId);
     $authority = $coin['genesis']['authority'];
-    if ($authority === $node['domain']) return 0;
+    if ($authority === $node['domain'] || $coin['state'] === 'frozen') return 0;
     $applied = 0;
     while (true) {
         $head = ledger_head($db, $coinId)['index'];
@@ -174,10 +179,16 @@ function peer_catch_up(PDO $db, array $node, string $coinId, callable $send, int
                     continue;
                 } catch (LedgerError $e) {
                     // Another request on this domain may have written the same entry first.
-                    if (!in_array($e->reason, ['wrong-index', 'wrong-prev', 'not-pending'], true) || $index > ledger_head($db, $coinId)['index']) throw $e;
+                    if (!in_array($e->reason, ['wrong-index', 'wrong-prev', 'not-pending'], true) || $index > ledger_head($db, $coinId)['index']) {
+                        if (!in_array($e->reason, PEER_NOT_EVIDENCE, true)) peer_freeze_history($db, $node, $coinId, $record, $e, $send, $now);
+                        throw $e;
+                    }
                 }
             }
-            if (peer_hash_at($db, $coinId, $index) !== ($record['hash'] ?? null)) ledger_fail('bad-history', 'the authority sent an entry that differs from the one already held at ' . $index);
+            if (peer_hash_at($db, $coinId, $index) !== ($record['hash'] ?? null)) {
+                peer_freeze_equivocation($db, $node, $coinId, $record, $send, $now);
+                ledger_fail('bad-history', 'the authority sent an entry that differs from the one already held at ' . $index);
+            }
         }
         if (count($records) < PEER_SYNC_PAGE) return $applied;
     }
@@ -226,6 +237,7 @@ function peer_on_approve(PDO $db, array $node, string $from, array $body, int $n
     if ($coin['genesis']['authority'] !== $from) ledger_fail('not-authority', 'only the authority asks for approvals');
     if (ledger_roster_key($coin['genesis'], $node['domain']) === null) ledger_fail('not-in-roster', 'this domain is not in the roster');
     peer_catch_up($db, $node, $coinId, $send, $now);
+    peer_compare_heads($db, $node, $coinId, $send, $now);
     $checked = ledger_validate_prepared($db, $coinId, $prepared, $now);
     $index = $checked['public']['index'];
     $hash = $checked['hash'];
@@ -465,4 +477,232 @@ function peer_http_sender(array $config, int $timeout = 8): callable
         if (!is_array($inner)) ledger_fail('peer-bad-answer', $domain . ' sent no answer');
         return $inner;
     };
+}
+
+// ---------- comparing heads ----------
+
+const PEER_HEAD_TYPE = 'atlas.ledger.head';
+
+// This domain's signed statement of the entry it holds at an index (the newest by default): coin, domain, index, hash and
+// time, with the authority's own signature on that hash and the entry's public form. Anyone can check the signatures and
+// that the public form has that hash.
+function peer_head_attestation(PDO $db, array $node, string $coinId, int $now, ?int $index = null): array
+{
+    $head = ledger_head($db, $coinId);
+    $index ??= $head['index'];
+    if ($index < 0 || $index > $head['index']) ledger_fail('unknown-entry', 'this domain holds no entry at that index');
+    $row = $db->prepare('SELECT hash,authority_sig,public_json FROM ledger_log WHERE coin_id=? AND idx=?');
+    $row->execute([$coinId, $index]);
+    $entry = $row->fetch(PDO::FETCH_ASSOC);
+    if (!$entry) ledger_fail('unknown-entry', 'this domain holds no entry at that index');
+    $payload = ['type' => PEER_HEAD_TYPE, 'v' => 1, 'coinId' => $coinId, 'domain' => $node['domain'], 'index' => $index, 'hash' => $entry['hash'], 'issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $now)];
+    return ['payload' => $payload, 'signature' => ledger_sign($node['private'], ledger_canonical($payload)), 'authoritySignature' => $entry['authority_sig'], 'public' => json_decode($entry['public_json'], true)];
+}
+
+// Checks a head statement against the roster of a coin and returns its payload with the authority signature. With $now the
+// statement must also be recent.
+function peer_check_attestation(array $coin, mixed $head, ?string $domain = null, ?int $now = null): array
+{
+    $payload = is_array($head) ? ($head['payload'] ?? null) : null;
+    if (!is_array($payload) || array_is_list($payload)) ledger_fail('bad-evidence', 'the head statement has no payload');
+    $fields = array_keys($payload);
+    sort($fields);
+    if ($fields !== ['coinId', 'domain', 'hash', 'index', 'issuedAt', 'type', 'v']) ledger_fail('bad-evidence', 'the head statement has the wrong fields');
+    if ($payload['type'] !== PEER_HEAD_TYPE || $payload['v'] !== 1 || $payload['coinId'] !== $coin['coin_id'] || !is_string($payload['domain']) || !is_int($payload['index']) || $payload['index'] < 0
+        || !is_string($payload['hash']) || !preg_match('/^[a-f0-9]{64}$/D', $payload['hash']) || !is_string($payload['issuedAt'])) ledger_fail('bad-evidence', 'the head statement is malformed');
+    if ($domain !== null && $payload['domain'] !== $domain) ledger_fail('bad-evidence', 'the head statement is from another domain');
+    $key = ledger_roster_key($coin['genesis'], $payload['domain']);
+    if ($key === null || !ledger_verify($key, ledger_canonical($payload), $head['signature'] ?? null)) ledger_fail('bad-evidence', 'the head statement does not verify');
+    $at = strtotime($payload['issuedAt']);
+    if ($at === false || ($now !== null && abs($now - $at) > PEER_MAX_AGE_SECONDS)) ledger_fail('bad-evidence', 'the head statement is not recent');
+    $authoritySignature = $head['authoritySignature'] ?? null;
+    $public = $head['public'] ?? null;
+    $executedAt = is_array($public) && ledger_digest($public) === $payload['hash'] && is_string($public['executedAt'] ?? null) ? strtotime($public['executedAt']) : false;
+    return $payload + ['at' => $at, 'authoritySignature' => is_string($authoritySignature) ? $authoritySignature : null, 'executedAt' => $executedAt === false ? null : $executedAt];
+}
+
+// A roster domain asks for this domain's head; the answer also says whether this copy is frozen.
+function peer_on_head(PDO $db, array $node, string $from, array $body, int $now): array
+{
+    $coinId = $body['coinId'] ?? null;
+    if (!is_string($coinId) || !preg_match('/^[a-f0-9]{32}$/D', $coinId)) ledger_fail('bad-request', 'a coin id is needed');
+    $coin = ledger_coin($db, $coinId);
+    if (ledger_roster_key($coin['genesis'], $from) === null) ledger_fail('not-in-roster', 'only roster domains compare heads');
+    return ['head' => peer_head_attestation($db, $node, $coinId, $now), 'state' => $coin['state']];
+}
+
+// Whether the evidence proves a disagreement. Evidence is checked by whoever receives it; a domain never freezes on a claim.
+//   fork:                  two head statements from roster domains for one index with different hashes
+//   rollback:              a head statement carrying the authority's signature on an entry, and a statement from the
+//                          authority, made after that entry was executed, that holds fewer entries
+//   authority-equivocation: two entries for one index, both signed by the authority
+function peer_check_evidence(array $coin, array $evidence): void
+{
+    $kind = $evidence['kind'] ?? null;
+    $items = $evidence['items'] ?? null;
+    if (!is_array($items) || !array_is_list($items) || count($items) !== 2) ledger_fail('bad-evidence', 'the evidence needs two items');
+    $authority = $coin['genesis']['authority'];
+    $authorityKey = ledger_roster_key($coin['genesis'], $authority);
+    if ($kind === 'fork') {
+        [$a, $b] = [peer_check_attestation($coin, $items[0]), peer_check_attestation($coin, $items[1])];
+        if ($a['index'] !== $b['index'] || $a['hash'] === $b['hash']) ledger_fail('bad-evidence', 'the statements do not disagree');
+    } elseif ($kind === 'rollback') {
+        [$held, $later] = [peer_check_attestation($coin, $items[0]), peer_check_attestation($coin, $items[1], $authority)];
+        if ($held['authoritySignature'] === null || !ledger_verify($authorityKey, $held['hash'], $held['authoritySignature'])) ledger_fail('bad-evidence', 'the authority did not sign that entry');
+        if ($held['executedAt'] === null || $later['index'] >= $held['index'] || $later['at'] <= $held['executedAt']) ledger_fail('bad-evidence', 'the authority\'s later statement does not hold fewer entries');
+    } elseif ($kind === 'authority-equivocation') {
+        $hashes = [];
+        foreach ($items as $item) {
+            $public = is_array($item) ? ($item['public'] ?? null) : null;
+            if (!is_array($public) || ($public['coinId'] ?? null) !== $coin['coin_id'] || !is_int($public['index'] ?? null) || ledger_digest($public) !== ($item['hash'] ?? null)
+                || !ledger_verify($authorityKey, (string) $item['hash'], $item['authoritySignature'] ?? null)) ledger_fail('bad-evidence', 'an entry in the evidence does not verify');
+            $hashes[] = [$public['index'], $item['hash']];
+        }
+        if ($hashes[0][0] !== $hashes[1][0] || $hashes[0][1] === $hashes[1][1]) ledger_fail('bad-evidence', 'the entries do not disagree');
+    } else {
+        ledger_fail('bad-evidence', 'unknown kind of evidence');
+    }
+}
+
+// Freezes this copy on evidence that has been checked, and tells the other domains.
+function peer_freeze_on_evidence(PDO $db, array $node, string $coinId, array $evidence, callable $send, int $now): void
+{
+    $coin = ledger_coin($db, $coinId);
+    peer_check_evidence($coin, $evidence);
+    $wasActive = $coin['state'] === 'active';
+    ledger_freeze($db, $coinId, (string) $evidence['kind'], $evidence, $now);
+    if ($wasActive) peer_alert($db, $node, $coinId, $evidence, $send, $now);
+}
+
+function peer_freeze_history(PDO $db, array $node, string $coinId, array $record, LedgerError $e, callable $send, int $now): void
+{
+    $was = ledger_coin($db, $coinId)['state'];
+    ledger_freeze($db, $coinId, 'invalid-history', ['index' => $record['index'] ?? null, 'reason' => $e->reason, 'message' => $e->getMessage(), 'record' => $record], $now);
+    if ($was === 'active') peer_alert($db, $node, $coinId, ['kind' => 'invalid-history'], $send, $now);
+}
+
+function peer_freeze_equivocation(PDO $db, array $node, string $coinId, array $record, callable $send, int $now): void
+{
+    $row = $db->prepare('SELECT public_json,hash,authority_sig FROM ledger_log WHERE coin_id=? AND idx=?');
+    $row->execute([$coinId, $record['index']]);
+    $held = $row->fetch(PDO::FETCH_ASSOC);
+    $evidence = ['kind' => 'authority-equivocation', 'items' => [
+        ['public' => json_decode((string) $held['public_json'], true), 'hash' => $held['hash'], 'authoritySignature' => $held['authority_sig']],
+        ['public' => $record['public'] ?? null, 'hash' => $record['hash'] ?? null, 'authoritySignature' => $record['authoritySignature'] ?? null],
+    ]];
+    try {
+        peer_freeze_on_evidence($db, $node, $coinId, $evidence, $send, $now);
+    } catch (LedgerError $e) {
+        // An entry that does not carry the authority's signature is not evidence against it.
+    }
+}
+
+function peer_alert(PDO $db, array $node, string $coinId, array $evidence, callable $send, int $now): void
+{
+    foreach (ledger_coin($db, $coinId)['genesis']['roster'] as $member) {
+        if ($member['domain'] === $node['domain']) continue;
+        try {
+            $send($member['domain'], peer_envelope($node, $member['domain'], 'freeze', ['coinId' => $coinId, 'evidence' => $evidence], $now));
+        } catch (LedgerError $e) {
+        }
+    }
+}
+
+// A roster domain reports a disagreement. Evidence that proves one freezes this copy at once. A report of invalid history
+// only makes this domain pull and check the history itself, so one domain cannot freeze the coin by saying so.
+function peer_on_freeze(PDO $db, array $node, string $from, array $body, int $now, callable $send): array
+{
+    $coinId = $body['coinId'] ?? null;
+    $evidence = $body['evidence'] ?? null;
+    if (!is_string($coinId) || !preg_match('/^[a-f0-9]{32}$/D', $coinId) || !is_array($evidence)) ledger_fail('bad-request', 'a coin and evidence are needed');
+    $coin = ledger_coin($db, $coinId);
+    if (ledger_roster_key($coin['genesis'], $from) === null) ledger_fail('not-in-roster', 'only roster domains report disagreements');
+    if (($evidence['kind'] ?? null) === 'invalid-history') {
+        try {
+            peer_catch_up($db, $node, $coinId, $send, $now);
+        } catch (LedgerError $e) {
+        }
+    } elseif ($coin['state'] === 'active') {
+        peer_freeze_on_evidence($db, $node, $coinId, $evidence, $send, $now);
+    }
+    return ['state' => ledger_coin($db, $coinId)['state']];
+}
+
+// Compares this copy's head with the head every other roster domain states, not only the authority's.
+//   equal / behind     the other domain holds the same entry at that index (the same head, or an older one)
+//   fork               the other domain holds a different entry at an index both hold: the coin freezes
+//   rollback           the other domain holds an entry the authority signed and the authority no longer does: the coin freezes
+//   ahead              the other domain claims more than the authority gives; nothing proves it, so nothing changes
+//   unreachable, bad-answer
+// A domain that is behind catches up from the authority first. Returns the verdict per domain and the state of the coin.
+function peer_compare_heads(PDO $db, array $node, string $coinId, callable $send, int $now): array
+{
+    $report = [];
+    $coin = ledger_coin($db, $coinId);
+    $self = $node['domain'];
+    $authority = $coin['genesis']['authority'];
+    foreach ($coin['genesis']['roster'] as $member) {
+        $domain = $member['domain'];
+        if ($domain === $self) continue;
+        if (ledger_coin($db, $coinId)['state'] !== 'active') break;
+        try {
+            $answer = $send($domain, peer_envelope($node, $domain, 'head', ['coinId' => $coinId], $now));
+            $theirs = peer_check_attestation($coin, $answer['head'] ?? null, $domain, $now);
+        } catch (LedgerError $e) {
+            $report[$domain] = in_array($e->reason, ['peer-down', 'peer-bad-answer'], true) ? 'unreachable' : 'bad-answer';
+            continue;
+        }
+        $head = $answer['head'];
+        if ($theirs['index'] > ledger_head($db, $coinId)['index'] && $self !== $authority) {
+            try {
+                peer_catch_up($db, $node, $coinId, $send, $now);
+            } catch (LedgerError $e) {
+            }
+            if (ledger_coin($db, $coinId)['state'] !== 'active') break;
+        }
+        $mine = ledger_head($db, $coinId);
+        if ($theirs['index'] < $mine['index'] && $domain === $authority) {
+            // Partners are behind the authority, never the other way round: it writes first.
+            $evidence = ['kind' => 'rollback', 'items' => [peer_head_attestation($db, $node, $coinId, $now), $head]];
+            $report[$domain] = 'rollback';
+            try {
+                peer_check_evidence($coin, $evidence);
+            } catch (LedgerError $e) {
+                $report[$domain] = 'behind';
+                continue;
+            }
+        } elseif ($theirs['index'] <= $mine['index']) {
+            if (peer_hash_at($db, $coinId, $theirs['index']) === $theirs['hash']) {
+                $report[$domain] = $theirs['index'] === $mine['index'] ? 'equal' : 'behind';
+                continue;
+            }
+            $evidence = ['kind' => 'fork', 'items' => [$head, peer_head_attestation($db, $node, $coinId, $now, $theirs['index'])]];
+            $report[$domain] = 'fork';
+        } else {
+            // They hold entries this domain cannot get from the authority.
+            $later = null;
+            if ($self === $authority) {
+                $later = peer_head_attestation($db, $node, $coinId, $now);
+            } else {
+                try {
+                    $got = $send($authority, peer_envelope($node, $authority, 'head', ['coinId' => $coinId], $now));
+                    peer_check_attestation($coin, $got['head'] ?? null, $authority, $now);
+                    $later = $got['head'];
+                } catch (LedgerError $e) {
+                }
+            }
+            $evidence = ['kind' => 'rollback', 'items' => [$head, $later]];
+            $report[$domain] = 'rollback';
+            try {
+                if ($later === null) throw new LedgerError('bad-evidence', 'no statement from the authority');
+                peer_check_evidence($coin, $evidence);
+            } catch (LedgerError $e) {
+                $report[$domain] = 'ahead';
+                continue;
+            }
+        }
+        peer_freeze_on_evidence($db, $node, $coinId, $evidence, $send, $now);
+        break;
+    }
+    return ['results' => $report, 'state' => ledger_coin($db, $coinId)['state']];
 }

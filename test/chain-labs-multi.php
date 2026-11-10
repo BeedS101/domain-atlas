@@ -43,10 +43,11 @@ function ec_private(): string
 $CLUSTER = [];
 $DOWN = [];
 $CALLS = [];
+$ALT = null;
 function cluster(int $n): array
 {
-    global $CLUSTER, $DOWN, $CALLS;
-    $CLUSTER = []; $DOWN = []; $CALLS = [];
+    global $CLUSTER, $DOWN, $CALLS, $ALT;
+    $CLUSTER = []; $DOWN = []; $CALLS = []; $ALT = null;
     $keys = [];
     for ($i = 0; $i < $n; $i++) $keys[chr(97 + $i) . '.example'] = ec_private();
     foreach ($keys as $domain => $priv) {
@@ -64,6 +65,9 @@ function transport(string $to, array $envelope): array
     $CALLS[] = [$to, $envelope['payload']['action']];
     if (!isset($CLUSTER[$to]) || !empty($DOWN[$to])) ledger_fail('peer-down', $to . ' did not answer');
     $target = $CLUSTER[$to];
+    // A split-view authority answers one partner from another copy of its database.
+    global $ALT;
+    if ($ALT !== null && $to === 'a.example' && $envelope['payload']['from'] === $ALT['for']) $target = ['db' => $ALT['db'], 'node' => $target['node']];
     $answer = peer_handle($target['db'], $target['node'], json_decode(json_encode($envelope), true), $NOW, 'transport');
     return json_decode(json_encode($answer), true);
 }
@@ -376,7 +380,12 @@ foreach ($cases as $name => $edit) {
     };
     $threw = false;
     try { peer_catch_up(ndb('c.example'), node('c.example'), $c['coin'], $evil, $NOW); } catch (LedgerError $e) { $threw = true; }
-    t($threw && heads($c, ['c.example']) === $before && clean($c, ['c.example']), 'a copy refuses doctored history: ' . $name, [$threw, heads($c, ['c.example']), $before]);
+    $state = ledger_coin(ndb('c.example'), $c['coin'])['state'];
+    $expect = $name === 'an entry out of order' ? 'active' : 'frozen';
+    t($threw && heads($c, ['c.example']) === $before && clean($c, ['c.example']) && $state === $expect, 'a copy refuses doctored history: ' . $name . ($expect === 'frozen' ? ' and freezes' : ''), [$threw, heads($c, ['c.example']), $before, $state]);
+    t($state !== 'frozen' || (ledger_evidence(ndb('c.example'), $c['coin'])[0]['kind'] ?? null) === 'invalid-history', 'the evidence is kept', ledger_evidence(ndb('c.example'), $c['coin']));
+    // Only an operator's review lets a frozen copy resume; there is no function for it, so the test edits the table.
+    ndb('c.example')->exec("UPDATE ledger_coins SET state='active'; DELETE FROM ledger_evidence");
 }
 peer_catch_up(ndb('c.example'), node('c.example'), $c['coin'], 'transport', $NOW);
 t(level($c, $D) && same_log($c, $D), 'and catches up from honest records afterwards');
@@ -607,6 +616,214 @@ $changed[1]['hash'] = str_repeat('b', 64);
 t(refuses(fn() => peer_catch_up(ndb('b.example'), node('b.example'), $c['coin'], $replay($changed), $NOW), 'bad-history'), 'an entry that differs from the one held at that index is refused');
 $skipped = array_slice($full, 3);
 t(refuses(fn() => peer_catch_up(ndb('c.example'), node('c.example'), $c['coin'], $replay($skipped), $NOW), 'bad-history') || ledger_head(ndb('c.example'), $c['coin'])['index'] >= 2, 'records that skip ahead of the copy are refused');
+
+echo "\n== comparing heads\n";
+$ABC = ['a.example', 'b.example', 'c.example'];
+// A funded 2-of-3 coin on three level copies.
+function funded(): array
+{
+    global $ABC;
+    cluster(3);
+    $c = open_coin(3, 2);
+    open_now($c);
+    $alice = owner(); $bob = owner(); $carol = owner();
+    pay($c, $c['treasury'], $alice['key'], '1000');
+    pay($c, $alice, $bob['key'], '10');
+    foreach (['b.example', 'c.example'] as $d) peer_catch_up(ndb($d), node($d), $c['coin'], 'transport', $GLOBALS['NOW']);
+    return [$c, $alice, $bob, $carol];
+}
+function compare(string $d, array $c): array { global $NOW; return peer_compare_heads(ndb($d), node($d), $c['coin'], 'transport', $NOW); }
+function state_of(string $d, array $c): string { return ledger_coin(ndb($d), $c['coin'])['state']; }
+[$c, $alice, $bob, $carol] = funded();
+$r = compare('b.example', $c);
+t($r['results'] === ['a.example' => 'equal', 'c.example' => 'equal'] && $r['state'] === 'active', 'level copies compare equal', $r);
+$DOWN['b.example'] = true;
+pay($c, $alice, $bob['key'], '20');
+$DOWN['b.example'] = false;
+$r = compare('a.example', $c);
+t($r['results'] === ['b.example' => 'behind', 'c.example' => 'equal'] && $r['state'] === 'active', 'a copy that missed an entry is behind, which is not a disagreement', $r);
+$r = compare('b.example', $c);
+t($r['results']['a.example'] === 'equal' && level($c, $ABC) && state_of('b.example', $c) === 'active', 'a copy that is behind catches up while comparing', $r);
+$DOWN['c.example'] = true;
+$r = compare('b.example', $c);
+t($r['results']['c.example'] === 'unreachable' && $r['state'] === 'active', 'a domain that does not answer is reported and does not stop the coin', $r);
+$DOWN['c.example'] = false;
+$head = peer_on_head(ndb('a.example'), node('a.example'), 'b.example', ['coinId' => $c['coin']], $NOW);
+t(peer_check_attestation(ledger_coin(ndb('b.example'), $c['coin']), $head['head'], 'a.example', $NOW)['hash'] === ledger_head(ndb('a.example'), $c['coin'])['hash'], 'a head statement verifies against the roster');
+t(refuses(fn() => peer_on_head(ndb('a.example'), node('a.example'), 'z.example', ['coinId' => $c['coin']], $NOW), 'not-in-roster'), 'only a roster domain asks for a head over the peer route');
+$stale = $head['head'];
+t(refuses(fn() => peer_check_attestation(ledger_coin(ndb('b.example'), $c['coin']), $stale, 'a.example', $NOW + 500), 'bad-evidence'), 'an old head statement is not taken for a current one');
+$tampered = $head['head'];
+$tampered['payload']['index'] += 1;
+t(refuses(fn() => peer_check_attestation(ledger_coin(ndb('b.example'), $c['coin']), $tampered, 'a.example', $NOW), 'bad-evidence'), 'a head statement with a changed index does not verify');
+t(refuses(fn() => peer_check_attestation(ledger_coin(ndb('b.example'), $c['coin']), $head['head'], 'c.example', $NOW), 'bad-evidence'), 'a head statement from another domain is not taken for this one');
+
+// An authority that shows two partners different histories: the real authority writes X with b.example's approval while
+// c.example is down; a copy of the authority made earlier writes Y with c.example's approval while b.example is down.
+function split(): array
+{
+    global $ALT, $DOWN, $NOW;
+    [$c, $alice, $bob, $carol] = funded();
+    $file = tempnam(sys_get_temp_dir(), 'multi-alt-') . '.sqlite';
+    ndb('a.example')->exec("VACUUM INTO '" . $file . "'");
+    $alt = ledger_open($file);
+    $altAuth = auth('a.example', $c, $alice, $carol['key'], '30');
+    $DOWN['c.example'] = true;
+    pay($c, $alice, $bob['key'], '30');
+    $DOWN['c.example'] = false;
+    $ALT = ['for' => 'c.example', 'db' => $alt];
+    $DOWN['b.example'] = true;
+    peer_submit_and_execute($alt, node('a.example'), $c['coin'], $altAuth, 'transport', $NOW);
+    $DOWN['b.example'] = false;
+    return [$c, $alice, $bob, $carol, $alt];
+}
+[$c, $alice, $bob, $carol, $alt] = split();
+$hb = ledger_head(ndb('b.example'), $c['coin']); $hc = ledger_head(ndb('c.example'), $c['coin']);
+t($hb['index'] === $hc['index'] && $hb['hash'] !== $hc['hash'] && ledger_check(ndb('b.example'), $c['coin']) === [] && ledger_check(ndb('c.example'), $c['coin']) === [], 'each partner holds a valid history and the two differ at one index', [$hb, $hc]);
+$r = compare('b.example', $c);
+t($r['results']['c.example'] === 'fork' && $r['state'] === 'frozen', 'comparing finds the split and freezes the domain that found it', $r);
+t(state_of('a.example', $c) === 'frozen' && state_of('c.example', $c) === 'frozen', 'and the other two domains check the evidence and freeze too', [state_of('a.example', $c), state_of('c.example', $c)]);
+$ev = ledger_evidence(ndb('a.example'), $c['coin']);
+t(count($ev) === 1 && $ev[0]['kind'] === 'fork' && count($ev[0]['detail']['items']) === 2, 'the evidence is kept: two signed head statements', $ev);
+t(refuses(fn() => pay($c, $alice, $bob['key'], '1'), 'not-active') && refuses(fn() => peer_on_approve(ndb('b.example'), node('b.example'), 'a.example', ['coinId' => $c['coin'], 'prepared' => []], $NOW, 'transport'), 'not-active'), 'a frozen coin takes no new spend and gives no approvals');
+t(ledger_check(ndb('a.example'), $c['coin']) === [] && ledger_public_coin(ndb('b.example'), $c['coin'])['state'] === 'frozen' && count(ledger_public_entries(ndb('b.example'), $c['coin'])['entries']) >= 3, 'a frozen coin can still be read and checked');
+t(compare('c.example', $c) === ['results' => [], 'state' => 'frozen'], 'a frozen copy compares nothing');
+
+// The same split is found by an approver before it signs, without anyone asking for a comparison.
+[$c, $alice, $bob, $carol, $alt] = split();
+$ALT = null;
+$idxBefore = ledger_head(ndb('a.example'), $c['coin'])['index'];
+$err = why(fn() => pay($c, $alice, owner()['key'], '1'));
+t(state_of('b.example', $c) === 'frozen' || state_of('c.example', $c) === 'frozen', 'an approver that is asked to sign notices the split and freezes', $err);
+t(ledger_head(ndb('a.example'), $c['coin'])['index'] === $idxBefore, 'and nothing is written after the split', $err);
+
+// An authority restored from an old backup holds fewer entries than the partners saw.
+[$c, $alice, $bob, $carol] = funded();
+$file = tempnam(sys_get_temp_dir(), 'multi-backup-') . '.sqlite';
+ndb('a.example')->exec("VACUUM INTO '" . $file . "'");
+pay($c, $alice, $bob['key'], '5');
+pay($c, $alice, $bob['key'], '6');
+foreach (['b.example', 'c.example'] as $d) peer_catch_up(ndb($d), node($d), $c['coin'], 'transport', $NOW);
+$CLUSTER['a.example']['db'] = ledger_open($file);
+$NOW += 3;
+$r = compare('b.example', $c);
+t($r['results']['a.example'] === 'rollback' && $r['state'] === 'frozen', 'a partner that holds more than the authority freezes on a rolled-back authority', $r);
+t(state_of('a.example', $c) === 'frozen' && state_of('c.example', $c) === 'frozen', 'the authority and the other partner check the evidence and freeze', [state_of('a.example', $c), state_of('c.example', $c)]);
+t((ledger_evidence(ndb('c.example'), $c['coin'])[0]['kind'] ?? null) === 'rollback', 'with the rollback evidence kept');
+$NOW -= 3;
+// The restored authority finds it too when it compares with a partner that holds more.
+[$c, $alice, $bob, $carol] = funded();
+$file = tempnam(sys_get_temp_dir(), 'multi-backup-') . '.sqlite';
+ndb('a.example')->exec("VACUUM INTO '" . $file . "'");
+pay($c, $alice, $bob['key'], '5');
+foreach (['b.example', 'c.example'] as $d) peer_catch_up(ndb($d), node($d), $c['coin'], 'transport', $NOW);
+$CLUSTER['a.example']['db'] = ledger_open($file);
+$NOW += 3;
+$r = compare('a.example', $c);
+t($r['results']['b.example'] === 'rollback' && state_of('a.example', $c) === 'frozen' && state_of('b.example', $c) === 'frozen', 'a restored authority that compares freezes, and so do the partners', $r);
+$NOW -= 3;
+
+// An authority that sends a different entry for an index a copy already holds.
+[$c, $alice, $bob, $carol, $alt] = split();
+$ALT = null;
+foreach (['a.example', 'b.example', 'c.example'] as $d) ndb($d)->exec("UPDATE ledger_coins SET state='active'; DELETE FROM ledger_evidence");
+$n = ledger_head(ndb('b.example'), $c['coin'])['index'];
+$other = ledger_records_after($alt, $c['coin'], $n - 1, 5);
+$lie = function (string $to, array $envelope) use ($other): array {
+    $answer = transport($to, $envelope);
+    if ($envelope['payload']['action'] === 'sync') $answer['records'] = $other;
+    return $answer;
+};
+t(refuses(fn() => peer_catch_up(ndb('b.example'), node('b.example'), $c['coin'], $lie, $NOW), 'bad-history') && state_of('b.example', $c) === 'frozen', 'a second entry for a held index, signed by the authority, freezes the copy that was shown it');
+t(state_of('a.example', $c) === 'frozen' && (ledger_evidence(ndb('a.example'), $c['coin'])[0]['kind'] ?? null) === 'authority-equivocation', 'the other domains verify both signatures and freeze');
+foreach (['a.example', 'b.example', 'c.example'] as $d) ndb($d)->exec("UPDATE ledger_coins SET state='active'; DELETE FROM ledger_evidence");
+$unsigned = $other;
+$unsigned[0]['authoritySignature'] = $other[0]['authoritySignature'] === null ? 'x' : strrev($other[0]['authoritySignature']);
+$lie2 = function (string $to, array $envelope) use ($unsigned): array {
+    $answer = transport($to, $envelope);
+    if ($envelope['payload']['action'] === 'sync') $answer['records'] = $unsigned;
+    return $answer;
+};
+t(refuses(fn() => peer_catch_up(ndb('b.example'), node('b.example'), $c['coin'], $lie2, $NOW), 'bad-history') && state_of('b.example', $c) === 'active', 'a different entry without a valid authority signature is not evidence and freezes nothing');
+
+// Nobody freezes on a claim: the receiver checks the evidence itself.
+[$c, $alice, $bob, $carol] = funded();
+$headA = peer_head_attestation(ndb('a.example'), node('a.example'), $c['coin'], $NOW);
+$headB = peer_head_attestation(ndb('b.example'), node('b.example'), $c['coin'], $NOW);
+$first = peer_head_attestation(ndb('b.example'), node('b.example'), $c['coin'], $NOW, 0);
+$freeze = fn(array $evidence, ?array $sender = null) => transport('c.example', peer_envelope($sender ?? node('b.example'), 'c.example', 'freeze', ['coinId' => $c['coin'], 'evidence' => $evidence], $NOW));
+$bad = [
+    'two statements that agree' => ['kind' => 'fork', 'items' => [$headA, $headB]],
+    'two statements for different indexes' => ['kind' => 'fork', 'items' => [$headA, $first]],
+    'a statement with a changed hash' => ['kind' => 'fork', 'items' => [$headA, array_replace_recursive($headB, ['payload' => ['hash' => str_repeat('c', 64)]])]],
+    'a rollback whose later statement is not fewer' => ['kind' => 'rollback', 'items' => [$headB, $headA]],
+    'a rollback from a partner instead of the authority' => ['kind' => 'rollback', 'items' => [$headA, $first]],
+    'one item' => ['kind' => 'fork', 'items' => [$headA]],
+    'an unknown kind' => ['kind' => 'because', 'items' => [$headA, $headB]],
+    'equivocation with one entry twice' => ['kind' => 'authority-equivocation', 'items' => [['public' => $headA['public'], 'hash' => $headA['payload']['hash'], 'authoritySignature' => $headA['authoritySignature']], ['public' => $headA['public'], 'hash' => $headA['payload']['hash'], 'authoritySignature' => $headA['authoritySignature']]]],
+];
+foreach ($bad as $name => $evidence) {
+    $threw = why(fn() => $freeze($evidence));
+    t(str_starts_with($threw, 'bad-evidence') && state_of('c.example', $c) === 'active', 'evidence is refused: ' . $name, $threw);
+}
+t(refuses(fn() => $freeze(['kind' => 'fork', 'items' => [$headA, $headB]], ['domain' => 'z.example', 'private' => ec_private()]), 'unknown-peer') && state_of('c.example', $c) === 'active', 'a freeze request from a domain that is not pinned is refused');
+$r = $freeze(['kind' => 'invalid-history']);
+t($r['state'] === 'active', 'a report of invalid history only makes the receiver check the history itself, and it finds none');
+// A partner that claims more than it has: its statement carries no signature of the authority on that entry.
+$liar = function (string $to, array $envelope) use ($headB): array {
+    $answer = transport($to, $envelope);
+    if ($to === 'b.example' && $envelope['payload']['action'] === 'head') {
+        global $CLUSTER;
+        $payload = $answer['head']['payload'];
+        $payload['index'] += 5;
+        $payload['hash'] = str_repeat('d', 64);
+        $answer['head'] = ['payload' => $payload, 'signature' => ledger_sign($CLUSTER['b.example']['node']['private'], ledger_canonical($payload)), 'authoritySignature' => $answer['head']['authoritySignature'], 'public' => $answer['head']['public']];
+    }
+    return $answer;
+};
+$r = peer_compare_heads(ndb('c.example'), node('c.example'), $c['coin'], $liar, $NOW + 3);
+t($r['results']['b.example'] === 'ahead' && $r['state'] === 'active', 'a partner that claims entries nobody signed does not freeze the coin', $r);
+
+// More ways evidence can be wrong, each checked on its own.
+[$c, $alice, $bob, $carol] = funded();
+$other = open_coin(3, 2, 'public', null, 'OTH');
+open_now($other);
+$NOW += 3;
+$headA = peer_head_attestation(ndb('a.example'), node('a.example'), $c['coin'], $NOW);
+$headB = peer_head_attestation(ndb('b.example'), node('b.example'), $c['coin'], $NOW);
+$firstB = peer_head_attestation(ndb('b.example'), node('b.example'), $c['coin'], $NOW, 0);
+$firstA = peer_head_attestation(ndb('a.example'), node('a.example'), $c['coin'], $NOW, 0);
+$firstC = peer_head_attestation(ndb('c.example'), node('c.example'), $c['coin'], $NOW, 0);
+$otherB = peer_head_attestation(ndb('b.example'), node('b.example'), $other['coin'], $NOW, 0);
+$sendFreeze = fn(array $evidence, ?array $sender = null) => transport('c.example', peer_envelope($sender ?? node('b.example'), 'c.example', 'freeze', ['coinId' => $c['coin'], 'evidence' => $evidence], $NOW));
+$refusedEvidence = fn(array $evidence) => str_starts_with(why(fn() => $sendFreeze($evidence)), 'bad-evidence') && state_of('c.example', $c) === 'active';
+t($refusedEvidence(['kind' => 'fork', 'items' => [$firstB, $otherB]]), 'evidence is refused: a statement about another coin');
+$badSig = $headB;
+$badSig['authoritySignature'] = strrev($headB['authoritySignature']);
+t($refusedEvidence(['kind' => 'rollback', 'items' => [$badSig, $firstA]]), 'evidence is refused: a rollback whose entry the authority did not sign');
+t($refusedEvidence(['kind' => 'rollback', 'items' => [$headB, $headA]]), 'evidence is refused: a rollback whose later statement holds as many entries');
+$sameTime = peer_head_attestation(ndb('a.example'), node('a.example'), $c['coin'], $NOW - 3, 0);
+t($refusedEvidence(['kind' => 'rollback', 'items' => [$headB, $sameTime]]), 'evidence is refused: a rollback whose later statement was made before the entry existed');
+t($refusedEvidence(['kind' => 'rollback', 'items' => [$headB, $firstC]]), 'evidence is refused: a rollback whose later statement is not the authority\'s');
+$e1 = ledger_records_after(ndb('a.example'), $c['coin'], 0, 5)[0];
+$e2 = ledger_records_after(ndb('a.example'), $c['coin'], 1, 5)[0];
+$item = fn(array $r, ?array $public = null) => ['public' => $public ?? $r['public'], 'hash' => $r['hash'], 'authoritySignature' => $r['authoritySignature']];
+t($refusedEvidence(['kind' => 'authority-equivocation', 'items' => [$item($e1), $item($e2, $e1['public'])]]), 'evidence is refused: an entry whose public form is not the one that was signed');
+t($refusedEvidence(['kind' => 'authority-equivocation', 'items' => [$item($e1), $item($e2)]]), 'evidence is refused: two different entries at two different indexes');
+$pin = $CLUSTER['c.example']['node']['pinned'];
+$CLUSTER['c.example']['node']['pinned']['z.example'] = peer_public(['private' => $zk = ec_private()]);
+t(refuses(fn() => $sendFreeze(['kind' => 'fork', 'items' => [$firstA, $firstB]], ['domain' => 'z.example', 'private' => $zk]), 'not-in-roster') && state_of('c.example', $c) === 'active', 'a pinned domain outside the roster cannot report a disagreement');
+$CLUSTER['c.example']['node']['pinned'] = $pin;
+$DOWN['c.example'] = true;
+pay($c, $alice, $bob['key'], '2');
+$DOWN['c.example'] = false;
+$headBefore = ledger_head(ndb('c.example'), $c['coin']);
+// Valid evidence from the same pieces freezes: a statement from the authority after the entry was executed that holds fewer entries.
+$r = $sendFreeze(['kind' => 'rollback', 'items' => [$headB, $firstA]]);
+t($r['state'] === 'frozen' && (ledger_evidence(ndb('c.example'), $c['coin'])[0]['kind'] ?? null) === 'rollback', 'and evidence that does prove a rollback freezes the receiver');
+// A frozen copy takes nothing from the authority.
+t(peer_catch_up(ndb('c.example'), node('c.example'), $c['coin'], 'transport', $NOW) === 0 && ledger_head(ndb('c.example'), $c['coin']) === $headBefore, 'a frozen copy does not catch up');
+$NOW -= 3;
 
 echo "\n== partner configuration\n";
 $good = base64_encode(peer_public(['private' => ec_private()]));

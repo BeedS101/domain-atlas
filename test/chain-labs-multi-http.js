@@ -5,6 +5,7 @@
 //   - a domain that is down, the authority restarted with a proposal waiting, recovery, a partner catching up
 //   - two spends of the same units at the same time
 //   - requests from domains that are not pinned, and requests with bad signatures
+//   - signed head statements, comparing heads, and the freeze when the authority is restored from an old backup
 //
 //   node test/chain-labs-multi-http.js
 'use strict';
@@ -58,7 +59,19 @@ for (const n of Object.values(nodes)) {
 }
 function start(n) {
   n.proc = spawn('php', ['-S', '127.0.0.1:' + n.port, '-t', n.root, '-d', 'auto_prepend_file=' + path.join(n.dir, 'prepend.php')], { stdio: 'ignore', env: { ...process.env, PHP_CLI_SERVER_WORKERS: '6' } });
-  return sleep(700);
+  return waitUp(n);
+}
+// Waits until the server answers, up to ten seconds.
+async function waitUp(n) {
+  for (let i = 0; i < 100; i++) {
+    const r = await new Promise((resolve) => {
+      const req = http.request({ host: '127.0.0.1', port: n.port, path: '/spend34.php?action=coins', method: 'GET', headers: { host: n.domain } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+      req.on('error', () => resolve(0));
+      req.end();
+    });
+    if (r !== 0) return;
+    await sleep(100);
+  }
 }
 async function stop(n) {
   if (!n.proc) return;
@@ -246,6 +259,48 @@ const levelOk = (v) => typeof v === 'string' && v !== 'none';
     const big = await post(b, 'action=peer', { payload: { pad: 'x'.repeat(70000) }, signature: 'x' });
     line(big.status === 413, 'an oversized request is refused');
     line((await call(b, 'spend34', 'GET', 'action=peer')).status === 404, 'the peer route takes POST only');
+
+    console.log('\n== comparing heads and freezing');
+    const mir = (await createCoin(a, 'MIR', { mode: 'multi', partners: [B, C], threshold: 2 })).json;
+    await op(a, 'open', { coinId: mir.id });
+    await op(a, 'grant', { coinId: mir.id, to: alice.key, amount: '1000' });
+    await post(a, 'action=propose', { authorization: await transfer(alice, a, mir.id, bob.key, '10') });
+    for (const n of [b, c]) await get(n, 'action=coin&coin=' + mir.id);
+    const domainVerify = (n, att) => crypto.verify('sha256', Buffer.from(canon(att.payload)), n.pair.publicKey, Buffer.from(att.signature, 'base64url'));
+    const ha = await get(a, 'action=head&coin=' + mir.id), hb = await get(b, 'action=head&coin=' + mir.id);
+    line(ha.status === 200 && domainVerify(a, ha.json.head) && ha.json.head.payload.domain === A && ha.json.head.payload.index === 2 && ha.json.state === 'active', 'a domain publishes a signed statement of its head that anyone can verify', ha.json);
+    line(hb.json.head.payload.hash === ha.json.head.payload.hash && crypto.createHash('sha256').update(canon(hb.json.head.public)).digest('hex') === hb.json.head.payload.hash, 'the partners state the same head, and the entry\'s public form hashes to it');
+    line((await get(a, 'action=head&coin=' + '0'.repeat(32))).status === 404, 'a head for an unknown coin is a 404');
+    const cmp = await op(b, 'compare', { coinId: mir.id });
+    line(cmp.status === 200 && cmp.json.results[A] === 'equal' && cmp.json.results[C] === 'equal' && cmp.json.state === 'active', 'comparing heads with the other domains finds them level', cmp.json);
+    line((await post(b, 'action=compare', { coinId: mir.id })).status === 403 && (await op(a, 'compare', { coinId: allOf.id })).status === 200, 'comparing needs the operator token');
+    // The authority is restored from a backup made at entry 2 after the partners have seen entries 3 and 4.
+    await stop(a);
+    const copyDb = (from, to) => { for (const ext of ['', '-wal', '-shm']) { try { fs.rmSync(to + ext, { force: true }); fs.copyFileSync(from + ext, to + ext); } catch (e) {} } };
+    const dbFile = path.join(a.priv, 'chain34.sqlite'), backup = path.join(work, 'backup-a.sqlite');
+    copyDb(dbFile, backup);
+    await start(a);
+    await post(a, 'action=propose', { authorization: await transfer(alice, a, mir.id, bob.key, '11') });
+    await post(a, 'action=propose', { authorization: await transfer(alice, a, mir.id, bob.key, '12') });
+    for (const n of [b, c]) await get(n, 'action=coin&coin=' + mir.id);
+    line((await level(mir.id)) === (await headOf(a, mir.id)) && (await headOf(b, mir.id)).startsWith('4:'), 'the partners hold entries 3 and 4', await level(mir.id));
+    await stop(a);
+    copyDb(backup, dbFile);
+    await start(a);
+    await sleep(1500);
+    line((await headOf(a, mir.id)).startsWith('2:'), 'the authority is back with two entries fewer');
+    const found = await op(b, 'compare', { coinId: mir.id });
+    line(found.status === 200 && found.json.results[A] === 'rollback' && found.json.state === 'frozen', 'a partner that compares freezes on the rolled-back authority', found.json);
+    const states = [];
+    for (const n of [a, b, c]) states.push((await get(n, 'action=head&coin=' + mir.id)).json.state);
+    line(states.every((x) => x === 'frozen'), 'the authority and the other partner checked the evidence and froze too', states);
+    const evid = await op(c, 'evidence', { coinId: mir.id });
+    line(evid.status === 200 && evid.json.state === 'frozen' && evid.json.evidence.length >= 1 && evid.json.evidence[0].kind === 'rollback', 'the evidence is kept for review', evid.json);
+    const stuck = await post(a, 'action=propose', { authorization: await transfer(alice, a, mir.id, bob.key, '1') });
+    line(stuck.status === 409 && stuck.json.code === 'not-active', 'a frozen coin takes no new spend', stuck.json);
+    line((await get(b, 'action=coin&coin=' + mir.id)).json.state === 'frozen' && (await get(b, 'action=receipt&coin=' + mir.id + '&index=4')).status === 200, 'and its history stays readable');
+    const frozenRun = await op(b, 'compare', { coinId: mir.id });
+    line(frozenRun.status === 200 && Object.keys(frozenRun.json.results).length === 0 && frozenRun.json.state === 'frozen', 'a frozen copy compares nothing more', frozenRun.json);
   } finally {
     for (const n of Object.values(nodes)) if (n.proc) n.proc.kill('SIGKILL');
     fs.rmSync(work, { recursive: true, force: true });

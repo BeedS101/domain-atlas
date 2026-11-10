@@ -18,7 +18,7 @@ here is a demonstration with no monetary value.
 | 29 | `ledger29.php` | Read-only signed balance query. |
 | 30, 31 | `account30.php`, `accounts31.php` | Signed zero-balance account opening and account discovery. |
 | 33 | `account-test33.html` | Runs account opening, discovery and a balance read with a throwaway test key. |
-| 34 | `spend34.php` | Spending, receipts and holdings. An owner-signed transfer is executed at once by a single authority coin and answered with a signed receipt; a multi authority coin's authority collects approvals from the other domains first (HTTP 202 while it waits); a signed `holdings` lookup lists a key's coins, private coins only to a key-signed challenge; the operator opens a registered coin as a ledger (a multi coin together with its partner domains), makes treasury grants and recovers waiting proposals; the `peer` route takes requests from the other domains of a coin. Not imported: written for the chain build. |
+| 34 | `spend34.php` | Spending, receipts and holdings. An owner-signed transfer is executed at once by a single authority coin and answered with a signed receipt; a multi authority coin's authority collects approvals from the other domains first (HTTP 202 while it waits); a signed `holdings` lookup lists a key's coins, private coins only to a key-signed challenge; the operator opens a registered coin as a ledger (a multi coin together with its partner domains), makes treasury grants, recovers waiting proposals, compares heads with the other domains and reads the evidence behind a frozen coin; `GET head` is the domain's signed head statement; the `peer` route takes requests from the other domains of a coin. Not imported: written for the chain build. |
 
 ## Running state
 
@@ -78,7 +78,10 @@ each domain's copy of the log level, and approvals. Each domain pins the public 
 two-domain lab may use `peer_public_pem_b64` of `federation20-config.php`), and `chainlabs-config.json` may carry a
 `partners` list naming the domains a host can use as partners. A domain without a pinned key is never contacted and its
 requests are refused. A co-approver checks every entry against its own copy before it signs; with a threshold below the
-roster size a dishonest authority can still fork the log, which the head comparison of a later stage detects.
+roster size a dishonest authority can still fork the log; the domains find that by comparing signed head statements (`GET
+head`, the `compare` operator route and the check an approver makes before it signs), and a split view, a rolled-back
+authority or an invalid entry freezes the coin on every domain that checks the evidence. Resuming a frozen coin is an
+operator's review of the kept evidence (`evidence`); nothing resumes it by itself.
 
 Every commit runs in one `BEGIN IMMEDIATE` transaction that re-checks the entry index, previous hash, signatures, nonce,
 sequence number and balance, so concurrent commits of one index have exactly one winner. Amounts are decimal strings of

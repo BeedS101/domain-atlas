@@ -7,9 +7,11 @@ declare(strict_types=1);
  * Wallet: POST challenge, holdings (public coins to anyone, private coins to a key-signed challenge), propose (an
  *         owner-signed transfer: executed at once by this domain for a single authority coin; for a multi authority coin the
  *         authority collects approvals from the other domains first and answers 202 while it waits for them).
+ *         GET head: this domain's signed statement of the newest entry it holds, for anyone comparing domains.
  * Operator (private operator token): POST open (opens a coin of the coin registry as a ledger, a multi authority coin with
- *         its partner domains), grant (a treasury spend), recover (finishes pending multi authority proposals).
- * Domains: POST peer, a request signed by another domain of the coin (genesis, sync, approve, notify).
+ *         its partner domains), grant (a treasury spend), recover (finishes pending multi authority proposals), compare
+ *         (compares heads with the other domains and freezes the coin on a disagreement), evidence (why a coin is frozen).
+ * Domains: POST peer, a request signed by another domain of the coin (genesis, sync, approve, notify, head, freeze).
  * Storage: chain34.sqlite, the treasury key files and chainlabs-peers.json (pinned partner keys) in the private folder beside
  *          the web root, never inside it.
  */
@@ -105,7 +107,7 @@ function execute_multi34(PDO $db, array $node, callable $send, string $coinId, a
 $method = $_SERVER['REQUEST_METHOD'];
 $action = $_GET['action'] ?? '';
 $now = time();
-$send = peer_http_sender($peerConfig);
+$send = peer_http_sender($peerConfig, 15);
 try {
     if ($method === 'GET' && $action === 'coins') {
         $out = [];
@@ -125,6 +127,10 @@ try {
         $coinId = arg34('coin', '/^[a-f0-9]{32}$/D');
         catchup34($db, $node, $peerConfig, $coinId, $now);
         reply34(200, ['ok' => true, 'receipt' => spend_receipt($db, $coinId, (int) arg34('index', '/^\d{1,9}$/D'))]);
+    }
+    if ($method === 'GET' && $action === 'head') {
+        $coinId = arg34('coin', '/^[a-f0-9]{32}$/D');
+        reply34(200, ['ok' => true, 'head' => peer_head_attestation($db, $node, $coinId, $now), 'state' => ledger_coin($db, $coinId)['state']]);
     }
     if ($method === 'GET' && $action === 'proposal') {
         $coinId = arg34('coin', '/^[a-f0-9]{32}$/D');
@@ -160,11 +166,11 @@ try {
     // Another domain of a coin. The request is signed with that domain's key and checked against the key pinned here.
     if ($action === 'peer') {
         $envelope = body34(65536);
-        reply34(200, ['ok' => true, 'answer' => peer_handle($db, $node, $envelope, $now, peer_http_sender($peerConfig, 8))]);
+        reply34(200, ['ok' => true, 'answer' => peer_handle($db, $node, $envelope, $now, peer_http_sender($peerConfig, 3))]);
     }
 
     // Operator actions.
-    if ($action === 'open' || $action === 'grant' || $action === 'recover') {
+    if (in_array($action, ['open', 'grant', 'recover', 'compare', 'evidence'], true)) {
         $m = body34();
         operator34($m, $admin);
         $coinId = $m['coinId'] ?? null;
@@ -216,6 +222,14 @@ try {
         ledger_add_genesis_signature($db, $coinId, $host, ledger_genesis_sign($genesis, $domainPrivate));
         ledger_activate($db, $coinId, $domainPrivate);
         reply34(201, ['ok' => true, 'coin' => ledger_public_coin($db, $coinId), 'treasuryRef' => $genesis['treasuryRef']]);
+    }
+    if ($action === 'compare') {
+        $coin = ledger_coin($db, $coinId);
+        if ($coin['mode'] !== 'multi') reply34(409, ['ok' => false, 'code' => 'not-multi', 'error' => 'Only a multi authority coin has partners to compare with']);
+        reply34(200, ['ok' => true] + peer_compare_heads($db, $node, $coinId, peer_http_sender($peerConfig, 5), $now));
+    }
+    if ($action === 'evidence') {
+        reply34(200, ['ok' => true, 'state' => ledger_coin($db, $coinId)['state'], 'evidence' => ledger_evidence($db, $coinId)]);
     }
     if ($action === 'recover') {
         $coin = ledger_coin($db, $coinId);

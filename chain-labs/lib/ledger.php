@@ -153,6 +153,7 @@ function ledger_schema(PDO $db): void
     foreach (['prepared_json', 'approvals_json'] as $column) if (!in_array($column, $have, true)) $db->exec('ALTER TABLE ledger_proposals ADD COLUMN ' . $column . ' TEXT');
     $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS ledger_one_pending ON ledger_proposals(coin_id,from_key) WHERE status='pending'");
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_approved(coin_id TEXT NOT NULL, idx INTEGER NOT NULL, hash TEXT NOT NULL, executed_at INTEGER NOT NULL, PRIMARY KEY(coin_id,idx))');
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT, coin_id TEXT NOT NULL, kind TEXT NOT NULL, detail_json TEXT NOT NULL, created_at INTEGER NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_peer_nonces(sender TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(sender,nonce))');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_challenges(challenge TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_nonces(coin_id TEXT NOT NULL, owner_key TEXT NOT NULL, nonce TEXT NOT NULL, PRIMARY KEY(coin_id,owner_key,nonce))');
@@ -385,10 +386,26 @@ function ledger_mirror_genesis(PDO $db, string $coinId, array $record): void
     }
 }
 
-// An operator review after a disagreement stops the coin; nothing here lets it resume by itself.
-function ledger_freeze(PDO $db, string $coinId): void
+// A disagreement stops the coin and keeps the evidence for an operator's review; nothing here lets the coin resume by
+// itself. Freezing twice keeps the first evidence and adds the second.
+function ledger_freeze(PDO $db, string $coinId, string $kind = 'operator', array $detail = [], int $now = 0): void
 {
-    $db->prepare("UPDATE ledger_coins SET state='frozen' WHERE coin_id=? AND state='active'")->execute([$coinId]);
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        $db->prepare("UPDATE ledger_coins SET state='frozen' WHERE coin_id=? AND state='active'")->execute([$coinId]);
+        $db->prepare('INSERT INTO ledger_evidence(coin_id,kind,detail_json,created_at) VALUES(?,?,?,?)')->execute([$coinId, $kind, json_encode($detail, JSON_UNESCAPED_SLASHES), $now]);
+        $db->exec('COMMIT');
+    } catch (Throwable $e) {
+        ledger_rollback($db);
+        throw $e;
+    }
+}
+
+function ledger_evidence(PDO $db, string $coinId): array
+{
+    $q = $db->prepare('SELECT id,kind,detail_json,created_at FROM ledger_evidence WHERE coin_id=? ORDER BY id LIMIT 50');
+    $q->execute([$coinId]);
+    return array_map(fn($r) => ['id' => (int) $r['id'], 'kind' => $r['kind'], 'detail' => json_decode($r['detail_json'], true), 'createdAt' => (int) $r['created_at']], $q->fetchAll(PDO::FETCH_ASSOC));
 }
 
 // ---------- the log ----------

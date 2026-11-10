@@ -225,7 +225,10 @@ co-approvers is what catches an authority that shows different histories to diff
 - Heads equal: normal operation.
 - A domain is behind: it catches up from the receipts.
 - Heads differ at the same index, or a receipt fails verification, at any domain: that domain stops approving the coin
-  and tells the others. The coin is frozen until an operator reviews the evidence. Nothing is repaired automatically.
+  and tells the others, who check the evidence before they stop too. The coin is frozen until an operator reviews the
+  evidence. Nothing is repaired automatically.
+- A partner never holds more entries than the authority: it writes first. A partner that does, or an authority that holds
+  fewer than a partner saw, is a restored or rolled-back authority.
 
 This makes a rolled-back or forked authority detectable by every mirroring domain, because each holds signed receipts
 the authority cannot retract. With a threshold below the roster size, a domain that did not approve an entry still
@@ -435,6 +438,21 @@ Each stage ships separately, with tests, on its own branch.
    - A partner catches up lazily when it is asked for a coin, a receipt or a proposal, and when it is asked to approve. A
      holdings lookup does not catch up first; the wallet compares domains in stage 8.
 6. Mirroring: catch-up, head comparison and the freeze rule, for multi coins.
+   Built in `lib/peer.php` and the `head`, `compare` and `evidence` routes of `spend34.php`:
+   - A head statement (`atlas.ledger.head`: coin, domain, index, hash, time) is signed by the domain and carries the
+     authority's own signature on that entry and the entry's public form. `GET head` publishes it; roster domains ask for it
+     with the `head` peer action.
+   - Before an approver signs, and whenever the operator calls `compare`, a domain compares its head with every other roster
+     domain, not only the authority. A domain that is behind catches up from the authority first.
+   - The coin freezes on evidence the receiving domain checks itself: `fork` (two statements from roster domains for one index
+     with different hashes), `rollback` (an entry the authority signed, held by a domain, and a statement from the authority
+     made after that entry was executed that holds fewer entries), `authority-equivocation` (two entries for one index, both
+     signed by the authority). The domain that finds it freezes and sends the evidence to the others, who verify it and freeze.
+   - An entry that fails a check during catch-up freezes that copy and is kept as `invalid-history` evidence; the others are
+     told, and they pull and check the history themselves rather than freezing on the report.
+   - A frozen copy approves nothing, catches up from nothing and compares nothing. History and receipts stay readable.
+     Resuming a frozen coin is an operator's review of the kept evidence; no function does it.
+   - A domain that claims entries nobody signed, or an old statement replayed as a new one, proves nothing and freezes nothing.
 7. Purchase with Gold, with the limits in the genesis, tested with crash injection at each step of 10.3.
 8. Wallet: the Ledger tab as a list of domains with the `holdings` lookup, the transfer signing flow and Buy with Gold,
    in a new file with only small changes to `viewer.js`.
