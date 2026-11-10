@@ -1,4 +1,4 @@
-# Lints the chain-labs PHP, checks it against the recorded source hashes and runs the refusal smoke test, and the ledger store, coin form, spending, multi authority, purchase, wallet module and endpoint tests. It deploys
+# Lints the chain-labs PHP, checks it against the recorded source hashes and runs the refusal smoke test, and the ledger store, coin form, spending, multi authority, purchase, wallet module, scanner and endpoint tests. It deploys
 # nothing and needs no secrets. The labs use PHP 8.1 features (never return type, array_is_list).
 name: chain-labs
 
@@ -17,6 +17,7 @@ on:
       - 'test/chain-labs-purchase.php'
       - 'test/chain-labs-purchase-http.js'
       - 'test/chain-labs-wallet.js'
+      - 'test/chain-labs-scan-http.js'
       - 'extension/chain-labs-wallet.js'
       - 'test/support/**'
       - '.github/workflows/chain-labs.yml'
@@ -34,6 +35,7 @@ on:
       - 'test/chain-labs-purchase.php'
       - 'test/chain-labs-purchase-http.js'
       - 'test/chain-labs-wallet.js'
+      - 'test/chain-labs-scan-http.js'
       - 'extension/chain-labs-wallet.js'
       - 'test/support/**'
       - '.github/workflows/chain-labs.yml'
@@ -79,3 +81,4 @@ jobs:
           php test/chain-labs-purchase.php
           node test/chain-labs-purchase-http.js
           node test/chain-labs-wallet.js
+          node test/chain-labs-scan-http.js

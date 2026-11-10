@@ -19,6 +19,7 @@ here is a demonstration with no monetary value.
 | 30, 31 | `account30.php`, `accounts31.php` | Signed zero-balance account opening and account discovery. |
 | 33 | `account-test33.html` | Runs account opening, discovery and a balance read with a throwaway test key. |
 | 34 | `spend34.php` | Spending, receipts and holdings. An owner-signed transfer is executed at once by a single authority coin and answered with a signed receipt; a multi authority coin's authority collects approvals from the other domains first (HTTP 202 while it waits); a signed `holdings` lookup lists a key's coins, private coins only to a key-signed challenge; the operator opens a registered coin as a ledger (a multi coin together with its partner domains), makes treasury grants, recovers waiting proposals, compares heads with the other domains and reads the evidence behind a frozen coin; `GET head` is the domain's signed head statement; the `peer` route takes requests from the other domains of a coin. A coin whose genesis has a purchase policy is sold for a price credential through `purchase` (the authority only; the code that holds the credentials is reached through `gold-adapter.php` in the private folder, and without it the route answers 503); the operator finishes or cancels waiting sales with `purchase-recover` and `purchase-cancel`. Not imported: written for the chain build. |
+| 35 | `scan35.php`, `scan35.html` | The scanner: a read-only view of the coins of a domain, like a block explorer. `scan35.html` is one page with hash routes (`#/coins`, `#/coin/ID`, `#/coin/ID/entries`, `#/coin/ID/entry/N`, `#/coin/ID/account/REF`, `#/coin/ID/domains`); `scan35.php` serves the read-only JSON routes it uses (`coins`, `coin`, `entries`, `entry`, `account`, `domains`), all GET, opened on the database read-only and paged to at most 100 entries. A public coin shows keys; a private coin shows references and amounts, never a key, and its accounts are reached by reference. The page verifies the log in the browser, from the genesis to the head or to one entry: each hash, the chain, the authority's signature and the roster's approvals, against the keys in the coin's own genesis (balances are not replayed). The domains page shows the signed head each roster domain states and whether they agree; a frozen coin says so and why. Not imported: written for the chain build. |
 
 ## Running state
 
@@ -93,6 +94,15 @@ callables (the contract is at the top of `lib/purchase.php`); each domain that a
 `test/support/gold-stand-in.php` is the stand-in the tests use. Sales are delivered one at a time per coin; a sale that meets
 another in flight answers 202 and is finished by repeating the request or by `purchase-recover`.
 
+The scanner shows only public forms. Entries are read from the public form of the log, so a private coin's pages hold references,
+amounts, hashes and signatures and nothing that names a key; the private form of an entry, and an owner's authorization, are
+never read by it. Evidence of a frozen coin is shown as the signed statements that prove it, and a record of an entry that
+failed the checks only by its index and reason. The domains route asks the other roster domains for their signed heads, which
+makes it the one route that causes requests elsewhere, so its answer is kept for 15 seconds (`scan35-heads-<coin>.json` in the
+private folder) and the page checks every statement's signature itself. The scanner does not catch a partner up with the
+authority; it shows this domain's copy, and the domains page shows how far each other domain is. Limits per address are left to
+the web server in front of it.
+
 Every commit runs in one `BEGIN IMMEDIATE` transaction that re-checks the entry index, previous hash, signatures, nonce,
 sequence number and balance, so concurrent commits of one index have exactly one winner. Amounts are decimal strings of
 whole units, at most 10^12. The `lib` folder must be uploaded with the PHP files; the library refuses a direct request.
@@ -118,7 +128,9 @@ its line in `SOURCE.sha256`.
     php test/chain-labs-purchase.php
     node test/chain-labs-purchase-http.js
     node test/chain-labs-wallet.js
+    node test/chain-labs-scan-http.js
 
-The wallet screen is checked in the real extension (needs Chromium and a display; not part of the workflow):
+The wallet screen and the scanner page are checked in a real browser (needs Chromium and a display; not part of the workflow):
 
     xvfb-run -a node test/manual-chain-labs-tab.js
+    xvfb-run -a node test/manual-chain-labs-scanner.js

@@ -507,6 +507,26 @@ Each stage ships separately, with tests, on its own branch.
      issuer code.
 9. Scanner: the coin, entries, entry, account and domains pages of section 11.2, with tests that a private coin's pages
    never contain a key.
+   Built as `chain-labs/scan35.php` (read-only JSON routes) and `chain-labs/scan35.html` (one page with hash routes):
+   - The routes are GET only and the database is opened read-only. `coins`, `coin`, `entries` (after an index, at most 100 per
+     page), `entry`, `account` (by reference, paged by position) and `domains`. They read public forms only: a private coin's
+     answers carry references, amounts, hashes and signatures, and no key, authorization or reference secret. A key finds no
+     account in a private coin. A coin still waiting for signatures has no page.
+   - The page draws everything with `textContent` and hash links it validated; no server text is parsed as HTML. A public coin
+     shows keys in its entries and accounts, a private coin shows references.
+   - Verification runs in the browser: from the genesis to the head or to a chosen entry, a page at a time, it recomputes each
+     entry's hash from its public form, checks that it extends the entry before, that the authority signed it, that the roster
+     domains approved it (at least the threshold, distinct, and not the authority counted twice) and, for entry 0, that every
+     roster domain signed the genesis and the entry is the one the genesis gives. The keys are those in the coin's own genesis,
+     whose digest is shown. Balances are not replayed, so what a visitor learns is that the log is the one the roster signed,
+     not that every balance follows from it.
+   - `domains` asks each other roster domain for its signed head (the peer `head` request, so only pinned domains are asked),
+     says whether it is level, behind, ahead, holds another entry at the same place (a fork), or did not answer, and returns the
+     statements as signed so the page can check them against the genesis keys. The answer is kept 15 seconds so the route
+     cannot be used to make a domain's partners answer in bulk. A frozen coin shows the evidence that froze it (the signed
+     statements, verified in the page); the record of an invalid entry shows only its index and reason, since it holds the
+     private form.
+   - The scanner does not catch a partner up with the authority before it answers; it shows this domain's copy.
 
 ## 14. Open questions
 
@@ -535,7 +555,8 @@ Each stage ships separately, with tests, on its own branch.
 16. Do the references stay fixed for the life of the coin, or can an owner ask for a new account reference? Default:
     fixed; an owner who wants another reference opens a new key.
 17. Page size and rate limits for the scanner and the `holdings` lookup. Default: fixed page size, per-address limits
-    from the domain's existing abuse limits.
+    from the domain's existing abuse limits. The scanner now has the fixed page size (100 at most, 25 by default); the
+    per-address limit is not built and is left to the web server, and the `holdings` lookup has none yet.
 18. Does the wallet show private-coin results from a domain only after the owner approves each lookup, or automatically
     once the domain is on the list? Default: automatically, since adding the domain was the consent.
 

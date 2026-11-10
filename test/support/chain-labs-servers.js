@@ -1,4 +1,4 @@
-// Three live PHP servers running the real chain labs endpoint (chain-labs/spend34.php and coin26.php), one per domain
+// Three live PHP servers running the real chain labs endpoints (chain-labs/spend34.php, scan35.php and coin26.php), one per domain
 // (a.example, b.example, c.example), each with its own database, domain key and the others' keys pinned, and a stand-in for
 // the code that holds Gold behind gold-adapter.php. Used by the tests that drive a wallet against them.
 //   const S = require('./support/chain-labs-servers');  S.nodes, S.start(n), S.stop(n), S.op(n, action, body), ...
@@ -40,7 +40,7 @@ for (const n of Object.values(nodes)) {
   fs.mkdirSync(root, { recursive: true });
   fs.mkdirSync(priv);
   n.root = root; n.priv = priv;
-  for (const f of ['coin26.php', 'spend34.php']) fs.copyFileSync(path.join(DIR, f), path.join(root, f));
+  for (const f of ['coin26.php', 'spend34.php', 'scan35.php', 'scan35.html']) fs.copyFileSync(path.join(DIR, f), path.join(root, f));
   fs.cpSync(path.join(DIR, 'lib'), path.join(root, 'lib'), { recursive: true });
   fs.writeFileSync(path.join(priv, 'federation20-config.php'), "<?php return ['private_pem_b64' => '" + Buffer.from(n.pair.privateKey.export({ type: 'pkcs8', format: 'pem' })).toString('base64') + "', 'admin_token_hex' => '" + n.token + "'];\n");
   const keys = {}, urls = {};
@@ -99,6 +99,7 @@ function call(n, file, method, query, body) {
 }
 const get = (n, q) => call(n, 'spend34', 'GET', q);
 const post = (n, q, body) => call(n, 'spend34', 'POST', q, body);
+const scan = (n, q) => call(n, 'scan35', 'GET', q);
 const op = (n, action, body) => post(n, 'action=' + action, { adminToken: n.token, ...body });
 const createCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: n.token, ...extra });
 const NOW = () => Math.floor(Date.now() / 1000);
@@ -127,4 +128,4 @@ function cleanup() {
   for (const n of Object.values(nodes)) if (n.proc) n.proc.kill('SIGKILL');
   fs.rmSync(work, { recursive: true, force: true });
 }
-module.exports = { A, B, C, D, nodes, issuer, issuerKey, POLICY, b64u, canon, sleep, wallet, start, stop, call, get, post, op, createCoin, NOW, iso, transfer, units, headOf, level, levelOk, hex, credential, cleanup };
+module.exports = { A, B, C, D, nodes, issuer, issuerKey, POLICY, b64u, canon, sleep, wallet, start, stop, call, get, post, scan, op, createCoin, NOW, iso, transfer, units, headOf, level, levelOk, hex, credential, cleanup };

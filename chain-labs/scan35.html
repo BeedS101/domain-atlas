@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chainblock Labs 35 — Scanner</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{max-width:1040px;margin:auto;padding:24px 18px;background:#0d1828;color:#eaf4ff;font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+h1{font-size:1.8rem;margin:.2rem 0}
+h2{font-size:1.25rem;margin:0 0 .6rem}
+section{background:#17283e;border:1px solid #435e7d;border-radius:12px;padding:18px;margin:16px 0}
+a{color:#a3e7ff}
+nav{display:flex;flex-wrap:wrap;gap:6px 16px;margin:6px 0 4px}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #2c4561;vertical-align:top}
+th{color:#b9cbe0;font-weight:600}
+dl{display:grid;grid-template-columns:minmax(120px,200px) 1fr;gap:6px 14px;margin:0}
+dt{color:#b9cbe0}
+dd{margin:0;min-width:0;overflow-wrap:anywhere}
+code,.mono{font:.85rem ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+button{background:#a3e7ff;color:#102536;padding:9px 14px;border:0;border-radius:8px;cursor:pointer;font:inherit;font-weight:700}
+button.quiet{background:#2c4561;color:#eaf4ff}
+button:disabled{opacity:.45;cursor:default}
+input{width:100%;max-width:560px;border:1px solid #607490;background:#0a1423;color:#fff;padding:9px;border-radius:7px;font:inherit}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
+.tag{display:inline-block;padding:1px 8px;border-radius:99px;border:1px solid #607490;font-size:.78rem;color:#cfe0f2}
+.tag.good{border-color:#58c58a;color:#9fe3bd}
+.tag.bad{border-color:#e07a7a;color:#ffb4b4}
+.tag.warn{border-color:#d6a13a;color:#f0cf8a}
+.banner{border:1px solid #e07a7a;border-left:4px solid #e07a7a;background:rgba(224,122,122,.12);padding:10px 12px;border-radius:6px;margin:10px 0}
+.note{color:#b9cbe0;font-size:.9rem}
+.scroll{overflow-x:auto}
+@media (max-width:640px){dl{grid-template-columns:1fr}dt{margin-top:6px}}
+</style>
+<!-- atlas-labs:styles:start -->
+<style>
+.atlas-labs-risk,.atlas-labs-footer{box-sizing:border-box;font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:inherit}
+.atlas-labs-risk{margin:1rem auto;padding:.7rem .9rem;max-width:900px;border:1px solid rgba(214,158,46,.7);border-left:4px solid rgba(214,158,46,.95);border-radius:6px;background:rgba(214,158,46,.12)}
+.atlas-labs-risk a,.atlas-labs-footer a{color:inherit;text-decoration:underline;font-weight:600}
+.atlas-labs-footer{clear:both;position:relative;margin:3rem auto 0;max-width:900px;padding:1rem .5rem 1.5rem;border-top:1px solid rgba(128,128,128,.45);text-align:center;opacity:.9}
+.atlas-labs-footer p{margin:.25rem 0;font:inherit}
+</style>
+<!-- atlas-labs:styles:end -->
+</head><body>
+<!-- atlas-labs:risk:start -->
+<div class="atlas-labs-risk" role="note"><strong>Experimental platform — use at your own risk.</strong> Assets, tokens, credits and credentials here are demonstrations with no monetary value and no promise of redemption. <a href="/terms/">Terms &amp; Conditions</a></div>
+<!-- atlas-labs:risk:end -->
+<p class="note">CHAINBLOCK LABS 35</p>
+<h1>Scanner</h1>
+<p class="note">A read-only view of the test coins on this domain: the log, the accounts, and what each domain of a coin says it holds. Nothing here can change a coin.</p>
+<nav><a href="#/coins">Coins</a></nav>
+<main id="view" aria-live="polite"><p>Loading…</p></main>
+
+<script id="scan-verify">
+// Chain verification in the browser. Each entry is checked from the data the scanner returns and the keys in the coin's own
+// genesis: the hash of its public form, its place in the chain, the authority's signature and the approvals of the roster
+// domains. It does not need the scanner to be honest about anything but which entries exist. Balances are not replayed.
+// Texts are signed in the canonical form of lib/ledger.php (sorted keys, no spaces); every signed value is ASCII.
+(function (root) {
+  'use strict';
+  const SPKI_HEADER = '3059301306072a8648ce3d020106082a8648ce3d030107034200';
+  const enc = new TextEncoder();
+
+  function isObject(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
+  function canonical(v) {
+    if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']';
+    if (isObject(v)) return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}';
+    if (typeof v === 'number' && !Number.isInteger(v)) throw new Error('floating point values are not allowed');
+    return JSON.stringify(v);
+  }
+  function toHex(bytes) { return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(''); }
+  function fromB64(text, url) {
+    if (typeof text !== 'string' || text.length > 4096 || !(url ? /^[A-Za-z0-9_-]+$/ : /^[A-Za-z0-9+/]+={0,2}$/).test(text)) return null;
+    let s = url ? text.replace(/-/g, '+').replace(/_/g, '/') : text;
+    while (s.length % 4) s += '=';
+    try { const bin = atob(s); return Uint8Array.from(bin, (c) => c.charCodeAt(0)); } catch (e) { return null; }
+  }
+  async function sha256Hex(text) { return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(text)))); }
+
+  // A domain key is a P-256 public key in PEM; its signatures are DER ECDSA, which WebCrypto wants as r||s.
+  function spkiOfPem(pem) {
+    if (typeof pem !== 'string' || pem.length > 400) return null;
+    const m = /^-----BEGIN PUBLIC KEY-----\s+([A-Za-z0-9+/=\s]+?)\s+-----END PUBLIC KEY-----\s*$/.exec(pem);
+    if (!m) return null;
+    const der = fromB64(m[1].replace(/\s+/g, ''), false);
+    return der && der.length === 91 && toHex(der.slice(0, 26)) === SPKI_HEADER ? der : null;
+  }
+  function derToRaw(der) {
+    let i = 0;
+    const len = () => { let n = der[i++]; if (n & 0x80) { const c = n & 0x7f; if (c < 1 || c > 2) return -1; n = 0; for (let k = 0; k < c; k++) n = (n << 8) | der[i++]; } return n; };
+    if (!der || der[i++] !== 0x30) return null;
+    const total = len();
+    if (total < 0 || i + total !== der.length) return null;
+    const out = new Uint8Array(64);
+    for (let part = 0; part < 2; part++) {
+      if (der[i++] !== 0x02) return null;
+      const n = len();
+      if (n < 1 || n > 33 || i + n > der.length) return null;
+      let slice = der.slice(i, i + n);
+      i += n;
+      while (slice.length > 32 && slice[0] === 0) slice = slice.slice(1);
+      if (slice.length > 32) return null;
+      out.set(slice, part * 32 + 32 - slice.length);
+    }
+    return i === der.length ? out : null;
+  }
+  const keyCache = new Map();
+  async function verifySignature(pem, text, signature) {
+    const spki = spkiOfPem(pem);
+    const der = fromB64(signature, true);
+    const raw = der && derToRaw(der);
+    if (!spki || !raw) return false;
+    try {
+      let key = keyCache.get(pem);
+      if (!key) { key = await crypto.subtle.importKey('spki', spki, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']); keyCache.set(pem, key); }
+      return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, raw, enc.encode(text));
+    } catch (e) { return false; }
+  }
+  async function fingerprint(pem) {
+    const spki = spkiOfPem(pem);
+    return spki ? toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', spki))).slice(0, 16) : '';
+  }
+
+  function rosterKey(genesis, domain) {
+    for (const m of genesis.roster || []) if (m.domain === domain) return m.key;
+    return null;
+  }
+  function approvalBytes(coinId, index, hash) { return canonical({ type: 'atlas.ledger.entry.approval', v: 1, coinId, index, hash }); }
+
+  // One entry against the chain so far. Returns null when it holds, or { check, detail } for the first thing that does not.
+  async function checkEntry(genesis, genesisDigest, item, expectIndex, prevHash) {
+    const e = item && item.entry;
+    if (!isObject(e) || typeof item.hash !== 'string') return { check: 'shape', detail: 'the entry has no public form or hash' };
+    if (e.index !== expectIndex) return { check: 'index', detail: 'expected entry ' + expectIndex + ' and found ' + e.index };
+    if (e.coinId !== genesis.coinId) return { check: 'coin', detail: 'the entry belongs to another coin' };
+    let digest;
+    try { digest = await sha256Hex(canonical(e)); } catch (err) { return { check: 'hash', detail: 'the entry cannot be hashed' }; }
+    if (digest !== item.hash) return { check: 'hash', detail: 'the hash is not the hash of the entry' };
+    if (e.prevHash !== prevHash) return { check: 'prev-hash', detail: 'the entry does not extend the one before it' };
+    const authority = genesis.authority;
+    const authorityKey = rosterKey(genesis, authority);
+    if (!authorityKey || !(await verifySignature(authorityKey, item.hash, item.authoritySignature))) return { check: 'authority-signature', detail: authority + ' did not sign this entry' };
+    const approvals = Array.isArray(item.approvals) ? item.approvals : null;
+    if (!approvals) return { check: 'approvals', detail: 'the approvals are missing' };
+    if (expectIndex === 0) {
+      if (e.type !== 'genesis' || e.from !== null || e.to !== genesis.treasuryRef || e.amount !== genesis.initialUnits || e.executedAt !== genesis.createdAt) return { check: 'genesis-entry', detail: 'entry 0 is not the one the genesis gives' };
+      const seen = new Set();
+      for (const a of approvals) {
+        const key = isObject(a) && typeof a.domain === 'string' ? rosterKey(genesis, a.domain) : null;
+        if (!key || seen.has(a.domain) || !(await verifySignature(key, genesisDigest, a.signature))) return { check: 'genesis-signature', detail: 'a genesis signature does not verify' };
+        seen.add(a.domain);
+      }
+      for (const m of genesis.roster) if (!seen.has(m.domain)) return { check: 'genesis-signature', detail: m.domain + ' has not signed the genesis' };
+      return null;
+    }
+    if (e.type !== 'transfer') return { check: 'type', detail: 'only entry 0 can be a genesis' };
+    const signers = new Set([authority]);
+    for (const a of approvals) {
+      const key = isObject(a) && typeof a.domain === 'string' ? rosterKey(genesis, a.domain) : null;
+      if (!key || signers.has(a.domain) || !(await verifySignature(key, approvalBytes(genesis.coinId, expectIndex, item.hash), a.signature))) return { check: 'approval', detail: 'an approval does not verify' };
+      signers.add(a.domain);
+    }
+    if (signers.size < genesis.threshold) return { check: 'threshold', detail: 'the entry has ' + signers.size + ' of ' + genesis.threshold + ' required approvals' };
+    return null;
+  }
+
+  // Walks the log from entry 0 to entry `upTo` a page at a time. `fetchPage(after)` returns { entries, next } like the
+  // entries route. Stops at the first entry that fails. Resolves { ok, checked, lastHash, problem, cancelled }.
+  async function verifyChain(opts) {
+    const { genesis, genesisDigest, upTo, fetchPage, onProgress, isCancelled } = opts;
+    let digest;
+    try { digest = await sha256Hex(canonical(genesis)); } catch (e) { digest = ''; }
+    if (digest !== genesisDigest) return { ok: false, checked: 0, lastHash: null, problem: { index: null, check: 'genesis-digest', detail: 'the genesis does not match its digest' } };
+    let prev = genesisDigest, next = 0, after = -1;
+    while (next <= upTo) {
+      if (isCancelled && isCancelled()) return { ok: false, checked: next, lastHash: prev, cancelled: true };
+      const page = await fetchPage(after);
+      if (!page || !Array.isArray(page.entries) || !page.entries.length) return { ok: false, checked: next, lastHash: prev, problem: { index: next, check: 'missing', detail: 'the scanner has no entry ' + next } };
+      for (const item of page.entries) {
+        if (next > upTo) break;
+        const bad = await checkEntry(genesis, genesisDigest, item, next, prev);
+        if (bad) return { ok: false, checked: next, lastHash: prev, problem: { index: next, check: bad.check, detail: bad.detail } };
+        prev = item.hash;
+        next++;
+      }
+      after = page.entries[page.entries.length - 1].entry.index;
+      if (onProgress) onProgress(next, upTo + 1);
+    }
+    return { ok: true, checked: next, lastHash: prev };
+  }
+
+  // A head statement a domain signed: its fields, its signature against the roster key, and (when it carries the entry's
+  // public form) that the form has the hash and the authority signed that hash.
+  async function verifyHead(genesis, head) {
+    const payload = isObject(head) ? head.payload : null;
+    if (!isObject(payload)) return { ok: false, reason: 'no statement' };
+    const fields = Object.keys(payload).sort().join(',');
+    if (fields !== 'coinId,domain,hash,index,issuedAt,type,v' || payload.type !== 'atlas.ledger.head' || payload.v !== 1 || payload.coinId !== genesis.coinId
+      || !Number.isInteger(payload.index) || payload.index < 0 || !/^[a-f0-9]{64}$/.test(String(payload.hash))) return { ok: false, reason: 'the statement is malformed' };
+    const key = rosterKey(genesis, payload.domain);
+    if (!key || !(await verifySignature(key, canonical(payload), head.signature))) return { ok: false, reason: 'the signature does not verify' };
+    if (head.public !== undefined && head.public !== null) {
+      if (!isObject(head.public) || head.public.index !== payload.index || (await sha256Hex(canonical(head.public))) !== payload.hash) return { ok: false, reason: 'the entry does not have that hash' };
+      if (!(await verifySignature(rosterKey(genesis, genesis.authority), payload.hash, head.authoritySignature))) return { ok: false, reason: 'the authority did not sign that entry' };
+    }
+    return { ok: true, reason: '' };
+  }
+
+  // An entry as the authority signed it, shown as evidence that it signed two of them for one index.
+  async function verifySignedEntry(genesis, item) {
+    if (!isObject(item) || !isObject(item.public) || typeof item.hash !== 'string') return { ok: false, reason: 'no entry' };
+    if ((await sha256Hex(canonical(item.public))) !== item.hash) return { ok: false, reason: 'the entry does not have that hash' };
+    return (await verifySignature(rosterKey(genesis, genesis.authority), item.hash, item.authoritySignature)) ? { ok: true, reason: '' } : { ok: false, reason: 'the authority did not sign it' };
+  }
+
+  const api = { canonical, sha256Hex, spkiOfPem, derToRaw, verifySignature, fingerprint, approvalBytes, checkEntry, verifyChain, verifyHead, verifySignedEntry };
+  root.ScanVerify = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+</script>
+
+<script id="scan-app">
+// The scanner pages. Every value from the server reaches the page through textContent or a validated hash link; nothing is
+// ever parsed as HTML.
+(function () {
+  'use strict';
+  const V = window.ScanVerify;
+  const view = document.getElementById('view');
+  const PAGE = 25;
+  const ID = /^[a-f0-9]{32}$/;
+  const REF = /^[A-Za-z0-9_-]{16,200}$/;
+  const INT = /^\d{1,9}$/;
+  let token = 0;
+
+  const ATTRS = new Set(['class', 'title', 'id', 'type', 'placeholder', 'for', 'role', 'colspan', 'spellcheck', 'autocomplete', 'aria-label']);
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === null || v === undefined || v === false) continue;
+      if (k === 'href') { if (typeof v === 'string' && v.startsWith('#/')) el.setAttribute('href', v); } else if (k === 'onclick') el.addEventListener('click', v);
+      else if (k === 'onsubmit') el.addEventListener('submit', v);
+      else if (ATTRS.has(k)) el.setAttribute(k, String(v));
+    }
+    for (const kid of kids.flat()) {
+      if (kid === null || kid === undefined || kid === false) continue;
+      el.appendChild(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+    }
+    return el;
+  }
+  const short = (s) => (typeof s === 'string' && s.length > 22 ? s.slice(0, 9) + '…' + s.slice(-6) : String(s));
+  const mono = (s, full) => h('code', { title: full ? String(s) : null }, full ? short(s) : String(s));
+  const tag = (text, kind) => h('span', { class: 'tag' + (kind ? ' ' + kind : '') }, text);
+  const enc = encodeURIComponent;
+
+  function fmtUnits(units, dec) {
+    if (typeof units !== 'string' || !/^\d{1,16}$/.test(units) || !Number.isInteger(dec)) return '?';
+    if (!dec) return units.replace(/^0+(?=\d)/, '');
+    const s = units.padStart(dec + 1, '0');
+    const whole = s.slice(0, -dec), frac = s.slice(-dec).replace(/0+$/, '');
+    return frac ? whole + '.' + frac : whole;
+  }
+
+  async function api(action, params) {
+    const q = Object.entries(params || {}).map(([k, v]) => enc(k) + '=' + enc(String(v))).join('&');
+    let r, body;
+    try {
+      r = await fetch('./scan35.php?action=' + enc(action) + (q ? '&' + q : ''), { cache: 'no-store', credentials: 'same-origin' });
+      body = await r.json();
+    } catch (e) { throw new Error('The scanner did not answer.'); }
+    if (!r.ok || !body || body.ok !== true) throw new Error((body && body.error) || 'The scanner refused the request.');
+    return body;
+  }
+
+  function show(...nodes) { view.replaceChildren(...nodes.flat().filter(Boolean)); }
+  function section(title, ...body) { return h('section', null, title ? h('h2', null, title) : null, ...body); }
+  function fail(message) { show(section('Cannot show this', h('p', null, message), h('p', null, h('a', { href: '#/coins' }, 'Back to the coins')))); }
+  function dl(pairs) {
+    const el = h('dl');
+    for (const [k, v] of pairs) { if (v === null || v === undefined) continue; el.append(h('dt', null, k), h('dd', null, v)); }
+    return el;
+  }
+  const coinNav = (id) => h('nav', null, h('a', { href: '#/coin/' + id }, 'Coin'), h('a', { href: '#/coin/' + id + '/entries' }, 'Entries'), h('a', { href: '#/coin/' + id + '/domains' }, 'Domains'));
+  const accountLink = (id, ref, label) => h('a', { href: '#/coin/' + id + '/account/' + enc(ref), title: ref }, label || short(ref));
+  const stateTag = (s) => tag(s, s === 'active' ? 'good' : 'bad');
+
+  // ---------- the coins ----------
+
+  async function coinsView(t) {
+    const r = await api('coins');
+    if (t !== token) return;
+    if (!r.coins.length) { show(section('Coins on ' + r.domain, h('p', null, 'This domain has no open coins yet.'))); return; }
+    const rows = r.coins.map((c) => h('tr', null,
+      h('td', null, h('a', { href: '#/coin/' + c.coinId }, c.symbol)), h('td', null, c.name),
+      h('td', null, tag(c.visibility, c.visibility === 'private' ? 'warn' : '')), h('td', null, c.mode === 'multi' ? 'multi authority' : 'single authority'),
+      h('td', null, stateTag(c.state)), h('td', null, String(c.entries))));
+    show(section('Coins on ' + r.domain, h('div', { class: 'scroll' }, h('table', null,
+      h('tr', null, ...['Symbol', 'Name', 'Visibility', 'Authority', 'State', 'Entries'].map((x) => h('th', null, x))), ...rows)),
+    h('p', { class: 'note' }, 'A public coin shows account keys. A private coin shows references only; the keys behind them are never shown here.')));
+  }
+
+  // ---------- evidence of a frozen coin ----------
+
+  const EVIDENCE = {
+    'fork': 'Two roster domains stated different entries for the same position.',
+    'rollback': 'The authority stated fewer entries than one it had already signed.',
+    'authority-equivocation': 'The authority signed two different entries for the same position.',
+    'invalid-history': 'A domain received an entry that failed the checks, so its copy stopped.',
+    'operator': 'An operator stopped this coin.'
+  };
+  async function evidenceBlock(genesis, evidence) {
+    const out = [];
+    for (const ev of evidence) {
+      const d = ev.detail || {};
+      const lines = [h('p', null, EVIDENCE[d.kind] || 'The coin was stopped (' + String(d.kind) + ').')];
+      if (d.kind === 'invalid-history') lines.push(h('p', { class: 'note' }, 'Entry ' + String(d.index) + ': ' + String(d.reason || '') + (d.message ? ' (' + d.message + ')' : '')));
+      if (Array.isArray(d.items)) {
+        for (const item of d.items) {
+          const p = item && item.payload;
+          const r = p ? await V.verifyHead(genesis, item) : await V.verifySignedEntry(genesis, item);
+          const what = p ? p.domain + ' stated entry ' + p.index + ' as ' + short(p.hash) : 'Signed entry ' + (item && item.public ? item.public.index : '?') + ' as ' + short(item && item.hash);
+          lines.push(h('p', null, what + ' ', r.ok ? tag('signature verified here', 'good') : tag('does not verify: ' + r.reason, 'bad')));
+        }
+      }
+      out.push(h('div', { class: 'banner' }, ...lines));
+    }
+    return out;
+  }
+
+  // ---------- verification ----------
+
+  function verifyBox(c, upTo, label) {
+    const status = h('p', { role: 'status' }, 'Not run.');
+    const go = h('button', { type: 'button' }, label);
+    const stop = h('button', { type: 'button', class: 'quiet' }, 'Cancel');
+    stop.disabled = true;
+    let mine = token, cancelled = false;
+    stop.addEventListener('click', () => { cancelled = true; });
+    go.addEventListener('click', async () => {
+      go.disabled = true; stop.disabled = false; cancelled = false; mine = token;
+      status.textContent = 'Checking…';
+      try {
+        const res = await V.verifyChain({
+          genesis: c.genesis, genesisDigest: c.genesisDigest, upTo,
+          fetchPage: (after) => api('entries', { coin: c.genesis.coinId, after, limit: c.pageMax || 100 }),
+          onProgress: (n, total) => { if (mine === token) status.textContent = 'Checked ' + n + ' of ' + total + ' entries…'; },
+          isCancelled: () => cancelled || mine !== token
+        });
+        if (mine !== token) return;
+        if (res.ok) status.textContent = 'Verified ' + res.checked + ' entries, 0 to ' + (res.checked - 1) + '. Every entry has the hash of its own contents and extends the one before it from the genesis (digest ' + short(c.genesisDigest)
+          + '). The authority, ' + c.genesis.authority + ', signed each one and each has at least ' + c.genesis.threshold + ' of ' + c.genesis.roster.length + ' approvals from the roster domains. Balances were not replayed.';
+        else if (res.cancelled) status.textContent = 'Stopped after ' + res.checked + ' entries.';
+        else status.textContent = 'Does not verify' + (res.problem.index === null ? '' : ' at entry ' + res.problem.index) + ' (' + res.problem.check + '): ' + res.problem.detail + '. ' + res.checked + ' earlier entries were fine.';
+      } catch (e) { if (mine === token) status.textContent = e.message; }
+      go.disabled = false; stop.disabled = true;
+    });
+    return h('div', null, h('div', { class: 'row' }, go, stop), status);
+  }
+
+  // ---------- one coin ----------
+
+  async function coinView(id, t) {
+    const c = await api('coin', { coin: id });
+    const g = c.genesis, dec = g.decimals;
+    const recent = c.head.index >= 0 ? await api('entries', { coin: id, after: Math.max(-1, c.head.index - 5), limit: 5 }) : { entries: [] };
+    const frozen = c.state === 'frozen' ? await evidenceBlock(g, c.evidence) : [];
+    if (t !== token) return;
+    const fp = [];
+    for (const m of g.roster) fp.push(await V.fingerprint(m.key));
+    if (t !== token) return;
+    const roster = h('div', null, ...g.roster.map((m, i) => h('div', null, m.domain + (m.domain === g.authority ? ' (authority)' : '') + ' ', h('code', { title: m.key }, 'key ' + fp[i]))));
+    const policies = [];
+    if (g.faucet) policies.push(['Faucet', 'Up to ' + fmtUnits(g.faucet.maxAmount, dec) + ' per grant, ' + fmtUnits(g.faucet.perKeyLimit, dec) + ' per account, ' + g.faucet.cooldownSeconds + ' s apart']);
+    if (g.purchase) policies.push(['Sold for', g.purchase.priceClass + ': ' + fmtUnits(String(g.purchase.unitsPerPrice), dec) + ' per unit paid, at least ' + g.purchase.minPrice + ', up to ' + fmtUnits(g.purchase.perKeyUnits, dec) + ' per account and ' + fmtUnits(g.purchase.perDayUnits, dec) + ' per day']);
+    const keyword = g.visibility === 'private' ? 'reference' : 'key';
+    const form = h('form', { onsubmit: (ev) => {
+      ev.preventDefault();
+      const v = input.value.trim();
+      if (REF.test(v)) location.hash = '#/coin/' + id + '/account/' + enc(v); else { input.setCustomValidity('That is not a ' + keyword); input.reportValidity(); }
+    } });
+    const input = h('input', { type: 'text', placeholder: 'Account ' + keyword, spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Account ' + keyword });
+    input.addEventListener('input', () => input.setCustomValidity(''));
+    form.append(h('div', { class: 'row' }, input, h('button', { type: 'submit' }, 'Open account')));
+    const recentRows = recent.entries.slice().reverse().map((x) => entryRow(id, x, g));
+    show(
+      h('h2', null, g.name + ' (' + g.symbol + ')'), coinNav(id), ...frozen,
+      section('The coin', dl([
+        ['State', stateTag(c.state)],
+        ['Coin ID', mono(id)],
+        ['Visibility', g.visibility === 'private' ? 'Private: accounts are shown by reference and keys are never shown' : 'Public: accounts are shown by key'],
+        ['Authority', g.mode === 'multi' ? 'Multi authority, ' + g.threshold + ' of ' + g.roster.length + ' domains approve each entry; the authority is ' + g.authority : 'Single authority, ' + g.authority],
+        ['Roster', roster],
+        ['Total supply', fmtUnits(g.initialUnits, dec) + ' ' + g.symbol + ' (limit ' + fmtUnits(g.maxUnits, dec) + ')'],
+        ['Treasury', c.treasury ? h('span', null, fmtUnits(c.treasury.units, dec) + ' ' + g.symbol + ' held by ', accountLink(id, c.treasury.ref)) : null],
+        ['Log head', 'Entry ' + c.head.index + ', ' + c.entries + ' entries, hash ' + short(c.head.hash)],
+        ['Accounts', String(c.accounts)],
+        ...policies,
+        ['Created', g.createdAt],
+        ['Genesis digest', mono(c.genesisDigest)]])),
+      section('Recent entries', recentRows.length ? h('div', { class: 'scroll' }, entryTable(recentRows)) : h('p', null, 'No entries.'), h('p', null, h('a', { href: '#/coin/' + id + '/entries' }, 'All entries'))),
+      section('Open an account', h('p', { class: 'note' }, g.visibility === 'private' ? 'This coin is private. Paste an account reference; a wallet shows its own.' : 'Paste an account key.'), form),
+      section('Verify the log', h('p', { class: 'note' }, 'Checks every entry from the genesis to the head in this browser.'), verifyBox(c, c.head.index, 'Verify the whole log')));
+  }
+
+  // ---------- entries ----------
+
+  function entryTable(rows) {
+    return h('table', null, h('tr', null, ...['#', 'Time', 'From', 'To', 'Amount', 'Hash'].map((x) => h('th', null, x))), ...rows);
+  }
+  function party(id, ref) { return ref === null ? tag('genesis') : accountLink(id, ref); }
+  function entryRow(id, item, g) {
+    const e = item.entry;
+    return h('tr', null, h('td', null, h('a', { href: '#/coin/' + id + '/entry/' + e.index }, String(e.index))), h('td', null, e.executedAt),
+      h('td', null, e.from === null ? tag('genesis') : party(id, e.from)), h('td', null, party(id, e.to)),
+      h('td', null, fmtUnits(e.amount, g.decimals), e.purchase ? [' ', tag('sale', 'warn')] : null), h('td', null, mono(item.hash, true)));
+  }
+
+  async function entriesView(id, start, t) {
+    const c = await api('coin', { coin: id });
+    const first = Math.min(start, Math.max(0, c.head.index));
+    const r = await api('entries', { coin: id, after: first - 1, limit: PAGE });
+    if (t !== token) return;
+    const g = c.genesis;
+    const last = r.entries.length ? r.entries[r.entries.length - 1].entry.index : first;
+    const nav = h('div', { class: 'row' },
+      first > 0 ? h('a', { href: '#/coin/' + id + '/entries/' + Math.max(0, first - PAGE) }, 'Earlier') : null,
+      r.more ? h('a', { href: '#/coin/' + id + '/entries/' + (last + 1) }, 'Later') : null,
+      h('a', { href: '#/coin/' + id + '/entries/' + Math.floor(Math.max(0, c.head.index) / PAGE) * PAGE }, 'Latest page'));
+    show(h('h2', null, g.name + ' (' + g.symbol + ') entries'), coinNav(id),
+      section('Entries ' + first + ' to ' + last + ' of ' + c.entries, h('div', { class: 'scroll' }, entryTable(r.entries.map((x) => entryRow(id, x, g)))), nav));
+  }
+
+  async function entryView(id, index, t) {
+    const [c, r] = await Promise.all([api('coin', { coin: id }), api('entry', { coin: id, index })]);
+    if (t !== token) return;
+    const g = c.genesis, e = r.entry, dec = g.decimals;
+    const approvals = r.approvals.length ? h('div', null, ...r.approvals.map((a) => h('div', null, a.domain + ' ', mono(a.signature, true)))) : 'None besides the authority';
+    show(h('h2', null, g.name + ' (' + g.symbol + ') entry ' + e.index), coinNav(id),
+      section('Entry', dl([
+        ['Type', e.type], ['Number', String(e.index)], ['Executed', e.executedAt],
+        ['From', e.from === null ? 'Nothing (the genesis credits the treasury)' : accountLink(id, e.from, e.from)],
+        ['To', accountLink(id, e.to, e.to)],
+        ['Amount', fmtUnits(e.amount, dec) + ' ' + g.symbol],
+        ['Sale', e.purchase ? 'Bought with ' + e.purchase.price + ' of ' + (g.purchase ? g.purchase.priceClass : 'a price') + ', request ' + short(e.purchase.requestId) : null],
+        ['Hash', mono(r.hash)], ['Previous hash', mono(e.prevHash)],
+        ['Authority signature', h('span', null, g.authority + ' ', mono(r.authoritySignature, true))],
+        ['Approvals', approvals]]),
+      h('div', { class: 'row' },
+        e.index > 0 ? h('a', { href: '#/coin/' + id + '/entry/' + (e.index - 1) }, 'Previous entry') : null,
+        e.index < r.head.index ? h('a', { href: '#/coin/' + id + '/entry/' + (e.index + 1) }, 'Next entry') : null)),
+      section('Verify the chain to this entry', h('p', { class: 'note' }, 'Recomputes the hash of entries 0 to ' + e.index + ' in this browser, checks the chain and the signatures against the keys in the genesis.'),
+        verifyBox(c, e.index, 'Verify entries 0 to ' + e.index)));
+  }
+
+  // ---------- an account ----------
+
+  async function accountView(id, ref, start, t) {
+    const [c, a] = await Promise.all([api('coin', { coin: id }), api('account', { coin: id, ref, after: start - 1, limit: PAGE })]);
+    if (t !== token) return;
+    const g = c.genesis, dec = g.decimals;
+    const rows = a.entries.map((x) => {
+      const e = x.entry;
+      const out = e.from === ref;
+      return h('tr', null, h('td', null, String(x.pos)), h('td', null, h('a', { href: '#/coin/' + id + '/entry/' + e.index }, String(e.index))), h('td', null, e.executedAt),
+        h('td', null, e.from === null ? tag('credit') : (out ? tag('sent', 'warn') : tag('received', 'good'))),
+        h('td', null, out ? party(id, e.to) : party(id, e.from)), h('td', null, fmtUnits(e.amount, dec)));
+    });
+    const last = a.entries.length ? a.entries[a.entries.length - 1].pos : start;
+    show(h('h2', null, g.name + ' (' + g.symbol + ') account'), coinNav(id),
+      section('Account', dl([
+        [g.visibility === 'private' ? 'Reference' : 'Key', mono(ref)],
+        ['Balance', fmtUnits(a.units, dec) + ' ' + g.symbol], ['Transfers sent', String(a.seq)],
+        ['Role', a.treasury ? 'The treasury' : null]]),
+      g.visibility === 'private' ? h('p', { class: 'note' }, 'This coin is private: the account is known only by its reference.') : null),
+      section('History', rows.length ? h('div', { class: 'scroll' }, h('table', null, h('tr', null, ...['Pos', 'Entry', 'Time', '', 'Other side', 'Amount'].map((x) => h('th', null, x))), ...rows)) : h('p', null, 'Nothing on this page.'),
+        h('div', { class: 'row' }, start > 0 ? h('a', { href: '#/coin/' + id + '/account/' + enc(ref) + '/' + Math.max(0, start - PAGE) }, 'Earlier') : null,
+          a.more ? h('a', { href: '#/coin/' + id + '/account/' + enc(ref) + '/' + (last + 1) }, 'Later') : null)));
+  }
+
+  // ---------- the domains of a coin ----------
+
+  const STATUS = { self: ['this domain', ''], equal: ['same head', 'good'], behind: ['behind, on this chain', 'warn'], ahead: ['claims more entries', 'warn'], fork: ['holds a different entry', 'bad'], unreachable: ['did not answer', 'warn'], 'bad-answer': ['answered badly', 'bad'] };
+  const SUMMARY = {
+    agree: ['All domains state the same head.', 'good'], single: ['This coin has one domain; there is nothing to compare.', ''],
+    lagging: ['No domain disagrees, but some are not at the same entry yet.', 'warn'], incomplete: ['Some domains did not answer, so they could not be compared.', 'warn'],
+    fork: ['Domains hold different entries for the same position.', 'bad']
+  };
+
+  async function domainsView(id, t) {
+    const [c, d] = await Promise.all([api('coin', { coin: id }), api('domains', { coin: id })]);
+    const g = c.genesis;
+    const frozen = c.state === 'frozen' ? await evidenceBlock(g, c.evidence) : [];
+    const checks = [];
+    for (const row of d.domains) checks.push(row.head ? await V.verifyHead(g, row.head) : null);
+    if (t !== token) return;
+    const bad = checks.filter((x) => x && !x.ok).length;
+    const sum = SUMMARY[d.summary] || ['', ''];
+    const rows = d.domains.map((row, i) => {
+      const p = row.head && row.head.payload;
+      const st = STATUS[row.status] || [String(row.status), ''];
+      const ok = checks[i];
+      return h('tr', null, h('td', null, row.domain, row.authority ? [' ', tag('authority')] : null), h('td', null, tag(st[0], st[1])), h('td', null, row.state ? stateTag(row.state) : '-'),
+        h('td', null, p ? String(p.index) : '-'), h('td', null, p ? mono(p.hash, true) : '-'), h('td', null, p ? p.issuedAt : '-'),
+        h('td', null, ok ? (ok.ok ? tag('verified here', 'good') : tag('failed: ' + ok.reason, 'bad')) : '-'));
+    });
+    show(h('h2', null, g.name + ' (' + g.symbol + ') domains'), coinNav(id), ...frozen,
+      section('Do the domains agree?', h('p', null, tag(sum[0], sum[1])),
+        c.state === 'frozen' ? h('p', null, 'This coin is frozen: it takes no new entries and its history stays readable. The reason is above.') : null,
+        bad ? h('div', { class: 'banner' }, bad + ' head statement' + (bad > 1 ? 's' : '') + ' did not verify against the keys in the genesis.') : null,
+        h('div', { class: 'scroll' }, h('table', null, h('tr', null, ...['Domain', 'Compared with this domain', 'Reports', 'Head', 'Hash', 'Stated at', 'Signature'].map((x) => h('th', null, x))), ...rows)),
+        h('p', { class: 'note' }, 'Each head is signed by its own domain. This domain asked the others at ' + d.checkedAt + (d.cached ? ' (kept for a few seconds)' : '') + '; the signatures are checked here against the roster keys in the genesis.')));
+  }
+
+  // ---------- routing ----------
+
+  function route() {
+    const t = ++token;
+    const parts = location.hash.replace(/^#\/?/, '').split('/').map((x) => { try { return decodeURIComponent(x); } catch (e) { return ''; } });
+    const [a, id, b, c, d] = parts;
+    let job = null;
+    if (a === '' || a === 'coins') job = () => coinsView(t);
+    else if (a === 'coin' && ID.test(id || '')) {
+      if (b === undefined || b === '') job = () => coinView(id, t);
+      else if (b === 'entries' && (c === undefined || INT.test(c))) job = () => entriesView(id, c === undefined ? 0 : Number(c), t);
+      else if (b === 'entry' && INT.test(c || '')) job = () => entryView(id, Number(c), t);
+      else if (b === 'account' && REF.test(c || '') && (d === undefined || INT.test(d))) job = () => accountView(id, c, d === undefined ? 0 : Number(d), t);
+      else if (b === 'domains') job = () => domainsView(id, t);
+    }
+    if (!job) { fail('There is no such page.'); return; }
+    show(h('p', null, 'Loading…'));
+    job().catch((e) => { if (t === token) fail(e.message || 'Something went wrong.'); });
+  }
+  window.addEventListener('hashchange', route);
+  route();
+})();
+</script>
+<!-- atlas-labs:footer:start -->
+<footer class="atlas-labs-footer"><p>© 2026 Bruno da Silva. All rights reserved.</p><p><a href="/terms/">Terms &amp; Conditions</a> | Experimental Platform — Use at Your Own Risk</p></footer>
+<!-- atlas-labs:footer:end -->
+</body></html>
