@@ -147,11 +147,11 @@
     const box = el('div', { className: 'info-card ledger-confirm', role: 'group', 'aria-label': 'Buy ' + p.coin.symbol + ' with Gold' });
     box.appendChild(el('div', { textContent: 'Buy ' + p.coin.symbol + ' with Gold from ' + p.domain }));
     if (p.step === 'form') {
-      let offer = null, golds = [];
-      try { offer = await chain().offer(p.domain, p.coin.coinId); golds = await AtlasWallet.getChainLabsGold(); } catch (err) { box.appendChild(el('div', { className: 'ledger-problem', role: 'status', textContent: err.message })); }
+      let offer = null, golds = [], report = null;
+      try { offer = await chain().offer(p.domain, p.coin.coinId); report = await AtlasWallet.inspectChainLabsGold(); golds = report.usable; } catch (err) { box.appendChild(el('div', { className: 'ledger-problem', role: 'status', textContent: err.message })); }
       if (offer) {
         box.appendChild(el('div', { className: 'meta', textContent: '1 Gold buys ' + AtlasChainLabs.formatUnits(String(offer.unitsPerPrice), offer.decimals) + ' ' + offer.symbol + '. The smallest purchase is ' + offer.minPrice + ' Gold for ' + AtlasChainLabs.formatUnits(String(offer.unitsPerPrice * offer.minPrice), offer.decimals) + ' ' + offer.symbol + '.' }));
-        if (!golds.length) box.appendChild(el('div', { className: 'meta', textContent: 'This wallet holds no Gold to pay with.' }));
+        if (!golds.length) box.appendChild(el('div', { className: 'meta', textContent: AtlasChainLabs.describeNoGold(report) }));
         else {
           box.appendChild(el('label', { className: 'ledger-open-label', for: 'chainLabsGold', textContent: 'Gold to pay with' }));
           const select = el('select', { id: 'chainLabsGold' });

@@ -7,6 +7,9 @@
 //   - a missing, outdated, locked or not-permitted wallet gets a clear message instead of a dead button
 //   - the page can only name a domain and a coin; malformed requests and coins with no offer open nothing that can sign
 //
+// The wallet holds a real Gold credential minted by a throw-away Domain Atlas issuer (the issuer-php code), and the authority uses the
+// real Gold adapter against it: the issuer holds the credential from the owner's signed intent, the ledger delivers the coin, the issuer
+// spends the credential and returns the rest, which the wallet takes in place of the spent one.
 // The target is the controlled purchase: 1 Gold buys 10 of a 6-decimal coin, using one Gold credential.
 //   xvfb-run -a node test/manual-chain-labs-market-buy.js
 'use strict';
@@ -15,15 +18,27 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const L = require('./call-e2e-lib');
 const S = require('./support/chain-labs-servers');
+const crypto = require('crypto');
+const { startPhp, api } = require('./lib/gen1-issuers');
 const { check, until } = L;
-const { A, nodes, issuerKey } = S;
+const { A, nodes } = S;
+const GOLD = 'atlas.element.gold';
+const TOKEN = crypto.randomBytes(24).toString('hex');
+const adapterFile = (n, issuer, issuerKey, token) => "<?php\nrequire_once '" + path.join(n.root, 'lib', 'gold-issuer.php') + "';\n$cfg = json_decode('" + JSON.stringify({ issuerUrl: issuer.base, issuerDomain: issuer.domain, issuerKey, token: token || undefined, timeout: 5 }) + "', true);\nreturn gold_issuer_adapter($cfg);\n";
 let playwright;
 try { playwright = require('playwright'); } catch (e) { playwright = require('/home/claude/.npm-global/lib/node_modules/playwright'); }
 
-const POLICY = { priceClass: 'atlas.element.gold', issuerKey, unitsPerPrice: 10000000, minPrice: 1, perKeyUnits: '3000000000', perDayUnits: '30000000000' };
+const policyFor = (issuerKey) => ({ priceClass: GOLD, issuerKey, unitsPerPrice: 10000000, minPrice: 1, perKeyUnits: '3000000000', perDayUnits: '30000000000' });
 const def = { decimals: 6, maxSupply: '1000000', initialSupply: '100000' };
 
 (async () => {
+  const issuer = await startPhp(9261 + Math.floor(Math.random() * 100), { workers: 0 });
+  const IA = api(issuer);
+  const issuerKey = JSON.parse(fs.readFileSync(issuer.keyFile, 'utf8')).keys[0].publicKey;
+  const POLICY = policyFor(issuerKey);
+  const a0 = nodes[A];
+  fs.writeFileSync(path.join(issuer.bundle, 'lib', 'atlas-gold-hold-config.json'), JSON.stringify({ enabled: true, tokenSha256: crypto.createHash('sha256').update(TOKEN).digest('hex'), ledgerAuthorities: { [A]: a0.pair.publicKey.export({ type: 'spki', format: 'pem' }) } }));
+  for (const n of Object.values(nodes)) fs.writeFileSync(n.adapter, adapterFile(n, issuer, issuerKey, n.domain === A ? TOKEN : null));
   for (const n of Object.values(nodes)) await S.start(n);
   const w = await L.launchWallet('market-buy');
   let plain = null;
@@ -34,7 +49,7 @@ const def = { decimals: 6, maxSupply: '1000000', initialSupply: '100000' };
     const aeth = (await S.createCoin(a, 'AETH', def)).json, flat = (await S.createCoin(a, 'FLAT', def)).json;
     await S.op(a, 'open', { coinId: aeth.id, purchase: POLICY });
     await S.op(a, 'open', { coinId: flat.id });
-    const gold = S.credential(10, { key: w.pub });
+    let gold = null;
     const owned = async () => (await S.units(a, { key: w.pub }, aeth.id));
 
     let manifestReadable = true, signedIn = true;
@@ -59,16 +74,6 @@ const def = { decimals: 6, maxSupply: '1000000', initialSupply: '100000' };
       } catch (err) { await route.abort('connectionrefused'); }
     };
     await w.context.route(/^https:\/\/a\.example\//, route);
-
-    // The test Gold is placed in the wallet's Gold list inside the prompt; no issuer runs here to mint a real credential.
-    await w.context.addInitScript((credential) => {
-      if (location.protocol !== 'chrome-extension:') return;
-      const timer = setInterval(() => {
-        if (typeof AtlasWallet === 'undefined' || !AtlasWallet.getChainLabsGold) return;
-        clearInterval(timer);
-        AtlasWallet.getChainLabsGold = async () => [{ credential, quantity: credential.quantity, label: 'a.example · 10 Gold' }];
-      }, 2);
-    }, gold);
 
     const errors = [];
     const market = await w.context.newPage();
@@ -111,13 +116,27 @@ const def = { decimals: 6, maxSupply: '1000000', initialSupply: '100000' };
     await waitNote(/No purchase was made/);
     check('cancelling ends the request with a message, adds no domain and buys nothing', (await domains()).length === 0 && (await owned()) === '0' && (await market.locator('#domain-atlas-bridge-confirm').count()) === 0 && (await buyButton().isEnabled()));
 
-    console.log('--- review before approval ---');
+    console.log('--- no Gold yet ---');
     await buyButton().click();
     await prompt().getByRole('button', { name: 'Add and continue' }).click();
-    await prompt().getByText('Gold to pay with').first().waitFor({ timeout: 8000 }).catch(async (e) => { console.log('BODY', await prompt().locator('#buyBody').innerText()); throw e; });
+    await prompt().locator('#buyBody .problem').waitFor({ timeout: 15000 });
+    check('the terms are read once the owner agrees, and a wallet with no Gold says exactly that', /1 Gold buys 10 AETH/.test(await prompt().locator('#buyBody').innerText()) && /holds no Gold credential \(atlas\.element\.gold\) for the active identity/.test(await prompt().locator('#buyBody').innerText()), await prompt().locator('#buyBody').innerText());
+    check('the domain is on the list now, because the owner agreed', (await domains()).map((d) => d.domain).join() === A);
+    await prompt().getByRole('button', { name: 'Close' }).click();
+    await waitNote(/No purchase was made/);
+
+    console.log('--- a real Gold credential in the wallet ---');
+    const minted = await w.wallet(([d, q]) => AtlasWallet.mintAsset('self', d, 'atlas.element.gold', q), [issuer.domain, 10]);
+    gold = minted.credential || minted;
+    check('the issuer signed a 10 Gold credential for the wallet\'s key, with the quantity on the credential itself', gold.credential === 'domain-atlas-asset/1.0' && gold.quantity === 10 && gold.owner.publicKey === w.pub && gold.asset.class === GOLD && gold.asset.fungible === true, { quantity: gold.quantity, asset: gold.asset });
+    const report = await ledger.evaluate(() => AtlasWallet.inspectChainLabsGold());
+    check('the wallet\'s inventory lists it as usable Gold', report.usable.length === 1 && report.usable[0].quantity === 10 && report.excluded.length === 0 && report.usable[0].credential.id === gold.id, report);
+
+    console.log('--- review before approval ---');
+    await buyButton().click();
+    await prompt().getByText('Gold to pay with').first().waitFor({ timeout: 15000 }).catch(async (e) => { console.log('BODY', await prompt().locator('#buyBody').innerText()); throw e; });
     const form = await prompt().locator('#buyBody').innerText();
     check('the form states the terms read from the domain: 1 Gold buys 10 AETH, smallest purchase 1 Gold', /AETH from a\.example/.test(form) && /1 Gold buys 10 AETH\. The smallest purchase is 1 Gold for 10 AETH/.test(form), form);
-    check('the domain is on the list now, because the owner agreed', (await domains()).map((d) => d.domain).join() === A);
     check('the Gold credential is offered by label and id', (await prompt().locator('#buyGold option').count()) === 1 && (await prompt().locator('#buyGold option').innerText()).includes('10 Gold') && (await prompt().locator('#buyGold option').innerText()).includes(gold.id.slice(0, 16)));
     check('the price defaults to the smallest purchase', (await prompt().locator('#buyPrice').inputValue()) === '1');
     await prompt().locator('#buyPrice').fill('0');
@@ -134,7 +153,7 @@ const def = { decimals: 6, maxSupply: '1000000', initialSupply: '100000' };
     const sum = await prompt().locator('#buySummary').innerText();
     check('the summary gives the exact quantity received', /You receive: 10 AETH/.test(sum), sum);
     check('the summary gives the Gold cost', /You pay: 1 Gold/.test(sum), sum);
-    check('the summary names the selected credential', sum.includes('a.example · 10 Gold') && sum.includes(gold.id), sum);
+    check('the summary names the selected credential', sum.includes(issuer.domain + ' · 10 Gold') && sum.includes(gold.id), sum);
     check('the summary names the receiving identity: the wallet\'s own key', sum.includes('Receiving identity: ' + w.pub), sum);
     check('the summary names the seller and the asking site', /Sold by: a\.example/.test(sum) && /Asked by: https:\/\/a\.example/.test(sum), sum);
     check('the prompt says approving signs one purchase and sends the credential', /signs this one purchase with your key and sends the Gold credential to a\.example/.test(await prompt().locator('#buyBody').innerText()));
@@ -162,8 +181,36 @@ const def = { decimals: 6, maxSupply: '1000000', initialSupply: '100000' };
     await until(async () => /a\.example says you hold 10 AETH/.test(await ledger.locator('#chainLabsSection').innerText()), 15000, 300);
     check('AETH appears in the open Ledger tab without reopening it', /a\.example says you hold 10 AETH/.test(await ledger.locator('#chainLabsSection').innerText()));
     check('the purchase left no unfinished request in the wallet', (await ledger.evaluate(() => AtlasWallet.getChainLabs().rows())).pendingBuys.length === 0);
-    const second = await S.post(a, 'action=purchase', { coinId: aeth.id, intent: { payload: { type: 'atlas.ledger.purchase.intent', v: 1, coinId: aeth.id, credentialId: gold.id, price: 1, recipient: w.pub, requestId: S.hex(16), expiresAt: S.iso(S.NOW() + 300) }, signature: 'x'.repeat(86) }, credential: gold });
+    const holds = (() => { try { return JSON.parse(fs.readFileSync(path.join(issuer.bundle, 'lib', 'holds', 'holds.json'), 'utf8')).holds; } catch (e) { return {}; } })();
+    check('the issuer\'s hold for it ended finalized with exactly what the owner signed: 1 Gold, 10 AETH worth, to the wallet\'s key', holds[gold.id] && holds[gold.id].state === 'finalized' && holds[gold.id].price === 1 && holds[gold.id].recipient === w.pub && holds[gold.id].coinId === aeth.id, holds[gold.id]);
+    check('the spent 10 Gold credential is revoked at the issuer, once', (IA.revocations() || []).filter((r) => r.id === gold.id).length === 1);
+    const after = await ledger.evaluate(() => AtlasWallet.inspectChainLabsGold());
+    check('the wallet now holds the issuer\'s remainder of 9 Gold in its place', after.usable.length === 1 && after.usable[0].quantity === 9 && after.usable[0].credential.supersedes === gold.id && after.excluded.length === 0, after);
+    const remainder = after.usable[0].credential;
+    const second = await S.post(a, 'action=purchase', { coinId: aeth.id, intent: { payload: { type: 'atlas.ledger.purchase.intent', v: 1, coinId: aeth.id, credentialId: remainder.id, price: 1, recipient: w.pub, requestId: S.hex(16), expiresAt: S.iso(S.NOW() + 300) }, signature: 'x'.repeat(86) }, credential: remainder });
     check('the authority still refuses an intent that was not signed by the owner', second.status >= 400 && (await owned()) === '10000000', second.json);
+
+    console.log('--- why a Gold credential cannot be used ---');
+    const reasons = await ledger.evaluate((c) => {
+      const entry = (over, cred) => Object.assign({ credential: Object.assign(JSON.parse(JSON.stringify(c)), cred || {}) }, over);
+      const id = { publicKey: c.owner.publicKey };
+      const t = (e) => AtlasWallet.chainLabsGoldProblem(e, e.credential, id, Date.now());
+      return {
+        ok: t(entry({})),
+        spent: t(entry({ spent: { reason: 'revoked' } })),
+        revoked: t(entry({ lastVerdict: { status: 'revoked', reason: 'clawback' } })),
+        pending: t(entry({ pendingOutcome: { state: 'pending' } })),
+        stranger: t(entry({}, { owner: { publicKey: 'other' } })),
+        bound: t(entry({}, { asset: Object.assign({}, c.asset, { tradeScope: 'bound' }) })),
+        fractional: t(entry({}, { quantity: 1.5 })),
+        expired: t(entry({}, { asset: Object.assign({}, c.asset, { expiresAt: '2020-01-01T00:00:00Z' }) })),
+        local: t(entry({}, { asset: Object.assign({}, c.asset, { tradeScope: 'local' }) }))
+      };
+    }, remainder);
+    check('a normal local-scope credential has no problem', reasons.ok === null && reasons.local === null, reasons);
+    check('spent, revoked, unfinished, foreign, bound, fractional and expired credentials each get their own reason', /marked it spent/.test(reasons.spent) && /revoked it \(clawback\)/.test(reasons.revoked) && /not finished/.test(reasons.pending) && /different key/.test(reasons.stranger) && /bound to its owner/.test(reasons.bound) && /whole number/.test(reasons.fractional) && /expired/.test(reasons.expired), reasons);
+    const described = await ledger.evaluate(() => AtlasChainLabs.describeNoGold({ excluded: [{ id: 'urn:x', label: 'issuer · 10 Gold', reason: 'the issuer has marked it spent' }] }));
+    check('and the prompt\'s sentence names the credential and the reason', /issuer · 10 Gold \(urn:x\) cannot be used because the issuer has marked it spent/.test(described), described);
 
     console.log('--- missing, locked and not-permitted wallets ---');
     plain = await playwright.chromium.launch();
@@ -230,6 +277,7 @@ const def = { decimals: 6, maxSupply: '1000000', initialSupply: '100000' };
     check('no page errors on the market page or the wallet', errors.length === 0, errors);
   } finally {
     if (plain) await plain.close().catch(() => {});
+    issuer.stop();
     await w.close();
     S.cleanup();
   }

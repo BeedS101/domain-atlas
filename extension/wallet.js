@@ -10106,15 +10106,57 @@ const AtlasWallet = (() => {
     await chrome.storage.local.set({ [storeKey]: all });
   }
 
-  // The Gold credentials in the wallet, for the Buy with Gold step.
-  async function getChainLabsGold() {
+  // The Gold credentials in the wallet, for the Buy with Gold step, and for each other Gold credential the exact reason it cannot be
+  // used. The wallet's own inventory is read (getWallet), so a credential that is spent, revoked, part of an unfinished transaction,
+  // bound, expired, not whole units or owned by another key is named instead of the step saying there is no Gold. The authority and the
+  // issuer still check the credential themselves; nothing here makes a credential acceptable.
+  function chainLabsGoldProblem(entry, credential, identity, nowMs) {
+    if (entry.spent) return 'the issuer has marked it spent';
+    if (entry.lastVerdict && entry.lastVerdict.status === 'revoked') return 'the issuer has revoked it' + (entry.lastVerdict.reason ? ' (' + entry.lastVerdict.reason + ')' : '');
+    if (entry.pendingOutcome) return 'it is part of a transaction that is not finished yet' + (entry.pendingOutcome.state === 'needs-attention' ? ' and needs attention' : '');
+    if (!credential.owner || credential.owner.publicKey !== identity.publicKey) return 'it belongs to a different key than the active identity';
+    if (credential.asset.fungible !== true) return 'it is not a fungible balance';
+    if (credential.asset.tradeScope === 'bound') return 'it is bound to its owner and cannot be spent in a sale';
+    if (!Number.isInteger(credential.quantity) || credential.quantity < 1) return 'it does not hold a whole number of Gold';
+    const expires = credential.asset.expiresAt ? Date.parse(credential.asset.expiresAt) : NaN;
+    if (Number.isFinite(expires) && expires <= nowMs) return 'it has expired';
+    return null;
+  }
+
+  async function inspectChainLabsGold() {
     const identity = await getIdentity();
-    if (!identity) return [];
+    if (!identity) return { usable: [], excluded: [], identity: null };
     const entries = await getWallet(identity.publicKey);
-    return entries
-      .filter((e) => e.credential && e.credential.asset && e.credential.asset.class === 'atlas.element.gold')
-      .map((e) => ({ credential: e.credential, quantity: Number(e.credential.asset.quantity), label: (e.credential.issuer && e.credential.issuer.domain ? e.credential.issuer.domain + ' \u00b7 ' : '') + e.credential.asset.quantity + ' Gold' }))
-      .filter((g) => Number.isInteger(g.quantity) && g.quantity > 0);
+    const usable = [], excluded = [];
+    const now = Date.now();
+    for (const entry of entries) {
+      const c = entry.credential;
+      if (!c || !c.asset || c.asset.class !== 'atlas.element.gold') continue;
+      const label = (c.issuer && c.issuer.domain ? c.issuer.domain + ' · ' : '') + c.quantity + ' Gold';
+      const reason = chainLabsGoldProblem(entry, c, identity, now);
+      if (reason) excluded.push({ id: c.id, label, reason });
+      else usable.push({ credential: c, quantity: c.quantity, label });
+    }
+    return { usable, excluded, identity: identity.publicKey };
+  }
+
+  async function getChainLabsGold() { return (await inspectChainLabsGold()).usable; }
+
+  // After a purchase the issuer has spent the credential and returned the rest as a new one. The wallet takes it through the same
+  // replacement path as any other issuer update (it must name the spent credential, the same owner and the same issuer, and verify),
+  // so the Gold the wallet shows is the remainder straight away instead of waiting for the next mail check. Never throws.
+  async function adoptChainLabsGoldRemainder(spent, balance) {
+    try {
+      const packed = balance && balance.balance ? balance.balance : balance;
+      if (!spent || !packed || typeof packed.gold !== 'string') return false;
+      const remainder = JSON.parse(packed.gold);
+      const identity = await getIdentity();
+      if (!identity || !remainder || remainder.supersedes !== spent.id || !spent.issuer) return false;
+      await processAssetUpdates(identity.publicKey, spent.issuer.domain, [{ id: spent.id, status: 'superseded', newCredential: remainder }]);
+      return true;
+    } catch (err) {
+      return false;
+    }
   }
 
   // The coins, bound to the active identity. Everything it does is a request the person started in the Ledger tab.
@@ -10128,7 +10170,8 @@ const AtlasWallet = (() => {
         loadDomains: () => chainLabsRead(CHAIN_LABS_DOMAINS_KEY, null, []),
         saveDomains: (list) => chainLabsWrite(CHAIN_LABS_DOMAINS_KEY, null, list),
         loadCache: () => chainLabsRead(CHAIN_LABS_CACHE_KEY, 'chainLabsCache', {}),
-        saveCache: (cache) => chainLabsWrite(CHAIN_LABS_CACHE_KEY, 'chainLabsCache', cache)
+        saveCache: (cache) => chainLabsWrite(CHAIN_LABS_CACHE_KEY, 'chainLabsCache', cache),
+        afterPurchase: (prepared, balance) => adoptChainLabsGoldRemainder(prepared.credential, balance)
       });
     }
     return chainLabsInstance;
@@ -10885,7 +10928,7 @@ const AtlasWallet = (() => {
     isAdminForDomain, adminRoleForDomain, adminLoginForDomain, adminLogoutForDomain,
     getIdentityMode, setIdentityMode, hasLocalIdentity, hasWebAuthnIdentity,
     getWebAuthnIdentity, createWebAuthnIdentity, presentWebAuthnIdentity,
-    getWallet, mintAsset, verifyCredential, verifyKeyAnchoredManifest, reverifyAll, exportWallet, importWallet, deleteAsset,
+    getWallet, mintAsset, chainLabsGoldProblem, verifyCredential, verifyKeyAnchoredManifest, reverifyAll, exportWallet, importWallet, deleteAsset,
     // SPEC.md §13.5 single-asset transfer files.
     getFileTransferSupport, assetFileExportProblem, exportAssetToFile, getAssetFiles, saveAssetFiles, getInterruptedExports, recoverInterruptedExport, recoverInterruptedExports, dismissLostExport, EXPORT_RECOVERY_GRACE_MS, inspectAssetFile, claimAssetFile, getInterruptedClaims, recoverInterruptedClaim, recoverInterruptedClaims, dismissClaimRecord, restoreAssetCopy,
     getPendingExports, checkPendingExport, reclaimPendingExport, forgetPendingExport,
@@ -10975,6 +11018,6 @@ const AtlasWallet = (() => {
     // Opening an account (see "opening an account"): two separately approved steps.
     getLedgerOpening, openLedgerAccount, requestLedgerCredential, forgetLedgerOpening,
     // Chain labs coins (see "chain labs coins"): the domain list, holdings, sending and buying with Gold.
-    getChainLabs, getChainLabsGold, signChainLabs
+    getChainLabs, getChainLabsGold, inspectChainLabsGold, signChainLabs
   };
 })();

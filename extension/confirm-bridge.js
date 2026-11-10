@@ -260,12 +260,12 @@
     const failure = (text) => show(buyProblem(text), buyButtons([{ label: 'Close', onClick: () => close(null) }]));
 
     async function formStep() {
-      let offer, golds;
-      try { offer = await chain.offer(domain, coinId); golds = await AtlasWallet.getChainLabsGold(); }
+      let offer, golds, report;
+      try { offer = await chain.offer(domain, coinId); report = await AtlasWallet.inspectChainLabsGold(); golds = report.usable; }
       catch (err) { failure(err && err.message ? err.message : 'This coin cannot be bought now.'); return; }
       const unit = AtlasChainLabs.formatUnits(String(offer.unitsPerPrice), offer.decimals);
       const parts = [buyLine('Coin:', offer.symbol + ' from ' + offer.domain), buyLine('Price:', '1 Gold buys ' + unit + ' ' + offer.symbol + '. The smallest purchase is ' + offer.minPrice + ' Gold for ' + AtlasChainLabs.formatUnits(String(offer.unitsPerPrice * offer.minPrice), offer.decimals) + ' ' + offer.symbol + '.')];
-      if (!golds.length) { show(...parts, buyProblem('This wallet holds no Gold to pay with.'), buyButtons([{ label: 'Close', onClick: () => close(null) }])); return; }
+      if (!golds.length) { show(...parts, buyProblem(AtlasChainLabs.describeNoGold(report)), buyButtons([{ label: 'Close', onClick: () => close(null) }])); return; }
       const select = bel('select', { id: 'buyGold', 'aria-label': 'Gold to pay with' });
       golds.forEach((g, i) => { const o = bel('option', { value: String(i) }, g.label + ' · ' + shortKey(String(g.credential.id || (g.credential.asset && g.credential.asset.id) || ''))); select.appendChild(o); });
       const price = bel('input', { id: 'buyPrice', type: 'text', autocomplete: 'off', 'aria-label': 'Gold to spend', value: String(offer.minPrice) });

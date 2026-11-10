@@ -17,6 +17,7 @@
 //   env.origin(domain)              the address of a domain (default https://domain; tests point it at loopback)
 //   env.path                        where the endpoint is on a domain (default /chain-labs/spend34.php)
 //   env.goldCredentials()           async; the Gold credentials the wallet holds: [{credential, quantity, label}]
+//   env.afterPurchase(prepared, balance)    optional, async; called once a purchase is delivered, with the Gold the issuer returned
 //
 // One file, loaded as a script (global AtlasChainLabs) by the wallet pages, and required as a module by the tests.
 (function (root, factory) {
@@ -555,6 +556,8 @@
       const j = r.json || {};
       if (r.status === 201 && j.ok && j.requestId === prepared.requestId && receiptMatches(j.receipt, { coinId: prepared.coinId, to: prepared.recipient, amount: prepared.units, private: prepared.private, purchase: { requestId: prepared.requestId, price: prepared.price } })) {
         await dropBuy(prepared.requestId);
+        // The wallet takes the Gold the issuer returned in place of the credential it spent.
+        if (typeof env.afterPurchase === 'function') await Promise.resolve(env.afterPurchase(prepared, j.balance || null)).catch(() => null);
         await lookup(record.domain).catch(() => null);
         return { status: 'done', receipt: j.receipt, balance: j.balance || null };
       }
@@ -582,5 +585,13 @@
     return { addDomain, removeDomain, lookup, refresh, rows, prepareSend, send, checkPending, offer, offerState, prepareBuy, buy, resumeBuy, dropBuy, domains };
   }
 
-  return { create, canonical, formatUnits, parseAmount, normalizeDomain, isOwnerKey, derToRaw, checkHoldings, spkiOfPem, fingerprint, PATH, LIMITS: { MAX_DOMAINS, STALE_AFTER_MS, STATEMENT_MAX_AGE_S, MAX_BODY_CHARS } };
+  // What to tell the person when no Gold credential can pay: each credential the wallet found and why it cannot be used, or that
+  // it found none for the active identity. `report` is the wallet's inspectChainLabsGold() answer.
+  function describeNoGold(report) {
+    const excluded = report && Array.isArray(report.excluded) ? report.excluded : [];
+    if (!excluded.length) return 'This wallet holds no Gold credential (atlas.element.gold) for the active identity' + (report && report.identity ? ' (' + String(report.identity).slice(0, 10) + '…)' : '') + '.';
+    return 'This wallet has Gold, but none that can pay: ' + excluded.map((x) => x.label + (x.id ? ' (' + x.id + ')' : '') + ' cannot be used because ' + x.reason).join('; ') + '.';
+  }
+
+  return { create, describeNoGold, canonical, formatUnits, parseAmount, normalizeDomain, isOwnerKey, derToRaw, checkHoldings, spkiOfPem, fingerprint, PATH, LIMITS: { MAX_DOMAINS, STALE_AFTER_MS, STATEMENT_MAX_AGE_S, MAX_BODY_CHARS } };
 });
