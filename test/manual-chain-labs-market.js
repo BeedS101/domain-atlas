@@ -4,7 +4,7 @@
 //   - Buy with Gold shows only for a signed-in wallet and only on a coin with a usable offer, and states the exact price
 //   - a multi authority coin is one row
 //
-//   xvfb-run -a node test/manual-chain-labs-market.js
+//   xvfb-run -a node test/manual-chain-labs-market.js     (SHOTS=<dir> also saves desktop and phone screenshots of the details)
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -79,7 +79,21 @@ const def = { decimals: 6, maxSupply: '1000000', initialSupply: '10000' };
     line(!(await page.locator('body').innerText()).includes('TRADE PREVIEW ONLY'), 'the page no longer offers a made-up trade preview');
     await row('SELL').getByRole('button', { name: 'View' }).click();
     const detail = await page.locator('td.detail.open').innerText();
-    line(/Issued on the ledger: 10,000 \| In the treasury: 9,977 \| Circulating: 23/.test(detail) && /View in the scanner/.test(detail), 'the details give issued supply, treasury and circulating supply from the ledger', detail);
+    if (process.env.SHOTS) {
+      fs.mkdirSync(process.env.SHOTS, { recursive: true });
+      await page.waitForTimeout(400);
+      await page.screenshot({ path: path.join(process.env.SHOTS, 'market-desktop.png'), fullPage: true });
+      await page.setViewportSize({ width: 390, height: 800 });
+      await page.screenshot({ path: path.join(process.env.SHOTS, 'market-phone.png'), fullPage: true });
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
+    line(/Issued on the ledger\s+10,000 SELL/.test(detail) && /In the treasury\s+9,977 SELL/.test(detail) && /Circulating\s+23 SELL/.test(detail) && /View in the scanner/.test(detail), 'the details give issued supply, treasury and circulating supply from the ledger', detail);
+    line(/Max supply/.test(detail) && /Genesis SHA-256/.test(detail) && /Coin ID/.test(detail) && /Price per coin/.test(detail) && /24h volume/.test(detail), 'the details are laid out as Market, Supply and Coin cards with the coin ID and genesis hash', detail);
+    line((await page.locator('td.detail.open button.copy').count()) === 2 && (await page.locator('td.detail.open a', { hasText: 'View in the scanner' }).getAttribute('href')).startsWith('./scan35.html#/coin/'), 'the details carry two copy buttons and the scanner link');
+    line(!(await page.locator('body').innerText()).includes('LABS 27'), 'the header no longer carries the LABS 27 tag');
+    await row('SELL').getByRole('button', { name: 'Hide' }).click();
+    line((await page.locator('td.detail.open').count()) === 0, 'Hide closes the details');
+    await row('SELL').getByRole('button', { name: 'View' }).click();
 
     console.log('\n== Buy with Gold');
     line((await page.getByRole('button', { name: 'Buy with Gold' }).count()) === 0, 'without a wallet there is no Buy button');

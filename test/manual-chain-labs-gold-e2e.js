@@ -135,7 +135,7 @@ const GOOD = { decimals: 2, maxSupply: '100000', initialSupply: '10000' };
     line(cells[4] === '24 Au', 'the 24h purchase volume is the 24 Au actually paid (20 + 4)', cells);
     await row.getByRole('button', { name: 'View' }).click();
     const detail = await page.locator('td.detail.open').innerText();
-    line(/Issued on the ledger: 10,000/.test(detail) && /In the treasury: 8,800/.test(detail) && /Circulating: 1,200/.test(detail), 'the details show 10,000 issued, 8,800 in the treasury and 1,200 circulating', detail);
+    line(/Issued on the ledger\s+10,000/.test(detail) && /In the treasury\s+8,800/.test(detail) && /Circulating\s+1,200/.test(detail), 'the details show 10,000 issued, 8,800 in the treasury and 1,200 circulating', detail);
     line(errors.length === 0, 'the page logged no errors', errors);
   } catch (e) {
     console.log('ERROR ' + e.stack);
