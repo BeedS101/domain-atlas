@@ -84,7 +84,7 @@ send_json(200, ['ok' => true]);
   console.log('SETUP: copying issuer-php into an isolated bundle dir, adding the test-only onExpire backdoor route, starting its own dev server on port ' + PORT);
   fs.cpSync(path.resolve(__dirname, '..', 'issuer-php'), BUNDLE_DIR, { recursive: true });
   writeBackdoorRoute();
-  const proc = spawn('php', ['-S', 'localhost:' + PORT, 'test-router.php'], { cwd: BUNDLE_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
+  const proc = spawn('php', ['-S', 'localhost:' + PORT, 'test-router.php'], { cwd: BUNDLE_DIR, env: { ...process.env, ATLAS_MINT_LIMITS: 'off', ATLAS_PRIVATE_MINT: 'off' }, stdio: ['ignore', 'pipe', 'pipe'] });
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('php -S did not start in time')), 5000);
     proc.stderr.on('data', (d) => { if (d.toString().includes('started')) { clearTimeout(timer); resolve(); } });
