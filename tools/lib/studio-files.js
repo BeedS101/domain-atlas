@@ -18,8 +18,8 @@ const issuer = (rel) => FILES.push(['issuer-php/' + rel, rel]);
 ].forEach((f) => issuer('lib/' + f + '.php'));
 ['atlas/asset/issue.php', 'atlas/asset/reissue.php', 'atlas/admin/class-patch.php'].forEach(issuer);
 
-// New: Studio's own model collection, assets/studio/<name>.{glb,png} (the sword has one per finish). The site's own
+// New: Studio's own model collection, assets/studio/<name>.{glb,png} (the sword, ring and shield have one per finish). The site's own
 // models in assets/ (including assets/badge.* and assets/trophy.*) are never part of the package.
-['trophy', 'badge', 'key', 'necklace', 'gloves', 'shoulders', 'trinket', 'sword-gold', 'sword-silver', 'sword-bronze'].forEach((t) => ['glb', 'png'].forEach((e) => FILES.push(['demo-domain-a/assets/studio/' + t + '.' + e, 'assets/studio/' + t + '.' + e])));
+['trophy', 'badge', 'key', 'necklace', 'gloves', 'shoulders', 'trinket', 'sword-gold', 'sword-silver', 'sword-bronze', 'ring-gold', 'ring-silver', 'ring-bronze', 'shield-gold', 'shield-silver', 'shield-bronze'].forEach((t) => ['glb', 'png'].forEach((e) => FILES.push(['demo-domain-a/assets/studio/' + t + '.' + e, 'assets/studio/' + t + '.' + e])));
 
 module.exports = { FILES };

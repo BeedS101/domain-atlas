@@ -21,7 +21,7 @@ const SHOT_DIR = process.env.SHOT_DIR || '';
 function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
 
 (async () => {
-  const lab = await StudioLab.start({ mint: true, config: { mintsPerIpPerHour: 100, challengesPerIpPerHour: 100 } });
+  const lab = await StudioLab.start({ mint: true, config: { mintsPerIpPerHour: 100, challengesPerIpPerHour: 100, maxMintsPerRecipientPerDay: 100, maxMintsPerActorPerDay: 1000 } });
   const spatial = {
     spec: 'domain-atlas/1.0', domain: lab.host, owner: { name: 'Studio Test Domain', contact: 'demo@localhost' },
     defaultWorld: 'studio',
@@ -129,12 +129,38 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     await approveOffer();
     console.log('PASS: necklace minted and offered');
 
+    console.log('STEP 3b: a ring and an off-hand shield, each with a finish model and no colour');
+    await tile('ring');
+    assertTrue(!(await visible('#colorField')) && (await visible('#statsField')), 'a ring shows stats and no colour');
+    await studio.locator('#assetName').fill('Band of Fortune');
+    await plus('luck'); await plus('luck'); await plus('dexterity');
+    await shot(studio, 'studio-ring');
+    await studio.locator('#mint').click();
+    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
+    frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
+    const box3 = await frame.locator('#payloadBox').innerText();
+    assertTrue(box3.includes('for the ring slot') && /Luck \+2/.test(box3) && /Dexterity \+1/.test(box3), 'prompt names the ring slot and stats: ' + box3);
+    await approveOffer();
+    await tile('shield');
+    await studio.locator('#assetName').fill('Oak Bulwark');
+    for (const id of ['armor', 'armor', 'armor', 'defense', 'defense']) await plus(id);
+    await shot(studio, 'studio-shield');
+    await studio.locator('#mint').click();
+    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
+    frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
+    const box4 = await frame.locator('#payloadBox').innerText();
+    assertTrue(box4.includes('for the off hand slot') && /Armor \+3/.test(box4) && /Defense \+2/.test(box4), 'prompt names the off hand slot and stats: ' + box4);
+    await approveOffer();
+    console.log('PASS: ring and shield minted and offered');
+
     console.log('STEP 4: claim both; the credentials are bound, never expire and carry the signed properties');
     const pending = await walletPage.evaluate((o) => AtlasWallet.getBridgeOffers(o), identity.publicKey);
     const byName = (n) => pending.find((e) => e.credential && e.credential.asset && e.credential.asset.name === n);
-    const swordOffer = byName('Silver Edge'), neckOffer = byName('Violet Charm');
-    assertTrue(swordOffer && neckOffer, 'both offers are queued');
-    for (const o of [swordOffer, neckOffer]) {
+    const swordOffer = byName('Silver Edge'), neckOffer = byName('Violet Charm'), ringOffer = byName('Band of Fortune'), shieldOffer = byName('Oak Bulwark');
+    assertTrue(swordOffer && neckOffer && ringOffer && shieldOffer, 'all four offers are queued');
+    for (const o of [swordOffer, neckOffer, ringOffer, shieldOffer]) {
       const claim = await walletPage.evaluate(({ own, id }) => AtlasWallet.claimBridgeOffer(own, id), { own: identity.publicKey, id: o.id });
       assertTrue(claim.verdict && claim.verdict.valid === true, 'wallet verification: ' + JSON.stringify(claim.verdict));
     }
@@ -144,27 +170,34 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     assertTrue(sword.model.endsWith('/assets/studio/sword-silver.glb') && neck.model.endsWith('/assets/studio/necklace.glb'), 'issuer-controlled models');
     assertTrue(sword.properties['atlas.avatar.handItem'] === 'true' && sword.properties['atlas.avatar.stat.strength'] === 4 && sword.properties['atlas.avatar.stat.agility'] === 3 && sword.properties['atlas.avatar.stat.dexterity'] === 1, 'sword properties: ' + JSON.stringify(sword.properties));
     assertTrue(neck.properties['atlas.avatar.slot'] === 'neck' && neck.properties['atlas.avatar.color'] === '#aa33cc' && neck.properties['atlas.avatar.stat.luck'] === 2 && neck.properties['atlas.avatar.stat.focus'] === 1, 'necklace properties: ' + JSON.stringify(neck.properties));
+    for (const o of [ringOffer, shieldOffer]) assertTrue(o.credential.asset.tradeScope === 'bound' && !o.credential.expiresAt && !o.credential.asset.expiresAt, 'ring and shield are bound and never expire');
+    const ringAsset = ringOffer.credential.asset, shieldAsset = shieldOffer.credential.asset;
+    assertTrue(ringAsset.properties['atlas.avatar.slot'] === 'ring' && ringAsset.model.endsWith('/assets/studio/ring-silver.glb') && ringAsset.properties['atlas.avatar.stat.luck'] === 2, 'ring properties: ' + JSON.stringify(ringAsset.properties));
+    assertTrue(shieldAsset.properties['atlas.avatar.slot'] === 'offhand' && shieldAsset.model.endsWith('/assets/studio/shield-silver.glb') && shieldAsset.properties['atlas.avatar.stat.armor'] === 3, 'shield properties: ' + JSON.stringify(shieldAsset.properties));
     console.log('PASS: claimed, bound, non-expiring, signed properties intact');
 
     console.log('STEP 5: equipped, the pieces show in the wallet\'s own character data');
-    const result = await walletPage.evaluate(async ({ s, n }) => {
+    const result = await walletPage.evaluate(async ({ s, n, rg, sh }) => {
       const slotsOf = (id) => AtlasWallet.avatarSlotsOfAsset(id);
       const wallet = await AtlasWallet.getWallet((await AtlasWallet.getIdentity()).publicKey);
       const find = (name) => wallet.find((e) => e.credential.asset.name === name).credential;
-      const swordCred = find(s), neckCred = find(n);
+      const swordCred = find(s), neckCred = find(n), ringCred = find(rg), shieldCred = find(sh);
       await AtlasWallet.setAvatarHand(swordCred.id);
       await AtlasWallet.setAvatarSlot('neck', neckCred.id);
+      await AtlasWallet.setAvatarSlot('ring1', ringCred.id);
+      await AtlasWallet.setAvatarSlot('offhand', shieldCred.id);
       const hand = await AtlasWallet.getAvatarHand();
       const extras = await AtlasWallet.getAvatarExtras();
       const sheet = await AtlasWallet.getAvatarStatSheet();
       const stat = (id) => sheet.stats.find((x) => x.id === id).total;
-      return { slots: [slotsOf(swordCred.asset), slotsOf(neckCred.asset)], hand, neckColor: extras.neckColor, speed: extras.speedMultiplier, jump: extras.jumpMultiplier,
+      return { slots: [slotsOf(swordCred.asset), slotsOf(neckCred.asset), slotsOf(ringCred.asset), slotsOf(shieldCred.asset)], offHandModel: extras.offHandModel, armor: stat('armor'), defense: stat('defense'), hand, neckColor: extras.neckColor, speed: extras.speedMultiplier, jump: extras.jumpMultiplier,
         strength: stat('strength'), agility: stat('agility'), dexterity: stat('dexterity'), luck: stat('luck'), focus: stat('focus'), stamina: stat('stamina'), health: stat('health') };
-    }, { s: 'Silver Edge', n: 'Violet Charm' });
-    assertTrue(result.slots[0].includes('hand') && result.slots[1].includes('neck'), 'each fits its slot: ' + JSON.stringify(result.slots));
+    }, { s: 'Silver Edge', n: 'Violet Charm', rg: 'Band of Fortune', sh: 'Oak Bulwark' });
+    assertTrue(result.slots[0].includes('hand') && result.slots[1].includes('neck') && result.slots[2].includes('ring1') && result.slots[3].includes('offhand'), 'each fits its slot: ' + JSON.stringify(result.slots));
+    assertTrue(/\/assets\/studio\/shield-silver\.glb$/.test(result.offHandModel || ''), 'the shield is the off hand model: ' + result.offHandModel);
     assertTrue(result.hand && /\/assets\/studio\/sword-silver\.glb$/.test(result.hand.handModel), 'the sword is the hand model: ' + JSON.stringify(result.hand));
     assertTrue(result.neckColor === '#aa33cc', 'the necklace colour reaches the renderer: ' + result.neckColor);
-    assertTrue(result.strength === 14 && result.agility === 13 && result.dexterity === 11 && result.luck === 12 && result.focus === 11, 'stat totals add to base 10: ' + JSON.stringify(result));
+    assertTrue(result.strength === 14 && result.agility === 13 && result.dexterity === 12 && result.luck === 14 && result.focus === 11 && result.armor === 13 && result.defense === 12, 'stat totals add to base 10 (armor 13, defense 12): ' + JSON.stringify(result));
     assertTrue(Math.abs(result.speed - 1.03) < 1e-6 && Math.abs(result.jump - 1.04) < 1e-6, 'Agility and Strength each add 1% per point to speed and jump: ' + result.speed + '/' + result.jump);
     assertTrue(result.stamina === 115 && result.health === 120, 'Agility feeds Stamina and Strength feeds Health at +5 per point: ' + result.stamina + '/' + result.health);
     console.log('PASS: hand model, neck colour, stat totals and movement as expected');

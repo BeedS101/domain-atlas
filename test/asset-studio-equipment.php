@@ -1,5 +1,5 @@
 <?php
-// Asset Studio equipment templates: necklace, gloves, shoulders, trinket and sword.
+// Asset Studio equipment templates: necklace, gloves, shoulders, trinket, sword, ring and off-hand shield.
 // Checks what a design may ask for (colour, stat points, always bound, never expiring), what the issuer signs from it,
 // the approved models, and that the page's built-in table matches the issuer's.
 require_once __DIR__ . '/studio-test-lib.php';
@@ -11,7 +11,7 @@ $mk = function ($template, $extra = []) {
 };
 
 // The table itself: small budgets, stats the wallet knows, no Primary stat, nothing else equippable.
-studio_check(array_keys(ATLAS_STUDIO_EQUIPMENT) === ['necklace', 'gloves', 'shoulders', 'trinket', 'sword'], 'five equipment templates');
+studio_check(array_keys(ATLAS_STUDIO_EQUIPMENT) === ['necklace', 'gloves', 'shoulders', 'trinket', 'sword', 'ring', 'shield'], 'seven equipment templates');
 foreach (ATLAS_STUDIO_EQUIPMENT as $t => $spec) {
   studio_check($spec['budget'] <= 8 && $spec['cap'] <= 4 && $spec['cap'] <= $spec['budget'], "$t has a small budget and cap");
   studio_check(count($spec['stats']) === count(array_unique($spec['stats'])), "$t lists each stat once");
@@ -20,7 +20,7 @@ foreach (ATLAS_STUDIO_EQUIPMENT as $t => $spec) {
     studio_check(!in_array($id, ['health', 'mana', 'stamina'], true), "$t offers no Primary stat directly");
     studio_check(isset(ATLAS_STUDIO_STAT_LABELS[$id]), "$t stat $id has a label");
   }
-  studio_check(in_array($spec['slot'], ['neck', 'gloves', 'shoulders', 'trinket', 'hand'], true), "$t is worn in a slot the wallet has");
+  studio_check(in_array($spec['slot'], ['neck', 'gloves', 'shoulders', 'trinket', 'hand', 'ring', 'offhand'], true), "$t is worn in a slot the wallet has");
 }
 
 // A valid design per template, and the digest covers colour and stats.
@@ -34,17 +34,19 @@ studio_check(atlas_studio_design_fingerprint(array_merge($necklace, ['stats' => 
 studio_check(atlas_studio_design_fingerprint($mk('necklace', ['color' => '#aa33cc', 'stats' => []]))['designDigest'] === atlas_studio_design_fingerprint($mk('necklace', ['color' => '#aa33cc']))['designDigest'], 'empty stats normalise away');
 foreach (['gloves', 'shoulders', 'trinket'] as $t) studio_check(atlas_studio_design_fingerprint($mk($t, ['color' => '#112233']))['ok'], "$t is accepted with a colour and no stats");
 studio_check(atlas_studio_design_fingerprint($mk('sword', ['stats' => ['strength' => 4, 'agility' => 4]]))['ok'], 'a sword may spend its whole budget');
+studio_check(atlas_studio_design_fingerprint($mk('ring', ['stats' => ['luck' => 3, 'focus' => 1]]))['ok'], 'a ring may spend its whole budget');
+studio_check(atlas_studio_design_fingerprint($mk('shield', ['stats' => ['armor' => 4, 'defense' => 3]]))['ok'], 'a shield may spend its whole budget');
 
 // What is refused.
 $bad = [
   'invalid-color' => [$mk('necklace'), $mk('necklace', ['color' => '#AA33CC']), $mk('necklace', ['color' => 'purple']), $mk('necklace', ['color' => '#abc']), $mk('necklace', ['color' => 123]), $mk('necklace', ['color' => '#aa33cc00'])],
-  'color-not-allowed' => [$mk('sword', ['color' => '#aa33cc'])],
+  'color-not-allowed' => [$mk('sword', ['color' => '#aa33cc']), $mk('ring', ['color' => '#aa33cc']), $mk('shield', ['color' => '#aa33cc'])],
   'invalid-stats' => [$mk('sword', ['stats' => 'x']), $mk('sword', ['stats' => [1, 2]])],
-  'stat-not-offered' => [$mk('sword', ['stats' => ['luck' => 1]]), $mk('sword', ['stats' => ['health' => 1]]), $mk('sword', ['stats' => ['mana' => 1]]), $mk('sword', ['stats' => ['atlas' => 1]]), $mk('necklace', ['color' => '#112233', 'stats' => ['strength' => 1]])],
-  'invalid-stat-points' => [$mk('sword', ['stats' => ['strength' => 5]]), $mk('sword', ['stats' => ['strength' => 0]]), $mk('sword', ['stats' => ['strength' => -1]]), $mk('sword', ['stats' => ['strength' => 1.5]]), $mk('sword', ['stats' => ['strength' => '2']]), $mk('sword', ['stats' => ['strength' => true]]), $mk('sword', ['stats' => ['strength' => null]])],
-  'stat-budget-exceeded' => [$mk('sword', ['stats' => ['strength' => 4, 'agility' => 4, 'dexterity' => 1]]), $mk('necklace', ['color' => '#112233', 'stats' => ['luck' => 3, 'focus' => 3]])],
-  'equipment-bound-only' => [$mk('sword', ['tradeScope' => 'local'])],
-  'equipment-no-expiry' => [$mk('sword', ['expiresAt' => '2031-01-01T00:00:00Z'])],
+  'stat-not-offered' => [$mk('shield', ['stats' => ['luck' => 1]]), $mk('ring', ['stats' => ['strength' => 1]]), $mk('sword', ['stats' => ['luck' => 1]]), $mk('sword', ['stats' => ['health' => 1]]), $mk('sword', ['stats' => ['mana' => 1]]), $mk('sword', ['stats' => ['atlas' => 1]]), $mk('necklace', ['color' => '#112233', 'stats' => ['strength' => 1]])],
+  'invalid-stat-points' => [$mk('ring', ['stats' => ['luck' => 4]]), $mk('shield', ['stats' => ['armor' => 5]]), $mk('sword', ['stats' => ['strength' => 5]]), $mk('sword', ['stats' => ['strength' => 0]]), $mk('sword', ['stats' => ['strength' => -1]]), $mk('sword', ['stats' => ['strength' => 1.5]]), $mk('sword', ['stats' => ['strength' => '2']]), $mk('sword', ['stats' => ['strength' => true]]), $mk('sword', ['stats' => ['strength' => null]])],
+  'stat-budget-exceeded' => [$mk('ring', ['stats' => ['luck' => 3, 'focus' => 2]]), $mk('shield', ['stats' => ['armor' => 4, 'defense' => 4]]), $mk('sword', ['stats' => ['strength' => 4, 'agility' => 4, 'dexterity' => 1]]), $mk('necklace', ['color' => '#112233', 'stats' => ['luck' => 3, 'focus' => 3]])],
+  'equipment-bound-only' => [$mk('ring', ['tradeScope' => 'local']), $mk('shield', ['tradeScope' => 'local']), $mk('sword', ['tradeScope' => 'local'])],
+  'equipment-no-expiry' => [$mk('shield', ['expiresAt' => '2031-01-01T00:00:00Z']), $mk('sword', ['expiresAt' => '2031-01-01T00:00:00Z'])],
   'option-not-allowed' => [$mk('trophy', ['color' => '#112233']), $mk('badge', ['stats' => ['luck' => 1]]), $mk('key', ['stats' => []])],
   'invalid-template' => [$mk('helmet')],
 ];
@@ -67,23 +69,29 @@ foreach (['gloves' => 'gloves', 'shoulders' => 'shoulders', 'trinket' => 'trinke
   $p = atlas_studio_issuance_plan($mk($t, ['color' => '#112233']), $owner);
   studio_check($p['ok'] && $p['properties']['atlas.avatar.slot'] === $slot, "$t signs the $slot slot");
 }
+$ringPlan = atlas_studio_issuance_plan($mk('ring', ['finish' => 'bronze', 'stats' => ['luck' => 2]]), $owner);
+studio_check($ringPlan['ok'] && $ringPlan['properties']['atlas.avatar.slot'] === 'ring' && !isset($ringPlan['properties']['atlas.avatar.color']) && $ringPlan['properties']['atlas.avatar.stat.luck'] === 2, 'a ring signs the ring slot, a stat and no colour');
+studio_check($ringPlan['model']['modelPath'] === '/assets/studio/ring-bronze.glb', 'the ring model follows the finish');
+$shieldPlan = atlas_studio_issuance_plan($mk('shield', ['finish' => 'gold', 'stats' => ['armor' => 3, 'defense' => 2]]), $owner);
+studio_check($shieldPlan['ok'] && $shieldPlan['properties']['atlas.avatar.slot'] === 'offhand' && !isset($shieldPlan['properties']['atlas.avatar.handItem']) && $shieldPlan['model']['modelPath'] === '/assets/studio/shield-gold.glb', 'a shield signs the off hand slot and its finish model');
+studio_check(strpos($shieldPlan['summary'], 'for the off hand slot, with Armor +3, Defense +2.') !== false, 'the wallet prompt says off hand: ' . $shieldPlan['summary']);
 // A plain design still plans exactly what it did before: no equipment properties.
 $old = atlas_studio_issuance_plan(STUDIO_TEST_DESIGN, $owner);
 studio_check($old['ok'] && !array_filter(array_keys($old['properties']), function ($k) { return strpos($k, 'atlas.avatar.') === 0; }), 'the original templates sign no avatar properties');
 
-// Models: one per template, the sword one per finish; nothing outside the approved list.
+// Models: one per template, the sword, ring and shield one per finish; nothing outside the approved list.
 foreach (['necklace', 'gloves', 'shoulders', 'trinket'] as $t) {
   $m = atlas_studio_model_for_template($t, 'gold');
   studio_check($m['modelPath'] === "/assets/studio/$t.glb" && $m['thumbnailPath'] === "/assets/studio/$t.png", "$t model");
 }
-studio_check(atlas_studio_model_for_template('sword', null) === null && atlas_studio_model_for_template('sword', '../x') === null, 'a sword with no valid finish has no model');
+studio_check(atlas_studio_model_for_template('sword', null) === null && atlas_studio_model_for_template('sword', '../x') === null && atlas_studio_model_for_template('ring', null) === null && atlas_studio_model_for_template('shield', 'iron') === null, 'a finish-model template with no valid finish has no model');
 studio_check(atlas_studio_model_for_template('helmet', 'gold') === null, 'an unknown template has no model');
 $docroot = sys_get_temp_dir() . '/studio-eq-docroot-' . bin2hex(random_bytes(4));
 mkdir($docroot . '/assets/studio', 0777, true);
 $src = __DIR__ . '/../demo-domain-a/assets/studio';
 foreach (glob($src . '/*') as $f) copy($f, $docroot . '/assets/studio/' . basename($f));
 foreach (['necklace', 'gloves', 'shoulders', 'trinket'] as $t) studio_check(atlas_studio_model_available($docroot, atlas_studio_model_for_template($t, 'gold')), "$t files are real glTF and PNG files");
-foreach (['gold', 'silver', 'bronze'] as $f) studio_check(atlas_studio_model_available($docroot, atlas_studio_model_for_template('sword', $f)), "sword-$f files are real glTF and PNG files");
+foreach (['sword', 'ring', 'shield'] as $t) foreach (['gold', 'silver', 'bronze'] as $f) studio_check(atlas_studio_model_available($docroot, atlas_studio_model_for_template($t, $f)), "$t-$f files are real glTF and PNG files");
 studio_check(!atlas_studio_model_available($docroot, ['modelPath' => '/assets/studio/sword.glb', 'thumbnailPath' => '/assets/studio/sword.png']), 'an unlisted file name is not approved');
 foreach (glob($docroot . '/assets/studio/*') as $f) unlink($f);
 rmdir($docroot . '/assets/studio'); rmdir($docroot . '/assets'); rmdir($docroot);
@@ -91,8 +99,8 @@ rmdir($docroot . '/assets/studio'); rmdir($docroot . '/assets'); rmdir($docroot)
 // The page's built-in table is the issuer's table.
 $js = file_get_contents(__DIR__ . '/../issuer-php/atlas/studio/studio.js');
 studio_check(preg_match('/let equipment=\{(.*?)\n\};/s', $js, $m) === 1, 'studio.js has its equipment table');
-preg_match_all("/(\w+):\{slot:'(\w+)',color:(true|false),budget:(\d+),cap:(\d+),stats:\[([^\]]*)\]\}/", $m[1], $rows, PREG_SET_ORDER);
+preg_match_all("/(\w+):\{slot:'(\w+)',color:(true|false),(?:perFinish:(true),)?budget:(\d+),cap:(\d+),stats:\[([^\]]*)\]\}/", $m[1], $rows, PREG_SET_ORDER);
 $fromJs = [];
-foreach ($rows as $r) $fromJs[$r[1]] = ['slot' => $r[2], 'color' => $r[3] === 'true', 'budget' => (int) $r[4], 'cap' => (int) $r[5], 'stats' => array_map(function ($x) { return trim($x, " '"); }, explode(',', $r[6]))];
+foreach ($rows as $r) $fromJs[$r[1]] = ['slot' => $r[2], 'color' => $r[3] === 'true', 'perFinish' => $r[4] === 'true', 'budget' => (int) $r[5], 'cap' => (int) $r[6], 'stats' => array_map(function ($x) { return trim($x, " '"); }, explode(',', $r[7]))];
 studio_check($fromJs === atlas_studio_equipment_options(), 'the page offers exactly the issuer\'s table');
 echo "asset-studio-equipment: all checks passed\n";

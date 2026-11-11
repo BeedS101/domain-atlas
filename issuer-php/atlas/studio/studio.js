@@ -7,7 +7,7 @@ const palette={
  silver:{light:'#f4f9fd',mid:'#c3d2de',dark:'#5d7387',glow:'rgba(170,200,235,.30)'},
  bronze:{light:'#f6c79a',mid:'#cf8650',dark:'#7d3f20',glow:'rgba(232,132,70,.32)'}
 };
-const titles={trophy:'Achievement Trophy',badge:'Explorer Badge',key:'Portal Key',necklace:'Moonstone Necklace',gloves:'Rider Gloves',shoulders:'Bastion Shoulders',trinket:'Lucky Charm',sword:'Ember Blade'};
+const titles={trophy:'Achievement Trophy',badge:'Explorer Badge',key:'Portal Key',necklace:'Moonstone Necklace',gloves:'Rider Gloves',shoulders:'Bastion Shoulders',trinket:'Lucky Charm',sword:'Ember Blade',ring:'Signet Ring',shield:'Oak Bulwark'};
 // ---- equipment: the same table the issuer enforces (api.php?op=status replaces it with the issuer's own) ----
 const STAT_LABELS={agility:'Agility',intelligence:'Intelligence',strength:'Strength',armor:'Armor',defense:'Defense',resistance:'Resistance',attackSpeed:'Attack Speed',criticalStrike:'Critical Strike',dexterity:'Dexterity',focus:'Focus',luck:'Luck',charisma:'Charisma'};
 let equipment={
@@ -15,11 +15,15 @@ let equipment={
  gloves:{slot:'gloves',color:true,budget:5,cap:3,stats:['strength','agility','dexterity','attackSpeed','criticalStrike']},
  shoulders:{slot:'shoulders',color:true,budget:6,cap:3,stats:['strength','armor','defense','resistance']},
  trinket:{slot:'trinket',color:true,budget:5,cap:3,stats:['agility','intelligence','strength','armor','defense','resistance','attackSpeed','criticalStrike','dexterity','focus','luck','charisma']},
- sword:{slot:'hand',color:false,budget:8,cap:4,stats:['strength','agility','dexterity','attackSpeed','criticalStrike']}
+ sword:{slot:'hand',color:false,perFinish:true,budget:8,cap:4,stats:['strength','agility','dexterity','attackSpeed','criticalStrike']},
+ ring:{slot:'ring',color:false,perFinish:true,budget:4,cap:3,stats:['intelligence','dexterity','attackSpeed','criticalStrike','focus','luck','charisma']},
+ shield:{slot:'offhand',color:false,perFinish:true,budget:7,cap:4,stats:['strength','armor','defense','resistance']}
 };
 const COLOR_PRESETS=['#2f5d3a','#4a3b6b','#a63d40','#2c3e9a','#d4a017','#3b2a1e','#7a8793','#e8e2d0'];
 let statPoints={};
 const equip=()=>equipment[$('template').value]||null;
+const perFinish=t=>!!(equipment[t]&&equipment[t].perFinish);
+const slotLabel=slot=>slot==='offhand'?'off hand':slot;
 const statsSpent=()=>Object.values(statPoints).reduce((a,b)=>a+b,0);
 function renderStats(){
  const e=equip(),rows=$('statRows');rows.replaceChildren();rows.dataset.t=$('template').value;
@@ -94,7 +98,7 @@ function metal(x0,y0,x1,y1,p){const g=ctx.createLinearGradient(x0,y0,x1,y1);g.ad
 function sheen(path,alpha){ctx.save();ctx.globalAlpha=alpha;ctx.fillStyle='#fff';ctx.fill(path);ctx.restore();}
 const thumbs={};
 function thumbFor(d){
- const name=d.template==='sword'?'sword-'+d.finish:d.template;
+ const name=perFinish(d.template)?d.template+'-'+d.finish:d.template;
  if(!thumbs[name]){const img=new Image();img.onload=()=>{if(equip())paint()};img.src='/assets/studio/'+name+'.png';thumbs[name]=img}
  return thumbs[name];
 }
@@ -156,7 +160,7 @@ function stageNote(text){$('stageNote').textContent=text||'';$('stageNote').hidd
 async function loadModel(){
  if(!viewer){modelState='unavailable';stageNote(location.protocol==='file:'?'3D preview needs the hosted Studio page.':'3D preview is not available in this browser.');showMode('flat');$('viewTabs').hidden=true;return}
  const token=++loadToken,t=$('template').value;modelState='loading';stageNote('Loading 3D model…');
- const file=t==='sword'?'sword-'+$('finish').value:t;try{await viewer.load('/assets/studio/'+file+'.glb',{standUp:t==='badge'||t==='key'});if(token!==loadToken)return;viewer.setFinish($('finish').value);viewer.setTint(equip()&&equip().color?$('colorInput').value:null);modelState='ready';stageNote('');showMode(mode==='flat'&&$('viewTabs').dataset.chosen==='flat'?'flat':'3d')}
+ const file=perFinish(t)?t+'-'+$('finish').value:t;try{await viewer.load('/assets/studio/'+file+'.glb',{standUp:t==='badge'||t==='key'});if(token!==loadToken)return;viewer.setFinish($('finish').value);viewer.setTint(equip()&&equip().color?$('colorInput').value:null);modelState='ready';stageNote('');showMode(mode==='flat'&&$('viewTabs').dataset.chosen==='flat'?'flat':'3d')}
  catch(error){if(token!==loadToken)return;modelState='failed';stageNote('3D model unavailable; showing the flat preview.');showMode('flat')}
 }
 
@@ -184,7 +188,7 @@ function applyTemplateUi(d){
 }
 function renderFacts(d){
  const eq=equipment[d.template]||null;
- const items=eq?[['scope','Locked to your wallet, never expires'],['slot','Worn in the '+(eq.slot==='hand'?'hand':eq.slot)+' slot']]:[['scope',d.tradeScope==='local'?'Giftable on this domain':'Locked to your wallet'],['expiry',d.expiresAt?'Expires '+fmtWhen(new Date(d.expiresAt)):'No expiry']];
+ const items=eq?[['scope','Locked to your wallet, never expires'],['slot','Worn in the '+slotLabel(eq.slot)+' slot']]:[['scope',d.tradeScope==='local'?'Giftable on this domain':'Locked to your wallet'],['expiry',d.expiresAt?'Expires '+fmtWhen(new Date(d.expiresAt)):'No expiry']];
  if(d.color)items.push(['color','Colour '+d.color]);
  Object.entries(d.stats||{}).forEach(([k,v])=>items.push(['stat',(STAT_LABELS[k]||k)+' +'+v]));
  Object.entries(d.properties||{}).forEach(([k,v])=>items.push(['prop',k.replace(/_/g,' ')+': '+v]));
@@ -210,7 +214,7 @@ function addProp(k='',v=''){
 }
 ['assetName','description','finish'].forEach(id=>$(id).addEventListener('input',paint));
 $('template').addEventListener('change',()=>{$('assetName').value=titles[$('template').value];statPoints={};renderStats();paint();loadModel()});
-$('finish').addEventListener('input',()=>{if($('template').value==='sword')loadModel()});
+$('finish').addEventListener('input',()=>{if(perFinish($('template').value))loadModel()});
 $('colorInput').addEventListener('input',paint);
 // The tile and swatch groups drive the underlying selects, which stay the source of the design values.
 function pick(groupId,selectId,value){const s=$(selectId);if(s.value===value)return;s.value=value;s.dispatchEvent(new Event(selectId==='template'?'change':'input',{bubbles:true}))}

@@ -1,6 +1,6 @@
 # Domain Atlas Asset Studio v0.1
 
-Asset Studio lets a visitor design a free, no-value, non-fungible demo collectible (trophy, badge or key), owner-bound by default, or a piece of equipment (necklace, gloves, shoulders, trinket or sword) that the wallet can equip on a character, then mint it into their own Domain Atlas wallet.
+Asset Studio lets a visitor design a free, no-value, non-fungible demo collectible (trophy, badge or key), owner-bound by default, or a piece of equipment (necklace, gloves, shoulders, trinket, ring, sword or off-hand shield) that the wallet can equip on a character, then mint it into their own Domain Atlas wallet.
 
 **Status:** integrated with the PHP issuer and the wallet bridge, tested end to end, and **disabled by default**. Public minting stays off until an independent security audit has been done (see `asset-studio-security-audit-handoff.md`).
 
@@ -13,11 +13,11 @@ Asset Studio lets a visitor design a free, no-value, non-fungible demo collectib
 5. `op=mint` (`design`, `nonce`, `proof`): the issuer re-validates the design and checks, in this order: the stored challenge, exact proof shape, an origin from its own configured list, the recipient/key/digest/summary/expiry bindings, WebAuthn type and user presence (for passkey identities), and finally the signature with its own `verify_envelope()`. Only then does it sign one `atlas.demo.studio.collectible` credential through `issue_asset()`.
 6. The page checks the owner and class and calls `window.atlasWallet.offerAsset(credential)`. The wallet queues it as a pending offer. The visitor claims it; the wallet verifies the issuer signature itself against the issuer's published key before adding it.
 
-The credential carries the approved design in `asset.properties` (`atlas.studio.*`, including the digest) and issuer-controlled `model` and `thumbnail` URLs from a fixed template table (`/assets/studio/{trophy,badge,key,necklace,gloves,shoulders,trinket,sword-gold,sword-silver,sword-bronze}.{glb,png}`). The page never supplies a class, quantity, model path or issuer; its only say over the trade scope is the two-value choice under Creator options.
+The credential carries the approved design in `asset.properties` (`atlas.studio.*`, including the digest) and issuer-controlled `model` and `thumbnail` URLs from a fixed template table (`/assets/studio/{trophy,badge,key,necklace,gloves,shoulders,trinket,sword-<finish>,ring-<finish>,shield-<finish>}.{glb,png}`, where `<finish>` is gold, silver or bronze). The page never supplies a class, quantity, model path or issuer; its only say over the trade scope is the two-value choice under Creator options.
 
 ## Equipment templates
 
-Necklace, gloves, shoulders, trinket and sword are equipment: the credential carries the properties the wallet already reads to equip an item, so no wallet change is involved. They use the same collectible class and the same mint flow as the other templates, so a domain that already offers the class needs no manifest change.
+Necklace, gloves, shoulders, trinket, ring, sword and shield are equipment: the credential carries the properties the wallet already reads to equip an item, so no wallet change is involved. They use the same collectible class and the same mint flow as the other templates, so a domain that already offers the class needs no manifest change.
 
 | Template | Slot | Colour | Stat points (budget, per stat) | Stats offered |
 |---|---|---|---|---|
@@ -26,15 +26,17 @@ Necklace, gloves, shoulders, trinket and sword are equipment: the credential car
 | shoulders | shoulders | yes | 6, 3 | strength, armor, defense, resistance |
 | trinket | trinket | yes (cosmetic) | 5, 3 | any Secondary or Tertiary stat |
 | sword | hand (main hand) | no, the finish picks a gold, silver or bronze model | 8, 4 | strength, agility, dexterity, attackSpeed, criticalStrike |
+| ring | ring (either ring slot) | no, the finish picks the model | 4, 3 | intelligence, dexterity, attackSpeed, criticalStrike, focus, luck, charisma |
+| shield | offhand (shown in the left hand) | no, the finish picks the model | 7, 4 | strength, armor, defense, resistance |
 
 The table lives in `inc/equipment.php` and is returned as `options.equipment` by `op=status`; `studio.js` carries a copy for offline use that `test/asset-studio-equipment.php` checks against the PHP one. Rules the validator enforces, each with its own error code:
 
 - Always bound and never expiring: `tradeScope` may only be `bound` and `expiresAt` is refused (`equipment-bound-only`, `equipment-no-expiry`).
-- `color` is required for the colour templates, lower-case `#rrggbb` (`invalid-color`), and refused on the sword (`color-not-allowed`).
+- `color` is required for the colour templates, lower-case `#rrggbb` (`invalid-color`), and refused on the sword, ring and shield, which have one model per finish (`color-not-allowed`).
 - `stats` is an object of whole numbers from 1 to the per-stat cap, only for stats the template offers (`stat-not-offered`, `invalid-stat-points`), and their sum may not exceed the budget (`stat-budget-exceeded`). Primary stats are not offered; Agility, Intelligence and Strength already feed Stamina, Mana and Health.
 - The other templates refuse `color` and `stats` (`option-not-allowed`).
 
-The signed credential gets `atlas.avatar.slot` (or `atlas.avatar.handItem` = `true` for the sword), `atlas.avatar.color` and one `atlas.avatar.stat.<id>` per stat, all part of the design the wallet signature covers, and the summary shown in the wallet names the slot, colour and stats. Stat points are small on purpose: the five pieces together can add at most +10% speed through Agility (gloves 3, trinket 3, sword 4).
+The signed credential gets `atlas.avatar.slot` (`atlas.avatar.handItem` = `true` instead for the sword; `ring` and `offhand` for the ring and shield), `atlas.avatar.color` and one `atlas.avatar.stat.<id>` per stat, all part of the design the wallet signature covers, and the summary shown in the wallet names the slot, colour and stats. Stat points are small on purpose: the seven pieces together can add at most +10% speed through Agility (gloves 3, trinket 3, sword 4), and a character can wear two rings.
 
 ## Idempotency and crash safety
 
@@ -87,7 +89,7 @@ The domain manifest must let the Studio page use the bridge. The page links `/.w
   "policy": { "walletBridge": { "read": true, "sign": ["atlas.studio.mint/1"], "offer": ["atlas.demo.studio.collectible"] } } }
 ```
 
-Studio's approved models are their own collection, `assets/studio/{trophy,badge,key,necklace,gloves,shoulders,trinket,sword-gold,sword-silver,sword-bronze}.{glb,png}` in the docroot, separate from the site's other item models in `assets/` (a site's own `assets/badge.*` and `assets/trophy.*` are never read, written or referenced by Studio). `tools/make-demo-item-models.js studio` regenerates them. The model catalogue accepts only those twenty paths, each with its own extension, and the file check refuses anything that resolves outside `assets/studio/` (including a linked folder). If one is missing or is not a glTF/PNG, challenge and mint answer 503 and issue nothing.
+Studio's approved models are their own collection, `assets/studio/{trophy,badge,key,necklace,gloves,shoulders,trinket,sword-<finish>,ring-<finish>,shield-<finish>}.{glb,png}` in the docroot, separate from the site's other item models in `assets/` (a site's own `assets/badge.*` and `assets/trophy.*` are never read, written or referenced by Studio). `tools/make-demo-item-models.js studio` regenerates them. The model catalogue accepts only those thirty-two paths, each with its own extension, and the file check refuses anything that resolves outside `assets/studio/` (including a linked folder). If one is missing or is not a glTF/PNG, challenge and mint answer 503 and issue nothing.
 
 ## Controlled real-wallet test (local, isolated)
 

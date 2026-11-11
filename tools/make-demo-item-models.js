@@ -445,6 +445,30 @@ function buildSword(finish) {
   return mesh;
 }
 
+function buildStudioRing(finish) {
+  const metal = METALS[finish];
+  const mesh = createMeshBuilder();
+  // A band standing upright with a faceted gem in a collar at its top.
+  mesh.addPart(torus(0.5, 0.11, 20, 8), metal, { rotateX: 90 });
+  mesh.addPart(cylinder(0.17, 0.2, 0.1, 8), metal, { translate: [0, 0.54, 0] });
+  mesh.addPart(octahedron(1), GEM_BLUE, { scale: [0.17, 0.22, 0.17], translate: [0, 0.74, 0] });
+  return mesh;
+}
+
+function buildShield(finish) {
+  const metal = METALS[finish];
+  const mesh = createMeshBuilder();
+  // A round shield facing +Z: a painted face, a metal rim, a cross of straps and a boss with a gem.
+  const FACE = [0.2, 0.3, 0.55, 1];
+  mesh.addPart(cylinder(0.52, 0.52, 0.09, 20), FACE, { rotateX: 90, translate: [0, 0.55, 0] });
+  mesh.addPart(torus(0.52, 0.06, 20, 8), metal, { rotateX: 90, translate: [0, 0.55, 0.03] });
+  mesh.addPart(box(0.46, 0.035, 0.02), metal, { translate: [0, 0.55, 0.06] });
+  mesh.addPart(box(0.035, 0.46, 0.02), metal, { translate: [0, 0.55, 0.06] });
+  mesh.addPart(cylinder(0.17, 0.17, 0.1, 12), metal, { rotateX: 90, translate: [0, 0.55, 0.09] });
+  mesh.addPart(octahedron(1), GEM_BLUE, { scale: [0.09, 0.09, 0.08], translate: [0, 0.55, 0.17] });
+  return mesh;
+}
+
 // ---------- thumbnail rendering (Playwright + gltf-mini.js's own previewModel) ----------
 
 async function renderThumbnail(glbBuffer, outPngPath) {
@@ -508,7 +532,13 @@ async function main() {
     { file: 'studio/trinket', mesh: buildTrinket },
     { file: 'studio/sword-gold', mesh: () => buildSword('gold') },
     { file: 'studio/sword-silver', mesh: () => buildSword('silver') },
-    { file: 'studio/sword-bronze', mesh: () => buildSword('bronze') }
+    { file: 'studio/sword-bronze', mesh: () => buildSword('bronze') },
+    { file: 'studio/ring-gold', mesh: () => buildStudioRing('gold') },
+    { file: 'studio/ring-silver', mesh: () => buildStudioRing('silver') },
+    { file: 'studio/ring-bronze', mesh: () => buildStudioRing('bronze') },
+    { file: 'studio/shield-gold', mesh: () => buildShield('gold') },
+    { file: 'studio/shield-silver', mesh: () => buildShield('silver') },
+    { file: 'studio/shield-bronze', mesh: () => buildShield('bronze') }
   ];
   // Optional names on the command line limit the run, so adding a model does not rewrite the others.
   const only = process.argv.slice(2);
@@ -535,4 +565,4 @@ if (require.main === module) {
   main().catch((err) => { console.error(err); process.exitCode = 1; });
 }
 
-module.exports = { buildCompass, buildRing, buildTrophy, buildBadge, buildKey, buildNecklace, buildGloves, buildShoulders, buildTrinket, buildSword, buildGLBFromMesh, cylinder, box, torus, octahedron };
+module.exports = { buildCompass, buildRing, buildTrophy, buildBadge, buildKey, buildNecklace, buildGloves, buildShoulders, buildTrinket, buildSword, buildStudioRing, buildShield, buildGLBFromMesh, cylinder, box, torus, octahedron };

@@ -1,6 +1,6 @@
 <?php
 if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
-// Asset Studio equipment templates: a necklace, gloves, shoulders, a trinket and a sword that a visitor can mint
+// Asset Studio equipment templates: a necklace, gloves, shoulders, a trinket, a ring, a sword and an off-hand shield that a visitor can mint
 // and then equip in a world. Pure: this file only describes what a design may ask for and checks it. It does not
 // sign, store or touch the clock.
 //
@@ -12,7 +12,8 @@ if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVE
 require_once __DIR__ . '/../../../lib/store.php';
 
 // slot: the wallet's equipment slot ('hand' is the held-item slot and is signed as atlas.avatar.handItem).
-// color: whether the creator chooses a #rrggbb colour (signed as atlas.avatar.color).
+// color: whether the creator chooses a #rrggbb colour (signed as atlas.avatar.color). A piece without a colour
+// (held items and the ring, which the wallet never recolours) has one model per finish instead (perFinish).
 // budget: total stat points across all stats. cap: the most points on any one stat. stats: the stats on offer.
 // One point is +1 to the stat. A Secondary stat point also adds 1% to a movement factor and 5 to a Primary
 // resource, so the caps and budgets are small on purpose.
@@ -22,6 +23,8 @@ const ATLAS_STUDIO_EQUIPMENT = [
   'shoulders' => ['slot' => 'shoulders', 'color' => true,  'budget' => 6, 'cap' => 3, 'stats' => ['strength', 'armor', 'defense', 'resistance']],
   'trinket'   => ['slot' => 'trinket',   'color' => true,  'budget' => 5, 'cap' => 3, 'stats' => ['agility', 'intelligence', 'strength', 'armor', 'defense', 'resistance', 'attackSpeed', 'criticalStrike', 'dexterity', 'focus', 'luck', 'charisma']],
   'sword'     => ['slot' => 'hand',      'color' => false, 'budget' => 8, 'cap' => 4, 'stats' => ['strength', 'agility', 'dexterity', 'attackSpeed', 'criticalStrike']],
+  'ring'      => ['slot' => 'ring',      'color' => false, 'budget' => 4, 'cap' => 3, 'stats' => ['intelligence', 'dexterity', 'attackSpeed', 'criticalStrike', 'focus', 'luck', 'charisma']],
+  'shield'    => ['slot' => 'offhand',   'color' => false, 'budget' => 7, 'cap' => 4, 'stats' => ['strength', 'armor', 'defense', 'resistance']],
 ];
 
 const ATLAS_STUDIO_STAT_LABELS = [
@@ -82,7 +85,7 @@ function atlas_studio_equipment_properties($design) {
 // What the wallet prompt adds after the template and finish: where it is worn, its colour and its stats.
 function atlas_studio_equipment_summary($design) {
   $spec = ATLAS_STUDIO_EQUIPMENT[$design['template']];
-  $text = ' for the ' . ($spec['slot'] === 'hand' ? 'hand' : $spec['slot']) . ' slot';
+  $text = ' for the ' . ($spec['slot'] === 'offhand' ? 'off hand' : $spec['slot']) . ' slot';
   if (isset($design['color'])) $text .= ' in colour ' . $design['color'];
   if (!empty($design['stats'])) {
     $parts = [];
@@ -96,7 +99,7 @@ function atlas_studio_equipment_summary($design) {
 function atlas_studio_equipment_options() {
   $out = [];
   foreach (ATLAS_STUDIO_EQUIPMENT as $template => $spec) {
-    $out[$template] = ['slot' => $spec['slot'], 'color' => $spec['color'], 'budget' => $spec['budget'], 'cap' => $spec['cap'], 'stats' => $spec['stats']];
+    $out[$template] = ['slot' => $spec['slot'], 'color' => $spec['color'], 'perFinish' => !$spec['color'], 'budget' => $spec['budget'], 'cap' => $spec['cap'], 'stats' => $spec['stats']];
   }
   return $out;
 }

@@ -59,7 +59,7 @@ function atlas_studio_validate_design($input) {
   $fields = ['schema','template','name','description','finish','tradeScope','expiresAt','properties','color','stats'];
   foreach (array_keys($input) as $key) if (!in_array($key,$fields,true)) return ['ok'=>false,'error'=>'unexpected-field'];
   if (($input['schema'] ?? null) !== 'atlas.asset-studio.design/0.1') return ['ok'=>false,'error'=>'invalid-schema'];
-  if (!in_array($input['template'] ?? null,['trophy','badge','key','necklace','gloves','shoulders','trinket','sword'],true)) return ['ok'=>false,'error'=>'invalid-template'];
+  if (!in_array($input['template'] ?? null,['trophy','badge','key','necklace','gloves','shoulders','trinket','sword','ring','shield'],true)) return ['ok'=>false,'error'=>'invalid-template'];
   if (!in_array($input['finish'] ?? null,['gold','silver','bronze'],true)) return ['ok'=>false,'error'=>'invalid-finish'];
   foreach (['name'=>[64,256],'description'=>[240,960]] as $field=>$limits) {
     if (!atlas_studio_text_ok($input[$field] ?? null, $limits[0], $limits[1])) return ['ok'=>false,'error'=>'invalid-'.$field];

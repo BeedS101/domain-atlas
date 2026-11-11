@@ -15,10 +15,10 @@ function atlas_studio_model_for_template($template, $finish = null) {
     'shoulders'=>['modelPath'=>'/assets/studio/shoulders.glb','thumbnailPath'=>'/assets/studio/shoulders.png'],
     'trinket'=>['modelPath'=>'/assets/studio/trinket.glb','thumbnailPath'=>'/assets/studio/trinket.png'],
   ];
-  // The sword is held in the hand, where its metal cannot be recoloured, so each finish is its own model.
-  if ($template === 'sword') {
+  // Held items and the ring are not recoloured by the wallet, so each finish is its own model.
+  if (in_array($template, ['sword','shield','ring'], true)) {
     return in_array($finish, ['gold','silver','bronze'], true)
-      ? ['modelPath'=>'/assets/studio/sword-'.$finish.'.glb','thumbnailPath'=>'/assets/studio/sword-'.$finish.'.png'] : null;
+      ? ['modelPath'=>'/assets/studio/'.$template.'-'.$finish.'.glb','thumbnailPath'=>'/assets/studio/'.$template.'-'.$finish.'.png'] : null;
   }
   return is_string($template) ? ($approved[$template] ?? null) : null;
 }
@@ -35,7 +35,7 @@ function atlas_studio_model_available($docroot, $model) {
   foreach ($magic as $field=>$spec) {
     list($head, $ext) = $spec;
     $path = $model[$field] ?? null;
-    if (!is_string($path) || !preg_match('#^/assets/studio/(trophy|badge|key|necklace|gloves|shoulders|trinket|sword-gold|sword-silver|sword-bronze)\.' . $ext . '$#D', $path)) return false;
+    if (!is_string($path) || !preg_match('#^/assets/studio/(trophy|badge|key|necklace|gloves|shoulders|trinket|(?:sword|shield|ring)-(?:gold|silver|bronze))\.' . $ext . '$#D', $path)) return false;
     $real = realpath($root . $path);
     if ($real === false) return false;
     $real = str_replace('\\', '/', $real);

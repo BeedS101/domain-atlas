@@ -961,7 +961,7 @@ async function credentialVerifies(l, cred) {
     const st = await l.get('/atlas/studio/api.php?op=status');
     const { equipment, ...limits } = st.json.options;
     assert.deepEqual(limits, { giftable: true, expiryMinSeconds: 3600, expiryMaxSeconds: 31536000, maxProperties: 6 });
-    assert.deepEqual(Object.keys(equipment), ['necklace', 'gloves', 'shoulders', 'trinket', 'sword'], 'status lists the equipment templates');
+    assert.deepEqual(Object.keys(equipment), ['necklace', 'gloves', 'shoulders', 'trinket', 'sword', 'ring', 'shield'], 'status lists the equipment templates');
     const expiresAt = new Date(Math.floor((Date.now() + 5 * 86400e3) / 60e3) * 60e3).toISOString().replace(/\.\d+Z$/, 'Z');
     const design = Object.assign({}, DESIGN, { tradeScope: 'local', expiresAt, properties: { rarity: 'epic', edition: '1 of 5' } });
     const id = makeIdentity('raw-ecdsa');
@@ -1047,6 +1047,31 @@ async function credentialVerifies(l, cred) {
     assert.equal(a.properties['atlas.avatar.stat.luck'], 2);
     assert.equal(a.properties['atlas.studio.custom.edition'], '1 of 1');
     assert.equal(a.tradeScope, 'bound');
+  });
+
+  await test('equipment: a ring signs the ring slot and a shield the off hand slot, each with its finish model and no colour', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const id = makeIdentity('raw-ecdsa');
+    const ring = await l.mintAs(id, { schema: 'atlas.asset-studio.design/0.1', template: 'ring', name: 'Signet', description: 'A test ring.', finish: 'silver', stats: { luck: 2, dexterity: 1 } });
+    assert.equal(ring.mint.status, 200, ring.mint.text);
+    assert.match(ring.challenge.json.signRequest.summary, /for the ring slot, with Dexterity \+1, Luck \+2/);
+    const r = ring.mint.json.credential.asset;
+    assert.equal(r.properties['atlas.avatar.slot'], 'ring');
+    assert.equal(r.properties['atlas.avatar.color'], undefined);
+    assert.equal(r.properties['atlas.avatar.stat.luck'], 2);
+    assert.equal(r.tradeScope, 'bound');
+    assert.equal(r.expiresAt, undefined);
+    assert.ok(r.model.endsWith('/assets/studio/ring-silver.glb') && r.thumbnail.endsWith('/assets/studio/ring-silver.png'));
+    const shield = await l.mintAs(makeIdentity('raw-ecdsa'), { schema: 'atlas.asset-studio.design/0.1', template: 'shield', name: 'Bulwark', description: 'A test shield.', finish: 'gold', stats: { armor: 4, defense: 3 } });
+    assert.equal(shield.mint.status, 200, shield.mint.text);
+    assert.match(shield.challenge.json.signRequest.summary, /for the off hand slot, with Armor \+4, Defense \+3/);
+    const a = shield.mint.json.credential.asset;
+    assert.equal(a.properties['atlas.avatar.slot'], 'offhand');
+    assert.equal(a.properties['atlas.avatar.handItem'], undefined, 'an off hand item is not a main hand item');
+    assert.equal(a.properties['atlas.avatar.stat.armor'], 4);
+    assert.ok(a.model.endsWith('/assets/studio/shield-gold.glb') && /^https:\/\//.test(a.model), 'the wallet needs an absolute model for the off hand');
+    const bad = await l.api('validate', { schema: 'atlas.asset-studio.design/0.1', template: 'shield', name: 'X', description: 'x', finish: 'gold', color: '#112233' });
+    assert.equal(bad.status, 400);
   });
 
   await test('equipment: the issuer refuses what the table does not allow, before a challenge is issued', async () => {
