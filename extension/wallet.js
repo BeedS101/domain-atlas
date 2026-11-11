@@ -2778,10 +2778,14 @@ const AtlasWallet = (() => {
   // all. atlas.* rather than com.example.* deliberately — see the catalog
   // comment on why a client actually has to understand these two keys,
   // not just display them.
+  // The Chest slot takes a shirt colour either as `atlas.avatar.shirtColor` or, on an item whose
+  // `atlas.avatar.slot` is `chest`, as `atlas.avatar.color`. An older two-colour outfit item still fits it and
+  // keeps its trousers colour until a legs item overrides it.
   function avatarLookPropertiesFromAsset(asset) {
     const props = (asset && asset.properties) || {};
-    const shirtColor = props['atlas.avatar.shirtColor'] || null;
+    let shirtColor = props['atlas.avatar.shirtColor'] || null;
     const pantsColor = props['atlas.avatar.pantsColor'] || null;
+    if (!shirtColor && props['atlas.avatar.slot'] === 'chest' && /^#[0-9a-fA-F]{6}$/.test(String(props['atlas.avatar.color'] || ''))) shirtColor = props['atlas.avatar.color'];
     return (shirtColor || pantsColor) ? { shirtColor, pantsColor } : null;
   }
 
@@ -2993,11 +2997,11 @@ const AtlasWallet = (() => {
     return entry ? avatarHandPropertiesFromAsset(entry.credential.asset) : null; // no longer owned: graceful fallback to an empty hand
   }
 
-  // Which equip slots an asset can go in: 'outfit', 'hat', 'shoes', 'hand', plus the extra slots below. Pure; the character window uses it
+  // Which equip slots an asset can go in: 'chest', 'hat', 'shoes', 'hand', plus the extra slots below. Pure; the character window uses it
   // to list what the wallet holds for a clicked slot.
   function avatarSlotsOfAsset(asset) {
     const slots = [];
-    if (avatarLookPropertiesFromAsset(asset)) slots.push('outfit');
+    if (avatarLookPropertiesFromAsset(asset)) slots.push('chest');
     if (avatarHatPropertiesFromAsset(asset)) slots.push('hat');
     if (avatarShoePropertiesFromAsset(asset)) slots.push('shoes');
     if (avatarHandPropertiesFromAsset(asset)) slots.push('hand');
@@ -3047,22 +3051,38 @@ const AtlasWallet = (() => {
   // ---------- character stats ----------
   //
   // Every character starts from a fixed base and equipped items add to it with `atlas.avatar.stat.<id>`
-  // (a whole number, -100 to 500 per item; the total never drops below 0). Agility, Strength and Dexterity
-  // also act on movement: each point above its base of 10 adds 1% to speed, jump and interaction reach
-  // respectively (each point below takes 1% away). The other stats are shown only.
+  // (a whole number, -100 to 500 per item; the total never drops below 0). The stats come in three groups.
+  //   Primary: Health, Mana and Stamina (base 100), the resources.
+  //   Secondary: Agility, Intelligence and Strength (base 10). Each point above its base of 10 adds 1% to one
+  //     movement factor (Agility speed, Intelligence interaction reach, Strength jump height; each point below
+  //     takes 1% away) and adds AVATAR_STAT_RESOURCE_PER_POINT to a Primary resource (Agility to Stamina,
+  //     Intelligence to Mana, Strength to Health; each point below takes it away).
+  //   Tertiary: Armor, Defense, Resistance, Attack Speed, Critical Strike, Dexterity, Focus, Luck and Charisma
+  //     (base 10), shown only.
+  const AVATAR_STAT_GROUPS = [
+    { id: 'primary', label: 'Primary' },
+    { id: 'secondary', label: 'Secondary' },
+    { id: 'tertiary', label: 'Tertiary' }
+  ];
   const AVATAR_STATS = [
-    { id: 'health', label: 'Health', base: 100 },
-    { id: 'mana', label: 'Mana', base: 100 },
-    { id: 'stamina', label: 'Stamina', base: 100 },
-    { id: 'agility', label: 'Agility', base: 10, effect: 'speed' },
-    { id: 'strength', label: 'Strength', base: 10, effect: 'jump' },
-    { id: 'focus', label: 'Focus', base: 10 },
-    { id: 'dexterity', label: 'Dexterity', base: 10, effect: 'reach' },
-    { id: 'defense', label: 'Defense', base: 10 },
-    { id: 'luck', label: 'Luck', base: 10 },
-    { id: 'charisma', label: 'Charisma', base: 10 }
+    { id: 'health', label: 'Health', base: 100, group: 'primary' },
+    { id: 'mana', label: 'Mana', base: 100, group: 'primary' },
+    { id: 'stamina', label: 'Stamina', base: 100, group: 'primary' },
+    { id: 'agility', label: 'Agility', base: 10, group: 'secondary', effect: 'speed', feeds: 'stamina' },
+    { id: 'intelligence', label: 'Intelligence', base: 10, group: 'secondary', effect: 'reach', feeds: 'mana' },
+    { id: 'strength', label: 'Strength', base: 10, group: 'secondary', effect: 'jump', feeds: 'health' },
+    { id: 'armor', label: 'Armor', base: 10, group: 'tertiary' },
+    { id: 'defense', label: 'Defense', base: 10, group: 'tertiary' },
+    { id: 'resistance', label: 'Resistance', base: 10, group: 'tertiary' },
+    { id: 'attackSpeed', label: 'Attack Speed', base: 10, group: 'tertiary' },
+    { id: 'criticalStrike', label: 'Critical Strike', base: 10, group: 'tertiary' },
+    { id: 'dexterity', label: 'Dexterity', base: 10, group: 'tertiary' },
+    { id: 'focus', label: 'Focus', base: 10, group: 'tertiary' },
+    { id: 'luck', label: 'Luck', base: 10, group: 'tertiary' },
+    { id: 'charisma', label: 'Charisma', base: 10, group: 'tertiary' }
   ];
   const AVATAR_STAT_EFFECT_PER_POINT = 0.01;
+  const AVATAR_STAT_RESOURCE_PER_POINT = 5;
 
   function avatarStatBonusOfAsset(asset, statId) {
     const n = Math.round(Number(((asset && asset.properties) || {})['atlas.avatar.stat.' + statId]));
@@ -3074,9 +3094,18 @@ const AtlasWallet = (() => {
   // Pure.
   function avatarStatSheet(slotAssets) {
     const assets = Object.keys(slotAssets || {}).map((k) => slotAssets[k]).filter(Boolean);
+    const itemBonus = (id) => assets.reduce((sum, a) => sum + avatarStatBonusOfAsset(a, id), 0);
+    const itemTotal = (def) => Math.max(0, def.base + itemBonus(def.id));
     const stats = AVATAR_STATS.map((def) => {
-      const bonus = assets.reduce((sum, a) => sum + avatarStatBonusOfAsset(a, def.id), 0);
-      return { id: def.id, label: def.label, base: def.base, bonus, total: Math.max(0, def.base + bonus), effect: def.effect || null };
+      const bonus = itemBonus(def.id);
+      // The resource a Secondary stat feeds moves by its points above or below base.
+      const feeder = AVATAR_STATS.filter((d) => d.feeds === def.id);
+      const derived = feeder.reduce((sum, d) => sum + (itemTotal(d) - d.base) * AVATAR_STAT_RESOURCE_PER_POINT, 0);
+      return {
+        id: def.id, label: def.label, base: def.base, group: def.group, bonus, derived,
+        derivedFrom: feeder.map((d) => d.id), total: Math.max(0, def.base + bonus + derived),
+        effect: def.effect || null, feeds: def.feeds || null
+      };
     });
     const factors = statMovementFactors(slotAssets);
     const hat = avatarHatPropertiesFromAsset(slotAssets && slotAssets.hat) || { speedMultiplier: 1, jumpMultiplier: 1, interactRangeMultiplier: 1 };
@@ -3087,7 +3116,7 @@ const AtlasWallet = (() => {
       jump: hat.jumpMultiplier * shoes.jumpMultiplier * extras.jumpMultiplier,
       reach: hat.interactRangeMultiplier * extras.interactRangeMultiplier
     };
-    return { stats, factors, movement };
+    return { stats, groups: AVATAR_STAT_GROUPS, factors, movement };
   }
 
   // From a map { slotId: asset | null } to what the renderer takes: colours, the off-hand model and the
@@ -3105,8 +3134,8 @@ const AtlasWallet = (() => {
       out.jumpMultiplier *= clampAvatarMultiplier(props['atlas.avatar.jumpMultiplier']);
       out.interactRangeMultiplier *= clampAvatarMultiplier(props['atlas.avatar.interactRangeMultiplier']);
     }
-    // A standard outfit or held item may carry the generic multipliers too (the other slots read them above).
-    for (const id of ['outfit', 'hand']) {
+    // A standard chest or held item may carry the generic multipliers too (the other slots read them above).
+    for (const id of ['chest', 'hand']) {
       const asset = slotAssets && slotAssets[id];
       out.speedMultiplier *= standardMultiplierOf(asset, 'atlas.avatar.speedMultiplier');
       out.jumpMultiplier *= standardMultiplierOf(asset, 'atlas.avatar.jumpMultiplier');
@@ -3119,7 +3148,7 @@ const AtlasWallet = (() => {
     return out;
   }
 
-  // The movement factors Agility, Strength and Dexterity contribute for a map of equipped assets.
+  // The movement factors Agility, Strength and Intelligence contribute for a map of equipped assets.
   function statMovementFactors(slotAssets) {
     const total = (id) => {
       const def = AVATAR_STATS.find((d) => d.id === id);
@@ -3128,7 +3157,7 @@ const AtlasWallet = (() => {
       return Math.max(0, sum) - def.base;
     };
     const f = (id) => clampAvatarMultiplier(1 + total(id) * AVATAR_STAT_EFFECT_PER_POINT);
-    return { speed: f('agility'), jump: f('strength'), interactRange: f('dexterity') };
+    return { speed: f('agility'), jump: f('strength'), interactRange: f('intelligence') };
   }
 
   async function saveAvatarSlots(ownerPublicKey, map) {
@@ -3177,7 +3206,7 @@ const AtlasWallet = (() => {
     const identity = await getIdentity();
     if (!identity) return {};
     const ids = Object.assign({
-      hat: await getAvatarHatAssetId(), outfit: await getAvatarLookAssetId(),
+      hat: await getAvatarHatAssetId(), chest: await getAvatarLookAssetId(),
       shoes: await getAvatarShoesAssetId(), hand: await getAvatarHandAssetId()
     }, await getAvatarSlotIds());
     const wallet = Object.values(ids).some(Boolean) ? await getWallet(identity.publicKey) : [];
@@ -10949,7 +10978,7 @@ const AtlasWallet = (() => {
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,
     getAvatarShoes, getAvatarShoesAssetId, setAvatarShoes, avatarShoePropertiesFromAsset,
     getAvatarHand, getAvatarHandAssetId, setAvatarHand, avatarHandPropertiesFromAsset, avatarSlotsOfAsset,
-    getAvatarSlotIds, getAvatarSlotAssetId, setAvatarSlot, getAvatarExtras, avatarExtrasFromSlots, avatarExtraKindOfAsset, AVATAR_STATS, avatarStatSheet, getAvatarStatSheet, getEquippedAvatarAssets, getEquippedAvatarEntries,
+    getAvatarSlotIds, getAvatarSlotAssetId, setAvatarSlot, getAvatarExtras, avatarExtrasFromSlots, avatarExtraKindOfAsset, AVATAR_STATS, AVATAR_STAT_GROUPS, avatarStatSheet, getAvatarStatSheet, getEquippedAvatarAssets, getEquippedAvatarEntries,
     verifyStandardItem, setItemEffectsContext, getItemEffectsContext, getEquipmentEffects, getActiveCapabilities, getCapabilityProviders,
     dropItem, pickUpItem, getWorldDrops, splitForDrop,
     proposeIntent, verifySignedPayload,

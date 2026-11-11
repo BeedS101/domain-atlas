@@ -33,6 +33,7 @@ const ATLAS_ITEM_CATEGORY_FAMILIES = [
 // Slot kind => property keys an item needs in that slot; 'model' => true means an asset model is needed.
 const ATLAS_ITEM_SLOTS = [
   'hat' => ['keys' => ['atlas.avatar.hatColor'], 'model' => false],
+  'chest' => ['keys' => ['atlas.avatar.color'], 'model' => false],
   'outfit' => ['keys' => ['atlas.avatar.shirtColor', 'atlas.avatar.pantsColor'], 'model' => false],
   'shoes' => ['keys' => ['atlas.avatar.shoeColor'], 'model' => false],
   'hand' => ['keys' => [], 'model' => true],
@@ -46,7 +47,7 @@ const ATLAS_ITEM_SLOTS = [
 ];
 const ATLAS_ITEM_TOOL_SLOTS = ['hand', 'offhand', 'trinket'];
 
-const ATLAS_ITEM_STAT_IDS = ['health', 'mana', 'stamina', 'agility', 'strength', 'focus', 'dexterity', 'defense', 'luck', 'charisma'];
+const ATLAS_ITEM_STAT_IDS = ['health', 'mana', 'stamina', 'agility', 'intelligence', 'strength', 'armor', 'defense', 'resistance', 'attackSpeed', 'criticalStrike', 'dexterity', 'focus', 'luck', 'charisma'];
 const ATLAS_ITEM_STAT_BOUNDS = [-100, 500];
 
 const ATLAS_ITEM_MULTIPLIER_KEYS = [

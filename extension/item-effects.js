@@ -16,7 +16,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
 'use strict';
 
-const STAT_IDS = ['health', 'mana', 'stamina', 'agility', 'strength', 'focus', 'dexterity', 'defense', 'luck', 'charisma'];
+const STAT_IDS = ['health', 'mana', 'stamina', 'agility', 'intelligence', 'strength', 'armor', 'defense', 'resistance', 'attackSpeed', 'criticalStrike', 'dexterity', 'focus', 'luck', 'charisma'];
 const MULTIPLIER_KINDS = ['speed', 'jump', 'interactRange'];
 const CAPABILITY_IDS = ['atlas.cap.compass', 'atlas.cap.mine', 'atlas.cap.dig', 'atlas.cap.light', 'atlas.cap.blast', 'atlas.cap.unlock'];
 

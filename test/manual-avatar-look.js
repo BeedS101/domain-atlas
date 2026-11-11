@@ -1,5 +1,5 @@
 // Manual check for equippable avatar looks: owning one of the two
-// atlas.avatar.outfit.* crates in the lobby (spatial/lobby/scene.json) lets
+// atlas.avatar.chest.* crates in the lobby (spatial/lobby/scene.json) lets
 // a visitor "wear" it as their own rendered character color (shirt/pants),
 // via a wallet-card action (extension/viewer.js's toggle-avatar-look) that
 // stores which asset is equipped per-identity (wallet.js's
@@ -35,7 +35,7 @@ const { chromium } = require('playwright');
 const path = require('path');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
-const FOREST_CRATE = { x: -1.0, z: -2.0, class: 'atlas.avatar.outfit.forest', name: 'Forest Ranger Outfit', shirtColor: '#2f5d3a', pantsColor: '#3b2a1e' };
+const FOREST_CRATE = { x: -1.0, z: -2.0, class: 'atlas.avatar.chest.forest', name: 'Forest Ranger Jerkin', shirtColor: '#2f5d3a', pantsColor: null };
 const LAUNCH_ARGS = [
   `--disable-extensions-except=${EXT_PATH}`,
   `--load-extension=${EXT_PATH}`,
@@ -179,7 +179,7 @@ async function equipLookFromWallet(frame, assetName) {
   try {
     const { page: pageA, frame: frameA } = await createIdentityAndEnterLobby(contextA, 'avatar-look-password-a', 'A');
 
-    console.log('STEP 1: opening the forest-outfit crate mints a real atlas.avatar.outfit.forest credential');
+    console.log('STEP 1: opening the forest chest crate mints a real atlas.avatar.chest.forest credential');
     await openCrate(frameA, FOREST_CRATE);
     const hasOutfit = await frameA.evaluate(async (cls) => {
       const identity = await AtlasWallet.getIdentity();
@@ -197,14 +197,14 @@ async function equipLookFromWallet(frame, assetName) {
     console.log('STEP 3: equipping the outfit from its wallet card recolors the LOCAL character live, no reload');
     await equipLookFromWallet(frameA, FOREST_CRATE.name);
     const expectedShirt = hexToRgba01(FOREST_CRATE.shirtColor);
-    const expectedPants = hexToRgba01(FOREST_CRATE.pantsColor);
+    const expectedPants = FOREST_CRATE.pantsColor; // a chest piece sets the shirt only
     await frameA.waitForFunction(({ shirt, pants }) => {
       const c = window.__atlasActive3D.getLocalAvatarColors();
       if (!c) return false;
-      const close = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-6);
+      const close = (a, b) => (!a || !b) ? a === b : a.every((v, i) => Math.abs(v - b[i]) < 1e-6);
       return close(c.shirtColor, shirt) && close(c.pantsColor, pants);
     }, { shirt: expectedShirt, pants: expectedPants }, { timeout: 5000 });
-    console.log('PASS: local character now renders the Forest Ranger Outfit\'s own shirt/pants colors');
+    console.log('PASS: local character now renders the Forest Ranger Jerkin\'s own shirt/pants colors');
 
     console.log('STEP 4: leaving the lobby and coming back (a real destroy+re-init, not a live update) still shows the equipped look');
     await leaveLobbyToPlaza(frameA);
@@ -227,7 +227,7 @@ async function equipLookFromWallet(frame, assetName) {
     await frameB.waitForFunction(({ id, shirt, pants }) => {
       const rp = window.__atlasActive3D.getRemotePlayerRenderState(id);
       if (!rp || !rp.colors) return false;
-      const close = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-6);
+      const close = (a, b) => (!a || !b) ? a === b : a.every((v, i) => Math.abs(v - b[i]) < 1e-6);
       return close(rp.colors.shirtColor, shirt) && close(rp.colors.pantsColor, pants);
     }, { id: idOfA, shirt: expectedShirt, pants: expectedPants }, { timeout: 8000 });
     console.log('PASS: visitor B sees visitor A\'s remote character wearing the same equipped look, over real presence broadcast');

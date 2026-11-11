@@ -2455,6 +2455,54 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'atlas.avatar.pantsColor' => '#22243a',
     ],
   ],
+  // Chest and legs pieces: the same recolour of the shared character model, one slot each. A chest piece sets the
+  // shirt colour (atlas.avatar.slot 'chest' with atlas.avatar.color) and a legs piece the trouser colour; both
+  // add a few stat points through atlas.avatar.stat.<id>. The two-colour outfit classes above stay declared so
+  // items already issued keep working; the lobby crates now offer these. Mirrors issuer-server/server.js.
+  'atlas.avatar.chest.forest' => [
+    'name' => 'Forest Ranger Jerkin',
+    'fungible' => false, 'presentation' => 'collectible',
+    'tradeScope' => 'bound',
+    'properties' => [
+      'atlas.avatar.slot' => 'chest',
+      'atlas.avatar.color' => '#2f5d3a',
+      'atlas.avatar.stat.armor' => 4,
+      'atlas.avatar.stat.resistance' => 2,
+    ],
+  ],
+  'atlas.avatar.legs.forest' => [
+    'name' => 'Forest Ranger Trousers',
+    'fungible' => false, 'presentation' => 'collectible',
+    'tradeScope' => 'bound',
+    'properties' => [
+      'atlas.avatar.slot' => 'legs',
+      'atlas.avatar.color' => '#3b2a1e',
+      'atlas.avatar.stat.agility' => 2,
+      'atlas.avatar.stat.armor' => 2,
+    ],
+  ],
+  'atlas.avatar.chest.dusk' => [
+    'name' => 'Dusk Wanderer Robe',
+    'fungible' => false, 'presentation' => 'collectible',
+    'tradeScope' => 'bound',
+    'properties' => [
+      'atlas.avatar.slot' => 'chest',
+      'atlas.avatar.color' => '#4a3b6b',
+      'atlas.avatar.stat.intelligence' => 2,
+      'atlas.avatar.stat.resistance' => 3,
+    ],
+  ],
+  'atlas.avatar.legs.dusk' => [
+    'name' => 'Dusk Wanderer Trousers',
+    'fungible' => false, 'presentation' => 'collectible',
+    'tradeScope' => 'bound',
+    'properties' => [
+      'atlas.avatar.slot' => 'legs',
+      'atlas.avatar.color' => '#22243a',
+      'atlas.avatar.stat.focus' => 3,
+      'atlas.avatar.stat.criticalStrike' => 2,
+    ],
+  ],
   // Same reasoning as the outfits above, but a separate equip slot — a hat
   // is its own new geometry piece in gltf-mini.js's buildCharacter(), not a
   // recolor of the torso/legs, and wallet.js keeps it in its own storage
@@ -2546,7 +2594,7 @@ const ATLAS_PUBLIC_MINT_CLASSES = [
   'atlas.credit.balance', 'atlas.currency.alpha', 'atlas.currency.beta', 'atlas.demo.clawback.funds',
   'atlas.membership', 'atlas.postoffice.membership', 'atlas.tradingstation.membership', 'atlas.demo.governance.membership',
   'atlas.trophy.chess', 'atlas.tool.bronze_compass', 'atlas.wearable.ring', 'atlas.trinket.pin', 'atlas.trinket.charm', 'atlas.badge',
-  'atlas.avatar.hat.cap', 'atlas.avatar.hat.sunhat', 'atlas.avatar.outfit.dusk', 'atlas.avatar.outfit.forest',
+  'atlas.avatar.hat.cap', 'atlas.avatar.hat.sunhat', 'atlas.avatar.chest.dusk', 'atlas.avatar.chest.forest', 'atlas.avatar.legs.dusk', 'atlas.avatar.legs.forest',
   'atlas.avatar.shoes.boots', 'atlas.avatar.shoes.sneakers',
   'atlas.demo.attestation.filing', 'atlas.demo.coupon', 'atlas.demo.email.ticket', 'atlas.demo.login.badge',
   'atlas.demo.supplychain.widget', 'atlas.demo.clawback.token',

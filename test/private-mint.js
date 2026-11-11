@@ -96,7 +96,7 @@ async function suite(be, label) {
     const r = await mint(be, cls, 100, own);
     line(r.status === 403 && r.body.code === 'mint-not-offered', cls.split('.').pop() + ' is not offered, so it cannot be minted from the page', r);
   }
-  const offered = [['atlas.membership'], ['atlas.credit.balance', 5], ['atlas.demo.login.badge'], ['atlas.avatar.hat.cap'], ['atlas.trophy.chess']];
+  const offered = [['atlas.membership'], ['atlas.credit.balance', 5], ['atlas.demo.login.badge'], ['atlas.avatar.hat.cap'], ['atlas.avatar.chest.forest'], ['atlas.avatar.chest.dusk'], ['atlas.avatar.legs.forest'], ['atlas.avatar.legs.dusk'], ['atlas.trophy.chess']];
   for (const [cls, q] of offered) {
     const r = await mint(be, cls, q, own);
     line(r.status === 200, cls + ' is offered and mints', r);

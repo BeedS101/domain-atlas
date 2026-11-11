@@ -10,7 +10,7 @@
 // jump and reach; (5) the visible parts reach other players through the presence payload and are validated
 // there; (6) taking items off clears everything; (7) the choices survive leaving and re-entering the world;
 // (8) the Stats sub-menu totals the base values and item bonuses, lists the buffs, and Agility, Strength and
-// Dexterity change the speed, jump and reach used in the world.
+// Intelligence change the speed, jump and reach used in the world.
 const { chromium } = require('playwright');
 const fs = require('fs');
 const os = require('os');
@@ -111,7 +111,10 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
       ringB: { name: 'Plain Ring', props: { 'atlas.avatar.slot': 'ring' } },
       trinketA: { name: 'Spring Charm', props: { 'atlas.avatar.slot': 'trinket', 'atlas.avatar.jumpMultiplier': '1.5' } },
       trinketB: { name: 'Long Reach Charm', props: { 'atlas.avatar.slot': 'trinket', 'atlas.avatar.interactRangeMultiplier': '1.5', 'atlas.avatar.speedMultiplier': '9' } },
-      bad: { name: 'Colourless Gloves', props: { 'atlas.avatar.slot': 'gloves' } }
+      chestA: { name: 'Green Jerkin', props: { 'atlas.avatar.slot': 'chest', 'atlas.avatar.color': '#2f5d3a' } },
+      chestOld: { name: 'Old Outfit', props: { 'atlas.avatar.shirtColor': '#4a3b6b', 'atlas.avatar.pantsColor': '#22243a' } },
+      bad: { name: 'Colourless Gloves', props: { 'atlas.avatar.slot': 'gloves' } },
+      badChest: { name: 'Colourless Jerkin', props: { 'atlas.avatar.slot': 'chest' } }
     };
     const minted = {};
     for (const [key, item] of Object.entries(ITEMS)) {
@@ -130,7 +133,7 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     await frame.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC', bubbles: true })));
     await frame.waitForFunction(() => document.getElementById('characterScreen').classList.contains('active') && !!window.__atlasCharacterPreview, null, { timeout: 60000 });
     const slotIds = await frame.evaluate(() => Array.from(document.querySelectorAll('.character-slot')).map((b) => b.dataset.slot).sort());
-    assertTrue(slotIds.join() === 'gloves,hand,hat,legs,neck,offhand,outfit,ring1,ring2,shoes,shoulders,trinket1,trinket2', 'blocks: ' + slotIds.join());
+    assertTrue(slotIds.join() === 'chest,gloves,hand,hat,legs,neck,offhand,ring1,ring2,shoes,shoulders,trinket1,trinket2', 'blocks: ' + slotIds.join());
     const choices = async (slot) => {
       await frame.locator('.character-slot[data-slot="' + slot + '"]').click();
       await frame.waitForFunction((s) => document.getElementById('characterSlotTitle').textContent.length > 0 && document.querySelector('.character-slot.selected') && document.querySelector('.character-slot.selected').dataset.slot === s, slot, { timeout: 40000 });
@@ -143,7 +146,11 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
       await frame.waitForFunction((id) => document.querySelector('#characterSlotList .character-choice.equipped') && document.querySelector('#characterSlotList .character-choice.equipped').dataset.id === id, minted[key], { timeout: 40000 });
       return ids;
     };
-    let ids = await choices('gloves');
+    let ids = await choices('chest');
+    assertTrue(ids.length === 2 && ids.includes(minted.chestA) && ids.includes(minted.chestOld), 'the chest lists a chest piece and an older two-colour outfit, not a colourless one or the legs: ' + ids.length);
+    ids = await choices('legs');
+    assertTrue(ids.length === 1 && ids[0] === minted.legs, 'legs list only the legs piece: ' + ids.length);
+    ids = await choices('gloves');
     assertTrue(ids.length === 1 && ids[0] === minted.gloves, 'gloves list only the gloves (a colourless one does not fit): ' + ids.length);
     ids = await choices('ring1');
     assertTrue(ids.length === 2 && ids.includes(minted.ringA) && ids.includes(minted.ringB), 'rings list both rings');
@@ -247,7 +254,7 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
       return r.json.id;
     };
     minted.statRing = await mintLater({ 'atlas.avatar.slot': 'ring', 'atlas.avatar.stat.agility': '20', 'atlas.avatar.stat.strength': '5', 'atlas.avatar.stat.health': '50', 'atlas.avatar.stat.luck': '-3' });
-    minted.statCharm = await mintLater({ 'atlas.avatar.slot': 'trinket', 'atlas.avatar.stat.agility': '5', 'atlas.avatar.stat.dexterity': '10', 'atlas.avatar.stat.defense': '9999' });
+    minted.statCharm = await mintLater({ 'atlas.avatar.slot': 'trinket', 'atlas.avatar.stat.agility': '5', 'atlas.avatar.stat.intelligence': '5', 'atlas.avatar.stat.dexterity': '10', 'atlas.avatar.stat.armor': '7', 'atlas.avatar.stat.defense': '9999' });
     await frame.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC', bubbles: true })));
     await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 40000 });
     await frame.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC', bubbles: true })));
@@ -261,18 +268,21 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     await frame.locator('.character-subtab[data-view="stats"]').click();
     await frame.waitForFunction(() => document.getElementById('characterView').hidden && !document.getElementById('characterStatsView').hidden, null, { timeout: 20000 });
     let st = await statsOf();
-    assertTrue(Object.keys(st.rows).join() === 'health,mana,stamina,agility,strength,focus,dexterity,defense,luck,charisma', 'stat rows: ' + Object.keys(st.rows).join());
+    assertTrue(Object.keys(st.rows).join() === 'health,mana,stamina,agility,intelligence,strength,armor,defense,resistance,attackSpeed,criticalStrike,dexterity,focus,luck,charisma', 'stat rows: ' + Object.keys(st.rows).join());
+    const groups = await frame.evaluate(() => Array.from(document.querySelectorAll('#characterStatsList .stat-group')).map((g) => g.querySelector('.stat-group-title').textContent + ':' + Array.from(g.querySelectorAll('.stat-row')).map((r) => r.dataset.stat).join('/')));
+    assertTrue(JSON.stringify(groups) === JSON.stringify(['Primary:health/mana/stamina', 'Secondary:agility/intelligence/strength', 'Tertiary:armor/defense/resistance/attackSpeed/criticalStrike/dexterity/focus/luck/charisma']), 'stat groups: ' + JSON.stringify(groups));
     assertTrue(st.rows.health === '100' && st.rows.agility === '10' && st.rows.charisma === '10' && st.empty && st.buffs.length === 0, 'bare character: ' + JSON.stringify(st));
     await frame.locator('.character-subtab[data-view="character"]').click();
     await pickChoice('ring1', 'statRing');
     await pickChoice('trinket1', 'statCharm');
     await frame.locator('.character-subtab[data-view="stats"]').click();
     st = await statsOf();
-    const want = { health: '150', mana: '100', stamina: '100', agility: '35', strength: '15', focus: '10', dexterity: '20', defense: '510', luck: '7', charisma: '10' };
+    // Each Secondary point above 10 adds 5 to its Primary resource: Strength +5 -> Health +25, Intelligence +5 -> Mana +25, Agility +25 -> Stamina +125.
+    const want = { health: '175', mana: '125', stamina: '225', agility: '35', intelligence: '15', strength: '15', armor: '17', defense: '510', resistance: '10', attackSpeed: '10', criticalStrike: '10', dexterity: '20', focus: '10', luck: '7', charisma: '10' };
     assertTrue(JSON.stringify(st.rows) === JSON.stringify(want), 'totals: ' + JSON.stringify(st.rows));
-    for (const text of ['Health +50', 'Agility +25', 'Strength +5', 'Dexterity +10', 'Defense +500', 'Luck -3', 'Speed ×1.25', 'Jump ×1.05', 'Reach ×1.1']) assertTrue(st.buffs.includes(text), 'buff list has ' + text + ': ' + JSON.stringify(st.buffs));
+    for (const text of ['Health +50', 'Health +25 from Strength', 'Mana +25 from Intelligence', 'Stamina +125 from Agility', 'Agility +25', 'Strength +5', 'Intelligence +5', 'Armor +7', 'Dexterity +10', 'Defense +500', 'Luck -3', 'Speed ×1.25', 'Jump ×1.05', 'Reach ×1.05']) assertTrue(st.buffs.includes(text), 'buff list has ' + text + ': ' + JSON.stringify(st.buffs));
     const live = await frame.evaluate(() => { const e = window.__atlasActive3D.getLocalAvatarExtras(); return { speed: e.speed, jump: e.jump, interact: e.interact }; });
-    assertTrue(Math.abs(live.speed - 1.25) < 1e-9 && Math.abs(live.jump - 1.05) < 1e-9 && Math.abs(live.interact - 1.1) < 1e-9, 'stat-driven movement in the world: ' + JSON.stringify(live));
+    assertTrue(Math.abs(live.speed - 1.25) < 1e-9 && Math.abs(live.jump - 1.05) < 1e-9 && Math.abs(live.interact - 1.05) < 1e-9, 'stat-driven movement in the world (Dexterity does not move reach): ' + JSON.stringify(live));
     if (process.env.SHOT_DIR) await site.screenshot({ path: path.join(process.env.SHOT_DIR, 'stats.png') });
     await frame.locator('.character-subtab[data-view="character"]').click();
     await frame.waitForFunction(() => !document.getElementById('characterView').hidden, null, { timeout: 20000 });
@@ -284,6 +294,46 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     st = await statsOf();
     assertTrue(st.rows.agility === '15' && st.rows.health === '100' && !st.buffs.includes('Health +50'), 'taking the ring off lowers the totals: ' + JSON.stringify(st.rows));
     console.log('PASS: stats, buff totals and stat-driven movement');
+
+    console.log('STEP 12: the lobby chest and legs pieces (real catalog classes) fit their slots, recolour the character and add their stats');
+    const mintClass = async (assetClass) => {
+      const payload = { ownerPublicKey: identity.publicKey, assetClass,
+        adminAuth: { action: '/atlas/asset/mint', domain: lab.host, issuedAt: new Date().toISOString(), nonce: crypto.randomBytes(12).toString('hex') } };
+      const r = await lab.postRaw('/atlas/asset/mint', { payload, proof: signPayload(admin, payload) });
+      assertTrue(r.status === 200, 'mint ' + assetClass + ': ' + r.text);
+      await walletPage.evaluate(async ({ o, origin, cred }) => { const e = await AtlasWallet.queueBridgeOffer(o, origin, cred); await AtlasWallet.claimBridgeOffer(o, e.id); }, { o: identity.publicKey, origin: lab.origin, cred: r.json });
+      return r.json;
+    };
+    const forestChest = await mintClass('atlas.avatar.chest.forest');
+    const forestLegs = await mintClass('atlas.avatar.legs.forest');
+    const duskChest = await mintClass('atlas.avatar.chest.dusk');
+    minted.forestChest = forestChest.id; minted.forestLegs = forestLegs.id; minted.duskChest = duskChest.id;
+    assertTrue(forestChest.asset.properties['atlas.avatar.slot'] === 'chest' && forestLegs.asset.properties['atlas.avatar.slot'] === 'legs', 'the catalog classes carry their slot');
+    await frame.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC', bubbles: true })));
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 40000 });
+    await frame.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC', bubbles: true })));
+    await frame.waitForFunction(() => document.getElementById('characterScreen').classList.contains('active') && !!window.__atlasCharacterPreview, null, { timeout: 60000 });
+    await frame.locator('.character-subtab[data-view="character"]').click();
+    ids = await choices('chest');
+    assertTrue(ids.includes(minted.forestChest) && ids.includes(minted.duskChest) && !ids.includes(minted.forestLegs), 'the chest lists the chest pieces and not the legs piece: ' + ids.length);
+    ids = await choices('legs');
+    assertTrue(ids.includes(minted.forestLegs) && !ids.includes(minted.forestChest), 'the legs slot lists the legs piece and not the chest piece');
+    await pickChoice('chest', 'forestChest');
+    await pickChoice('legs', 'forestLegs');
+    const colours = await frame.evaluate(() => { const c = window.__atlasActive3D.getLocalAvatarColors(), e = window.__atlasActive3D.getLocalAvatarExtras(); return { shirt: c && c.shirtColor, pants: c && c.pantsColor, legs: e.legs }; });
+    const hex = (c) => '#' + c.slice(0, 3).map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+    assertTrue(colours.shirt && hex(colours.shirt) === '#2f5d3a', 'the forest jerkin sets the shirt colour: ' + JSON.stringify(colours));
+    assertTrue(colours.legs && hex(colours.legs) === '#3b2a1e', 'the forest trousers set the trouser colour: ' + JSON.stringify(colours));
+    await frame.locator('.character-subtab[data-view="stats"]').click();
+    st = await statsOf();
+    // Jerkin: Armor +4, Resistance +2. Trousers: Agility +2, Armor +2. The charm from step 11 still adds Agility +5, Intelligence +5, Armor +7, so Agility is 17 and Stamina 100 + 7 x 5.
+    assertTrue(st.rows.armor === '23' && st.rows.resistance === '12' && st.rows.agility === '17' && st.rows.stamina === '135', 'the pieces add their stats: ' + JSON.stringify(st.rows));
+    await frame.locator('.character-subtab[data-view="character"]').click();
+    await pickChoice('chest', 'duskChest');
+    const swapped = await frame.evaluate(() => window.__atlasActive3D.getLocalAvatarColors());
+    assertTrue(swapped && hex(swapped.shirtColor) === '#4a3b6b', 'choosing another chest piece replaces the first: ' + JSON.stringify(swapped));
+    await frame.evaluate(() => AtlasWallet.setAvatarLook(null));
+    console.log('PASS: chest and legs pieces');
     ok = true;
   } finally {
     await context.close().catch(() => {});

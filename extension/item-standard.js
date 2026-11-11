@@ -38,6 +38,7 @@ const CATEGORY_FAMILIES = {
 // Slot kind -> property keys an item needs in that slot. hand and offhand need a model instead.
 const SLOTS = {
   hat: { keys: ['atlas.avatar.hatColor'] },
+  chest: { keys: ['atlas.avatar.color'] },
   outfit: { keys: ['atlas.avatar.shirtColor', 'atlas.avatar.pantsColor'] },
   shoes: { keys: ['atlas.avatar.shoeColor'] },
   hand: { model: true },
@@ -51,7 +52,7 @@ const SLOTS = {
 };
 const TOOL_SLOTS = ['hand', 'offhand', 'trinket'];
 
-const STAT_IDS = ['health', 'mana', 'stamina', 'agility', 'strength', 'focus', 'dexterity', 'defense', 'luck', 'charisma'];
+const STAT_IDS = ['health', 'mana', 'stamina', 'agility', 'intelligence', 'strength', 'armor', 'defense', 'resistance', 'attackSpeed', 'criticalStrike', 'dexterity', 'focus', 'luck', 'charisma'];
 const STAT_BOUNDS = [-100, 500];
 
 // Multiplier kind -> generic property key, and the slot-prefixed aliases already used by hats and shoes.

@@ -39,7 +39,7 @@ const path = require('path');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const SUNHAT_CRATE = { x: 2.5, z: -1.5, class: 'atlas.avatar.hat.sunhat', name: 'Explorer Sun Hat', hatColor: '#d9a441' };
-const FOREST_CRATE = { x: -1.0, z: -2.0, class: 'atlas.avatar.outfit.forest', name: 'Forest Ranger Outfit', shirtColor: '#2f5d3a', pantsColor: '#3b2a1e' };
+const FOREST_CRATE = { x: -1.0, z: -2.0, class: 'atlas.avatar.chest.forest', name: 'Forest Ranger Jerkin', shirtColor: '#2f5d3a', pantsColor: null };
 const LAUNCH_ARGS = [
   `--disable-extensions-except=${EXT_PATH}`,
   `--load-extension=${EXT_PATH}`,
@@ -246,11 +246,11 @@ async function closeSettingsAndWallet(frame) {
     await openCrate(frameA, FOREST_CRATE);
     await toggleFromWallet(frameA, FOREST_CRATE.name, 'toggle-avatar-look', 'Take off (stop wearing this look)');
     const expectedShirt = hexToRgba01(FOREST_CRATE.shirtColor);
-    const expectedPants = hexToRgba01(FOREST_CRATE.pantsColor);
+    const expectedPants = FOREST_CRATE.pantsColor; // a chest piece sets the shirt only
     await frameA.waitForFunction(({ shirt, pants }) => {
       const c = window.__atlasActive3D.getLocalAvatarColors();
       if (!c) return false;
-      const close = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-6);
+      const close = (a, b) => (!a || !b) ? a === b : a.every((v, i) => Math.abs(v - b[i]) < 1e-6);
       return close(c.shirtColor, shirt) && close(c.pantsColor, pants);
     }, { shirt: expectedShirt, pants: expectedPants }, { timeout: 5000 });
     const hatStillOn = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarHatColor());
@@ -290,7 +290,7 @@ async function closeSettingsAndWallet(frame) {
     await frameB.waitForFunction(({ id, hat, shirt, pants }) => {
       const rp = window.__atlasActive3D.getRemotePlayerRenderState(id);
       if (!rp || !rp.hatColor || !rp.colors) return false;
-      const close = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-6);
+      const close = (a, b) => (!a || !b) ? a === b : a.every((v, i) => Math.abs(v - b[i]) < 1e-6);
       return close(rp.hatColor, hat) && close(rp.colors.shirtColor, shirt) && close(rp.colors.pantsColor, pants);
     }, { id: idOfA, hat: expectedHat, shirt: expectedShirt, pants: expectedPants }, { timeout: 8000 });
     console.log('PASS: visitor B sees visitor A\'s remote character wearing both the hat and the outfit, over real presence broadcast');

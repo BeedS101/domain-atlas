@@ -468,7 +468,7 @@ function disposeCharacterPreview() {
 // and again whenever the equip/unequip wallet-card action changes it —
 // same "no scene reload needed" live-update treatment setCharacterScale
 // already gets.
-// The side-view character takes the same equipped colours the 3D one does: outfit, hat and shoes.
+// The side-view character takes the same equipped colours the 3D one does: chest, hat and shoes.
 function sideViewLook() {
   const l = localAvatarLookHex || {};
   return {
@@ -7182,11 +7182,11 @@ const CHARACTER_SLOTS = {
     meta: (asset) => { const p = AtlasWallet.avatarHatPropertiesFromAsset(asset); return p ? buffSummary(p.speedMultiplier, p.jumpMultiplier, p.interactRangeMultiplier) : ''; },
     unequip: 'Take hat off'
   },
-  outfit: {
-    label: 'Outfit', empty: 'Default outfit',
+  chest: {
+    label: 'Chest', empty: 'Default shirt',
     getId: () => AtlasWallet.getAvatarLookAssetId(), setId: (id) => AtlasWallet.setAvatarLook(id), apply: applyAvatarLookToScene,
     meta: () => '',
-    unequip: 'Back to the default outfit'
+    unequip: 'Back to the default shirt'
   },
   shoes: {
     label: 'Shoes', empty: 'No shoes on',
@@ -7271,7 +7271,7 @@ function characterSlotCandidates(wallet, slot) {
 // What each slot renders from a given asset, in the shape the apply functions take.
 const CHARACTER_SLOT_PROPS = {
   hat: (asset) => AtlasWallet.avatarHatPropertiesFromAsset(asset),
-  outfit: (asset) => AtlasWallet.avatarLookPropertiesFromAsset(asset),
+  chest: (asset) => AtlasWallet.avatarLookPropertiesFromAsset(asset),
   shoes: (asset) => AtlasWallet.avatarShoePropertiesFromAsset(asset),
   hand: (asset) => AtlasWallet.avatarHandPropertiesFromAsset(asset)
 };
@@ -7336,7 +7336,7 @@ async function refreshCharacterWindow(wallet, equipped) {
 
 async function readEquippedSlots() {
   const out = {};
-  for (const slot of ['hat', 'outfit', 'shoes', 'hand']) out[slot] = await CHARACTER_SLOTS[slot].getId();
+  for (const slot of ['hat', 'chest', 'shoes', 'hand']) out[slot] = await CHARACTER_SLOTS[slot].getId();
   Object.assign(out, await AtlasWallet.getAvatarSlotIds());
   for (const id of EXTRA_SLOT_IDS) if (!out[id]) out[id] = null;
   return out;
@@ -7472,32 +7472,55 @@ function renderCharacterStats(wallet, equipped, effects) {
   renderCharacterEffects(effects);
   const effectLabel = { speed: 'speed', jump: 'jump height', reach: 'reach' };
   characterStatsListEl.textContent = '';
-  for (const r of sheet.stats) {
-    const row = document.createElement('div');
-    row.className = 'stat-row';
-    row.dataset.stat = r.id;
-    const name = document.createElement('span');
-    name.className = 'stat-name';
-    name.textContent = r.label;
-    if (r.effect) {
-      const note = document.createElement('span');
-      note.className = 'stat-note';
-      note.textContent = ' (' + effectLabel[r.effect] + ')';
-      name.appendChild(note);
+  const labelOf = (id) => (AtlasWallet.AVATAR_STATS.find((d) => d.id === id) || { label: id }).label;
+  for (const group of AtlasWallet.AVATAR_STAT_GROUPS) {
+    const rows = sheet.stats.filter((r) => r.group === group.id);
+    if (!rows.length) continue;
+    const section = document.createElement('div');
+    section.className = 'stat-group';
+    section.dataset.group = group.id;
+    const heading = document.createElement('div');
+    heading.className = 'stat-group-title';
+    heading.textContent = group.label;
+    section.appendChild(heading);
+    for (const r of rows) {
+      const row = document.createElement('div');
+      row.className = 'stat-row';
+      row.dataset.stat = r.id;
+      const name = document.createElement('span');
+      name.className = 'stat-name';
+      name.textContent = r.label;
+      const links = [];
+      if (r.effect) links.push(effectLabel[r.effect]);
+      if (r.feeds) links.push(labelOf(r.feeds).toLowerCase());
+      if (links.length) {
+        const note = document.createElement('span');
+        note.className = 'stat-note';
+        note.textContent = ' (' + links.join(', ') + ')';
+        name.appendChild(note);
+      }
+      const value = document.createElement('span');
+      value.className = 'stat-value' + (r.total > r.base ? ' up' : r.total < r.base ? ' down' : '');
+      value.textContent = String(r.total);
+      const parts = [String(r.base)];
+      if (r.bonus) parts.push((r.bonus > 0 ? '+ ' : '- ') + Math.abs(r.bonus) + ' items');
+      if (r.derived) parts.push((r.derived > 0 ? '+ ' : '- ') + Math.abs(r.derived) + ' from ' + r.derivedFrom.map(labelOf).join(', '));
+      value.title = parts.join(' ') + ' = ' + r.total;
+      const detail = document.createElement('span');
+      detail.className = 'stat-detail';
+      const shown = r.bonus + r.derived;
+      detail.textContent = shown ? (shown > 0 ? '+' : '') + shown : '';
+      row.append(name, detail, value);
+      section.appendChild(row);
     }
-    const value = document.createElement('span');
-    value.className = 'stat-value' + (r.bonus > 0 ? ' up' : r.bonus < 0 ? ' down' : '');
-    value.textContent = String(r.total);
-    value.title = r.base + (r.bonus ? (r.bonus > 0 ? ' + ' : ' - ') + Math.abs(r.bonus) : '') + ' = ' + r.total;
-    const detail = document.createElement('span');
-    detail.className = 'stat-detail';
-    detail.textContent = r.bonus ? (r.bonus > 0 ? '+' : '') + r.bonus : '';
-    row.append(name, detail, value);
-    characterStatsListEl.appendChild(row);
+    characterStatsListEl.appendChild(section);
   }
   characterBuffListEl.textContent = '';
   const lines = [];
-  for (const r of sheet.stats) if (r.bonus) lines.push({ key: r.id, text: r.label + ' ' + (r.bonus > 0 ? '+' : '') + r.bonus });
+  for (const r of sheet.stats) {
+    if (r.bonus) lines.push({ key: r.id, text: r.label + ' ' + (r.bonus > 0 ? '+' : '') + r.bonus });
+    if (r.derived) lines.push({ key: 'derived-' + r.id, text: r.label + ' ' + (r.derived > 0 ? '+' : '') + r.derived + ' from ' + r.derivedFrom.map(labelOf).join(', ') });
+  }
   const mv = sheet.movement;
   const round2 = (v) => Math.round(v * 100) / 100;
   if (round2(mv.speed) !== 1) lines.push({ key: 'speed', text: 'Speed ' + formatMultiplier(mv.speed) });
@@ -7574,7 +7597,7 @@ async function openCharacterScreen() {
   const wallet = await readOwnWallet();
   const equipped = await readEquippedSlots();
   const look = {};
-  for (const slot of ['hat', 'outfit', 'shoes', 'hand']) {
+  for (const slot of ['hat', 'chest', 'shoes', 'hand']) {
     const entry = equipped[slot] ? wallet.find((e) => e.credential.id === equipped[slot]) : null;
     look[slot] = entry ? CHARACTER_SLOT_PROPS[slot](entry.credential.asset) : null;
   }
@@ -7589,7 +7612,7 @@ async function openCharacterScreen() {
   try {
     characterPreview = MiniGLTF.previewCharacter(characterWindowCanvasEl, {
       characterScale: 1,
-      avatarLook: look.outfit,
+      avatarLook: look.chest,
       avatarHat: look.hat,
       avatarShoes: look.shoes,
       avatarHand: look.hand,

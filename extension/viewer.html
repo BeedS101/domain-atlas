@@ -882,7 +882,9 @@
   .character-subtabs { display: flex; gap: 6px; margin: 2px 0 8px; }
   .character-subtab { flex: 1; padding: 6px 8px; background: #16232a; border: 1px solid #2c3c44; border-radius: 6px; color: #d7e0e4; cursor: pointer; font: inherit; }
   .character-subtab.active-subtab { border-color: #57a593; background: #1d3038; }
-  #characterStatsList { display: flex; flex-direction: column; gap: 2px; }
+  #characterStatsList { display: flex; flex-direction: column; gap: 10px; }
+  .stat-group { display: flex; flex-direction: column; gap: 2px; }
+  .stat-group-title { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #8aa0a9; margin: 0 2px 2px; }
   .stat-row { display: grid; grid-template-columns: 1fr auto 44px; gap: 8px; align-items: baseline; padding: 5px 8px; background: #16232a; border-radius: 4px; }
   .stat-name .stat-note { color: #8aa0a9; font-size: 11px; }
   .stat-detail { color: #8aa0a9; font-size: 11px; }
@@ -1697,7 +1699,7 @@
             <button type="button" class="character-slot" data-slot="hat"><span class="slot-name">Hat</span><span class="slot-icon" aria-hidden="true">&#9650;</span><span class="slot-item">Empty</span></button>
             <button type="button" class="character-slot" data-slot="neck"><span class="slot-name">Neck</span><span class="slot-icon" aria-hidden="true">&#9675;</span><span class="slot-item">Empty</span></button>
             <button type="button" class="character-slot" data-slot="shoulders"><span class="slot-name">Shoulders</span><span class="slot-icon" aria-hidden="true">&#9644;</span><span class="slot-item">Empty</span></button>
-            <button type="button" class="character-slot" data-slot="outfit"><span class="slot-name">Outfit</span><span class="slot-icon" aria-hidden="true">&#9632;</span><span class="slot-item">Empty</span></button>
+            <button type="button" class="character-slot" data-slot="chest"><span class="slot-name">Chest</span><span class="slot-icon" aria-hidden="true">&#9632;</span><span class="slot-item">Empty</span></button>
             <button type="button" class="character-slot" data-slot="gloves"><span class="slot-name">Gloves</span><span class="slot-icon" aria-hidden="true">&#9633;</span><span class="slot-item">Empty</span></button>
           </div>
           <canvas id="characterWindowCanvas" width="368" height="640"></canvas>
@@ -2017,7 +2019,7 @@
             <span id="characterScaleValue" class="mono">1.0×</span>
           </label>
           <div id="characterScaleNote" class="empty-note" hidden>This world sets its own character size, so the slider is locked here. Your saved size still applies in worlds that don't.</div>
-          <!-- A live view of the character an equipped outfit/hat (see the
+          <!-- A live view of the character an equipped chest piece/hat (see the
                wallet card's "Wear as my look"/"Wear as my hat" actions)
                actually renders as — filled in by viewer.js's openSettings()
                via MiniGLTF.previewCharacter(), the same shared boxes a

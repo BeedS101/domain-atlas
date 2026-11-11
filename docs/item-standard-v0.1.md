@@ -72,11 +72,11 @@ Categories also fix the class shape: equipment, tool, key, collectible and crede
 
 ### Slots
 
-`hat`, `outfit`, `shoes`, `hand`, `offhand`, `gloves`, `legs`, `shoulders`, `neck`, `ring`, `trinket`. The properties a slot needs are the ones the wallet already requires: hat `atlas.avatar.hatColor`; outfit `shirtColor` and `pantsColor`; shoes `shoeColor`; gloves, legs, shoulders and neck `atlas.avatar.color`; hand and offhand an absolute http(s) or root-relative model; ring and trinket nothing extra.
+`hat`, `chest`, `outfit` (the older two-colour form, still accepted), `shoes`, `hand`, `offhand`, `gloves`, `legs`, `shoulders`, `neck`, `ring`, `trinket`. The properties a slot needs are the ones the wallet already requires: hat `atlas.avatar.hatColor`; chest `atlas.avatar.color`; outfit `shirtColor` and `pantsColor`; shoes `shoeColor`; gloves, legs, shoulders and neck `atlas.avatar.color`; hand and offhand an absolute http(s) or root-relative model; ring and trinket nothing extra.
 
 ### Stats and multipliers
 
-Stat ids: `health`, `mana`, `stamina`, `agility`, `strength`, `focus`, `dexterity`, `defense`, `luck`, `charisma`. A spec range must lie within -100 to 500 and holds whole numbers. An item's value is signed as `atlas.avatar.stat.<id>`.
+Stat ids: `health`, `mana`, `stamina`, `agility`, `intelligence`, `strength`, `armor`, `defense`, `resistance`, `attackSpeed`, `criticalStrike`, `dexterity`, `focus`, `luck`, `charisma`. A spec range must lie within -100 to 500 and holds whole numbers. An item's value is signed as `atlas.avatar.stat.<id>`.
 
 Multipliers use `atlas.avatar.speedMultiplier`, `atlas.avatar.jumpMultiplier` and `atlas.avatar.interactRangeMultiplier`, within 0.25 to 3. Hat items may also use `atlas.avatar.hatSpeedMultiplier`, `hatJumpMultiplier` and `hatInteractRangeMultiplier`, and shoes `shoeSpeedMultiplier` and `shoeJumpMultiplier`, which map to the same three kinds.
 
