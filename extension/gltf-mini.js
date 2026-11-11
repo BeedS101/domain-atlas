@@ -1777,19 +1777,36 @@
   // a head would be without anything needing to be perfectly to-scale.
   // Backpedal speed in units per second, before equipment multipliers (a walk is 2.4).
   const BACKPEDAL_SPEED = 1.2;
-  // A held item is drawn in a hand: the model's bounding box is scaled so its longest side is HAND_ITEM_LENGTH,
-  // gripped about 18% up from its lowest point (a handle at the bottom, a head at the top) and tilted forward.
-  // The character faces -z, so a model's front (+z, the side a thumbnail shows) is turned to face the same way.
-  // Returns the matrix from model space to the arm's local space (the origin is the shoulder, the arm hangs
-  // along -y).
+  // A held item is drawn in a hand. The character faces -z and a model's front is +z (the side its thumbnail shows).
+  // Returns the matrix from model space to the arm's local space (the origin is the shoulder, the arm hangs along
+  // -y). `side` is -1 for the left (off) hand and 1 for the right.
+  //  - A tool or weapon (handle at the bottom, head at the top) is scaled so its longest side is HAND_ITEM_LENGTH,
+  //    gripped HAND_ITEM_GRIP up from its lowest point and swung forward by HAND_ITEM_TILT, so a blade points
+  //    forward and a little up instead of standing on end.
+  //  - A flat item (shield, buckler: broad and much thinner front to back than across, not a long blade) is carried
+  //    against the outside of the arm, centred on the hand and facing outward, at HAND_FLAT_LENGTH across.
   const HAND_ITEM_LENGTH = 0.8;
   const HAND_ITEM_GRIP = 0.18;
-  const HAND_ITEM_TILT = 0.5; // radians, top of the item leaning forward
-  function handItemMatrix(character, bounds) {
+  const HAND_ITEM_TILT = 1.4; // radians from hanging straight down, forward
+  const HAND_FLAT_LENGTH = 0.6;
+  const HAND_FLAT_RATIO = 0.4; // thickness over width below which an item counts as flat
+  const HAND_FLAT_ASPECT = 0.5; // narrow side over long side above which a flat item is broad rather than a blade
+  function handItemMatrix(character, bounds, side) {
     const size = bounds.size;
     const longest = Math.max(size[0], size[1], size[2]);
-    const k = Number.isFinite(longest) && longest > 0 ? HAND_ITEM_LENGTH / longest : 1;
+    const across = Math.max(size[0], size[1]);
     const px = (bounds.min[0] + bounds.max[0]) / 2, pz = (bounds.min[2] + bounds.max[2]) / 2;
+    const dir = side < 0 ? -1 : 1;
+    if (Number.isFinite(across) && across > 0 && size[2] < HAND_FLAT_RATIO * across && Math.min(size[0], size[1]) > HAND_FLAT_ASPECT * across) {
+      const k = HAND_FLAT_LENGTH / across;
+      const py = (bounds.min[1] + bounds.max[1]) / 2;
+      const clearance = 0.065 + (size[2] * k) / 2 + 0.02;
+      return mat4Multiply(
+        mat4Translate(dir * clearance, -character.armLen + 0.18, 0),
+        mat4Multiply(mat4RotateY(dir * Math.PI / 2), mat4Multiply(mat4Scale(k), mat4Translate(-px, -py, -pz)))
+      );
+    }
+    const k = Number.isFinite(longest) && longest > 0 ? HAND_ITEM_LENGTH / longest : 1;
     const py = bounds.min[1] + HAND_ITEM_GRIP * size[1];
     return mat4Multiply(
       mat4Translate(0, -character.armLen + 0.03, 0),
@@ -2190,7 +2207,7 @@
       handModels.set(url, 'loading');
       loadDropModel(url).then((model) => {
         if (modelOwner.destroyed) return;
-        handModels.set(url, { model, matrix: handItemMatrix(character, model.bounds) });
+        handModels.set(url, { model, matrix: handItemMatrix(character, model.bounds, 1), matrixLeft: handItemMatrix(character, model.bounds, -1) });
       }, () => { handModels.set(url, 'failed'); });
     }
     let localAvatarShoeSpeedMultiplier = (opts.localAvatarShoes && opts.localAvatarShoes.speedMultiplier) || 1;
@@ -3287,12 +3304,12 @@
           drawPart(mat4Translate(0, character.shoulderY, 0), character.head);
           if (hatColor) drawPart(mat4Translate(0, character.shoulderY, 0), character.hat, hatColor);
         }
-        const drawHeld = (url, armLocal) => {
+        const drawHeld = (url, armLocal, left) => {
           if (!url) return;
           ensureHandModel(url);
           const held = handModels.get(url);
           if (held && typeof held === 'object') {
-            const toHand = mat4Multiply(base, mat4Multiply(armLocal, held.matrix));
+            const toHand = mat4Multiply(base, mat4Multiply(armLocal, left ? held.matrixLeft : held.matrix));
             held.model.primitives.forEach((prim) => {
               bindAndDraw({ vao: prim.vao, color: prim.color, modelMatrix: mat4Multiply(toHand, prim.nodeMatrix) }, view, projection);
             });
@@ -3308,7 +3325,7 @@
           if (extras && extras.gloves) { drawPart(armLLocal, character.gloveL, extras.gloves); drawPart(armRLocal, character.gloveR, extras.gloves); }
           if (extras && extras.shoulders) { drawPart(armLLocal, character.padL, extras.shoulders); drawPart(armRLocal, character.padR, extras.shoulders); }
           drawHeld(handUrl, armRLocal);
-          drawHeld(extras && extras.offHand, armLLocal);
+          drawHeld(extras && extras.offHand, armLLocal, true);
         }
         const legLLocal = mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing + lift.legL));
         const legRLocal = mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing + lift.legR));
@@ -4002,7 +4019,7 @@
       if (!url) return;
       buildModel(gl, url, undefined, undefined, DEFAULT_DROP_POLICY).then((model) => {
         if (lost || token !== slot.token) { try { releaseModelGpu(gl, model); } catch (e) { /* ignore */ } return; }
-        slot.held = { model, matrix: handItemMatrix(character, model.bounds) };
+        slot.held = { model, matrix: handItemMatrix(character, model.bounds, name === 'offHand' ? -1 : 1) };
       }, (err) => { console.warn(name + ' model not shown in preview:', url, err && err.message); });
     }
     function setHandModel(url) { setHeldModel('hand', url); }

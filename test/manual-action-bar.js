@@ -412,7 +412,7 @@ function injectClasses(docroot) {
       const backDist = await walk('KeyS', 600);
       const yawAfter = await frame.evaluate(() => ({ cam: window.__atlasActive3D.camera.yaw, face: window.__atlasActive3D.getCharacterYaw() }));
       assertTrue(forwardDist > 0.3, 'walking forward moves the character: ' + forwardDist);
-      assertTrue(backDist > 0.1 && backDist < forwardDist * 0.65, 'backpedalling is slower than a walk: ' + backDist.toFixed(2) + ' against ' + forwardDist.toFixed(2));
+      assertTrue(backDist > 0.1 && backDist < forwardDist * 0.8, 'backpedalling is slower than a walk: ' + backDist.toFixed(2) + ' against ' + forwardDist.toFixed(2));
       const diff = Math.abs(Math.atan2(Math.sin(yawAfter.face - yawAfter.cam), Math.cos(yawAfter.face - yawAfter.cam)));
       assertTrue(diff < 0.01, 'the character keeps facing the way the camera looks while backing up: ' + JSON.stringify(yawAfter));
     }

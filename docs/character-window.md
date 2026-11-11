@@ -65,7 +65,7 @@ Test: `xvfb-run -a node test/manual-item-effects.js`; the policy and resolver lo
 
 The hand slot is cosmetic: it changes nothing about gameplay. The model URL travels over presence as `handModel` (an absolute http(s) URL, at most 400 characters; anything else is dropped by the Node and PHP presence servers and again by the viewer). Other players load it under the same limits as dropped items (1 MB, 50k triangles, texture limits) and keep at most eight held models resident.
 
-A held model is scaled so its longest side is 0.8 units, gripped 18% up from its lowest point (handle at the bottom, head at the top) and tilted forward. The character faces -z, so the model's front (+z, the side its thumbnail shows) is turned to face forward; a shield made for the off hand should have its face on +z. The same applies to the off hand.
+A held tool or weapon is scaled so its longest side is 0.8 units, gripped 18% up from its lowest point (handle at the bottom, head at the top) and swung forward about 80 degrees from hanging, so a blade points forward. The character faces -z, so the model's front (+z, the side its thumbnail shows) is turned to face forward. A flat, broad item (a shield: less than 40% as thick front to back as it is wide, and at least half as tall as it is wide) is instead carried against the outside of the arm, centred on the hand, 0.6 units across, facing outward; its face should be on +z. The same rules apply in the off hand.
 
 The Mining Pick from the gallery's tool chest carries `atlas.avatar.handItem`. Any other issuer can make an item holdable by setting that property on a class that has a model.
 
