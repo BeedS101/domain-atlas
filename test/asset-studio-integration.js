@@ -959,7 +959,9 @@ async function credentialVerifies(l, cred) {
   await test('creator options: a giftable, expiring design with properties mints exactly what was signed and can be gifted', async () => {
     const l = await lab({ mint: true, config: HIGH });
     const st = await l.get('/atlas/studio/api.php?op=status');
-    assert.deepEqual(st.json.options, { giftable: true, expiryMinSeconds: 3600, expiryMaxSeconds: 31536000, maxProperties: 6 });
+    const { equipment, ...limits } = st.json.options;
+    assert.deepEqual(limits, { giftable: true, expiryMinSeconds: 3600, expiryMaxSeconds: 31536000, maxProperties: 6 });
+    assert.deepEqual(Object.keys(equipment), ['necklace', 'gloves', 'shoulders', 'trinket', 'sword'], 'status lists the equipment templates');
     const expiresAt = new Date(Math.floor((Date.now() + 5 * 86400e3) / 60e3) * 60e3).toISOString().replace(/\.\d+Z$/, 'Z');
     const design = Object.assign({}, DESIGN, { tradeScope: 'local', expiresAt, properties: { rarity: 'epic', edition: '1 of 5' } });
     const id = makeIdentity('raw-ecdsa');
@@ -1011,6 +1013,74 @@ async function credentialVerifies(l, cred) {
     const ok = await l.mintAs(id, Object.assign({}, DESIGN, { expiresAt: when(86400 * 3) }));
     assert.equal(ok.mint.status, 200, ok.mint.text);
     assert.ok(Date.parse(ok.mint.json.credential.asset.expiresAt) > Date.now());
+  });
+
+  await test('equipment: a sword mints with its hand-item properties, stats and finish model, bound and without expiry', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const id = makeIdentity('raw-ecdsa');
+    const design = { schema: 'atlas.asset-studio.design/0.1', template: 'sword', name: 'Ember Blade', description: 'A test sword.', finish: 'bronze', stats: { strength: 3, criticalStrike: 2, agility: 1 } };
+    const r = await l.mintAs(id, design);
+    assert.equal(r.mint.status, 200, r.mint.text);
+    assert.match(r.challenge.json.signRequest.summary, /for the hand slot, with Agility \+1, Critical Strike \+2, Strength \+3/);
+    const a = r.mint.json.credential.asset;
+    assert.equal(a.class, 'atlas.demo.studio.collectible');
+    assert.equal(a.tradeScope, 'bound');
+    assert.equal(a.expiresAt, undefined, 'equipment never expires');
+    assert.equal(a.properties['atlas.avatar.handItem'], 'true');
+    assert.equal(a.properties['atlas.avatar.stat.strength'], 3);
+    assert.equal(a.properties['atlas.avatar.stat.criticalStrike'], 2);
+    assert.equal(a.properties['atlas.avatar.stat.agility'], 1);
+    assert.equal(a.properties['atlas.avatar.slot'], undefined, 'the hand slot is signed as a held item');
+    assert.ok(a.model.endsWith('/assets/studio/sword-bronze.glb') && a.thumbnail.endsWith('/assets/studio/sword-bronze.png'), 'the finish picks the model');
+  });
+
+  await test('equipment: a necklace signs its slot and the colour the creator picked', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const id = makeIdentity('raw-ecdsa');
+    const design = { schema: 'atlas.asset-studio.design/0.1', template: 'necklace', name: 'Moon', description: 'A test necklace.', finish: 'silver', color: '#aa33cc', stats: { luck: 2, focus: 3 }, properties: { edition: '1 of 1' } };
+    const r = await l.mintAs(id, design);
+    assert.equal(r.mint.status, 200, r.mint.text);
+    assert.match(r.challenge.json.signRequest.summary, /for the neck slot in colour #aa33cc, with Focus \+3, Luck \+2/);
+    const a = r.mint.json.credential.asset;
+    assert.equal(a.properties['atlas.avatar.slot'], 'neck');
+    assert.equal(a.properties['atlas.avatar.color'], '#aa33cc');
+    assert.equal(a.properties['atlas.avatar.stat.luck'], 2);
+    assert.equal(a.properties['atlas.studio.custom.edition'], '1 of 1');
+    assert.equal(a.tradeScope, 'bound');
+  });
+
+  await test('equipment: the issuer refuses what the table does not allow, before a challenge is issued', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const id = makeIdentity('raw-ecdsa');
+    const base = { schema: 'atlas.asset-studio.design/0.1', template: 'gloves', name: 'Grip', description: 'd', finish: 'gold', color: '#112233' };
+    const cases = [
+      [{ stats: { strength: 4 } }, 'invalid-stat-points'], [{ stats: { strength: 3, agility: 3 } }, 'stat-budget-exceeded'],
+      [{ stats: { luck: 1 } }, 'stat-not-offered'], [{ stats: { health: 1 } }, 'stat-not-offered'], [{ stats: { strength: 1.5 } }, 'invalid-stat-points'],
+      [{ tradeScope: 'local' }, 'equipment-bound-only'], [{ expiresAt: '2031-01-01T00:00:00Z' }, 'equipment-no-expiry'],
+      [{ color: '#ABCDEF' }, 'invalid-color'], [{ color: undefined }, 'invalid-color'],
+    ];
+    for (const [extra, error] of cases) {
+      const d = Object.assign({}, base, extra);
+      for (const k of Object.keys(d)) if (d[k] === undefined) delete d[k];
+      const ch = await l.api('challenge', { design: d, recipient: id.publicKeyB64 });
+      assert.equal(ch.status, 400, JSON.stringify(extra));
+      assert.equal(ch.json.error, error, JSON.stringify(extra));
+    }
+    const sword = await l.api('challenge', { design: Object.assign({}, base, { template: 'sword' }), recipient: id.publicKeyB64 });
+    assert.equal(sword.json.error, 'color-not-allowed');
+    const trophy = await l.api('challenge', { design: Object.assign({}, DESIGN, { stats: { strength: 1 } }), recipient: id.publicKeyB64 });
+    assert.equal(trophy.json.error, 'option-not-allowed', 'the original templates carry no colour or stats');
+    assert.equal(l.studioFiles('mint-receipts').length, 0, 'nothing was recorded for a refused design');
+  });
+
+  await test('equipment: a stat or colour changed after signing is refused', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const id = makeIdentity('raw-ecdsa');
+    const design = { schema: 'atlas.asset-studio.design/0.1', template: 'shoulders', name: 'Bastion', description: 'd', finish: 'gold', color: '#112233', stats: { armor: 1 } };
+    for (const tweak of [(b) => { b.design = Object.assign({}, b.design, { stats: { armor: 3 } }); }, (b) => { b.design = Object.assign({}, b.design, { color: '#ffffff' }); }]) {
+      const r = await l.mintAs(id, design, tweak);
+      assert.notEqual(r.mint.status, 200, 'a changed design must not mint');
+    }
   });
 
   await test('creator options: a design changed after signing is refused', async () => {

@@ -7,6 +7,7 @@
 //   const viewer = AtlasModelViewer.create(canvas);   // null when WebGL is unavailable
 //   await viewer.load('/assets/studio/badge.glb', { standUp: true });   // stand a flat model on its edge
 //   viewer.setFinish('gold' | 'silver' | 'bronze');
+//   viewer.setTint('#rrggbb' | null);   // recolour the accent material with the creator's chosen colour
 //   viewer.setAutoRotate(true); viewer.resetView();
 //
 // Drag to rotate, wheel or pinch to zoom, arrow keys and + / - when the canvas has focus.
@@ -188,13 +189,17 @@ void main(){ float d = length(vUv); float a = smoothstep(1.0, 0.0, d); gl_FragCo
 
     let model = null;          // { draws, floor, radius, centre, float }
     let finish = 'gold';
+    let tint = null;           // [r, g, b] 0..1: replaces the accent colour, for items whose colour the creator picks
     const view = { yaw: 0.6, pitch: 0.18, zoom: 1 };
     const goal = { yaw: view.yaw, pitch: view.pitch, zoom: 1 };
     let velocity = 0, autoRotate = !(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches), interacting = false, lastInput = 0;
     let raf = 0, destroyed = false, t0 = performance.now();
 
     function materialFor(m) {
-      if (near(m.color, ACCENT)) { const f = FINISHES[finish] || FINISHES.gold; return { color: f.color, metal: f.metal, rough: f.rough }; }
+      if (near(m.color, ACCENT)) {
+        if (tint) return { color: tint, metal: 0.25, rough: 0.55 };
+        const f = FINISHES[finish] || FINISHES.gold; return { color: f.color, metal: f.metal, rough: f.rough };
+      }
       return { color: m.color, metal: Math.max(m.metal, 0.35), rough: Math.min(m.rough, 0.5) };
     }
 
@@ -346,6 +351,7 @@ void main(){ float d = length(vUv); float a = smoothstep(1.0, 0.0, d); gl_FragCo
         setModel(parsed, opts);
       },
       setFinish(name) { if (FINISHES[name]) finish = name; },
+      setTint(hex) { const m = /^#([0-9a-f]{6})$/i.exec(hex || ''); tint = m ? [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16) / 255) : null; },
       setAutoRotate(on) { autoRotate = !!on; lastInput = 0; },
       get autoRotate() { return autoRotate; },
       resetView() { resetView(); lastInput = performance.now(); },

@@ -62,13 +62,14 @@ const json = (r) => { try { return JSON.parse(r.body.toString('utf8')); } catch 
   const v = await request('POST', '/atlas/studio/api.php?op=validate', design);
   const vj = json(v);
   check('design validator works', v.status === 200 && vj && vj.ok === true && /^[0-9a-f]{64}$/.test(String(vj.designDigest || '')), 'HTTP ' + v.status);
-  const bad = await request('POST', '/atlas/studio/api.php?op=validate', Object.assign({}, design, { template: 'sword' }));
+  const bad = await request('POST', '/atlas/studio/api.php?op=validate', Object.assign({}, design, { template: 'helmet' }));
   check('validator rejects an unknown template', bad.status === 400);
   const unknown = await request('GET', '/atlas/studio/api.php?op=nonsense');
   check('unknown operation is refused', unknown.status === 404);
 
   // 3. Studio's own models (assets/studio/). The site's other models in assets/ are not Studio's and are not checked.
-  for (const [name, magic] of [['trophy.glb', 'glTF'], ['badge.glb', 'glTF'], ['key.glb', 'glTF'], ['trophy.png', '\x89PNG'], ['badge.png', '\x89PNG'], ['key.png', '\x89PNG']]) {
+  const studioModels = ['trophy', 'badge', 'key', 'necklace', 'gloves', 'shoulders', 'trinket', 'sword-gold', 'sword-silver', 'sword-bronze'];
+  for (const [name, magic] of studioModels.map((m) => [m + '.glb', 'glTF']).concat(studioModels.map((m) => [m + '.png', '\x89PNG']))) {
     const r = await request('GET', '/assets/studio/' + name);
     check('/assets/studio/' + name, r.status === 200 && r.body.length > 16 && r.body.subarray(0, magic.length).toString('latin1') === magic, 'HTTP ' + r.status + ', ' + r.body.length + ' bytes');
   }

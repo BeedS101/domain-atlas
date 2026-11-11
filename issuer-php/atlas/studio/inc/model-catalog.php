@@ -5,12 +5,21 @@ if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVE
 // or thumbnailPath from a design: the template picks the entry and nothing else does. These are visual
 // references only, not proof of ownership and not authority to mint. Issuance checks that both files exist on
 // this site (see below).
-function atlas_studio_model_for_template($template) {
+function atlas_studio_model_for_template($template, $finish = null) {
   $approved = [
     'trophy'=>['modelPath'=>'/assets/studio/trophy.glb','thumbnailPath'=>'/assets/studio/trophy.png'],
     'badge'=>['modelPath'=>'/assets/studio/badge.glb','thumbnailPath'=>'/assets/studio/badge.png'],
     'key'=>['modelPath'=>'/assets/studio/key.glb','thumbnailPath'=>'/assets/studio/key.png'],
+    'necklace'=>['modelPath'=>'/assets/studio/necklace.glb','thumbnailPath'=>'/assets/studio/necklace.png'],
+    'gloves'=>['modelPath'=>'/assets/studio/gloves.glb','thumbnailPath'=>'/assets/studio/gloves.png'],
+    'shoulders'=>['modelPath'=>'/assets/studio/shoulders.glb','thumbnailPath'=>'/assets/studio/shoulders.png'],
+    'trinket'=>['modelPath'=>'/assets/studio/trinket.glb','thumbnailPath'=>'/assets/studio/trinket.png'],
   ];
+  // The sword is held in the hand, where its metal cannot be recoloured, so each finish is its own model.
+  if ($template === 'sword') {
+    return in_array($finish, ['gold','silver','bronze'], true)
+      ? ['modelPath'=>'/assets/studio/sword-'.$finish.'.glb','thumbnailPath'=>'/assets/studio/sword-'.$finish.'.png'] : null;
+  }
   return is_string($template) ? ($approved[$template] ?? null) : null;
 }
 
@@ -26,7 +35,7 @@ function atlas_studio_model_available($docroot, $model) {
   foreach ($magic as $field=>$spec) {
     list($head, $ext) = $spec;
     $path = $model[$field] ?? null;
-    if (!is_string($path) || !preg_match('#^/assets/studio/(trophy|badge|key)\.' . $ext . '$#D', $path)) return false;
+    if (!is_string($path) || !preg_match('#^/assets/studio/(trophy|badge|key|necklace|gloves|shoulders|trinket|sword-gold|sword-silver|sword-bronze)\.' . $ext . '$#D', $path)) return false;
     $real = realpath($root . $path);
     if ($real === false) return false;
     $real = str_replace('\\', '/', $real);

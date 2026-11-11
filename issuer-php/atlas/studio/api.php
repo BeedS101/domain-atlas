@@ -58,7 +58,7 @@ try {
   if ($op === 'status') {
     $lim = atlas_studio_limits($cfg);
     studio_reply(200, ['ok'=>true,'mintEnabled'=>$cfg['enabled'] === true,
-      'options'=>['giftable'=>$lim['allowLocal'],'expiryMinSeconds'=>$lim['expiryMin'],'expiryMaxSeconds'=>$lim['expiryMax'],'maxProperties'=>ATLAS_STUDIO_MAX_PROPERTIES]]);
+      'options'=>['giftable'=>$lim['allowLocal'],'expiryMinSeconds'=>$lim['expiryMin'],'expiryMaxSeconds'=>$lim['expiryMax'],'maxProperties'=>ATLAS_STUDIO_MAX_PROPERTIES,'equipment'=>atlas_studio_equipment_options()]]);
   }
   if ($cfg['enabled'] !== true) studio_reply(403, ['ok'=>false,'error'=>'minting-not-enabled']);
 

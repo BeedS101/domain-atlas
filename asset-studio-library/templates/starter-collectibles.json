@@ -27,6 +27,71 @@
         "silver",
         "bronze"
       ]
+    },
+    {
+      "id": "necklace",
+      "label": "Necklace",
+      "slot": "neck",
+      "colour": true,
+      "statBudget": 5,
+      "statCap": 3,
+      "finishes": [
+        "gold",
+        "silver",
+        "bronze"
+      ]
+    },
+    {
+      "id": "gloves",
+      "label": "Gloves",
+      "slot": "gloves",
+      "colour": true,
+      "statBudget": 5,
+      "statCap": 3,
+      "finishes": [
+        "gold",
+        "silver",
+        "bronze"
+      ]
+    },
+    {
+      "id": "shoulders",
+      "label": "Shoulders",
+      "slot": "shoulders",
+      "colour": true,
+      "statBudget": 6,
+      "statCap": 3,
+      "finishes": [
+        "gold",
+        "silver",
+        "bronze"
+      ]
+    },
+    {
+      "id": "trinket",
+      "label": "Trinket",
+      "slot": "trinket",
+      "colour": true,
+      "statBudget": 5,
+      "statCap": 3,
+      "finishes": [
+        "gold",
+        "silver",
+        "bronze"
+      ]
+    },
+    {
+      "id": "sword",
+      "label": "Sword",
+      "slot": "hand",
+      "colour": false,
+      "statBudget": 8,
+      "statCap": 4,
+      "finishes": [
+        "gold",
+        "silver",
+        "bronze"
+      ]
     }
   ],
   "notes": "Design presets only; not mint permissions or issuer catalog entries."

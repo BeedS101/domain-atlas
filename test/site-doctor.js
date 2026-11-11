@@ -208,7 +208,7 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
 
   await check('site selection: issuer-only skips demo pages, site B expects its own pages', async () => {
     const none = await call('scan', { site: 'none' });
-    assert.ok(none.json.total < 200 && none.json.total > 100);
+    assert.ok(none.json.total < 220 && none.json.total > 100);
     assert.deepStrictEqual(issue(none), []);
     const b = await call('scan', { site: 'b' });
     const missing = issue(b);

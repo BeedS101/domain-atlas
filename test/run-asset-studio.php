@@ -14,6 +14,7 @@ $unit = [
   'asset-studio-rate-limits.php',
   'asset-studio-hardening.php',
   'asset-studio-exhaustion.php',
+  'asset-studio-equipment.php',
 ];
 $failed = [];
 $passed = 0;

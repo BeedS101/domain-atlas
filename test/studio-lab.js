@@ -121,9 +121,9 @@ class StudioLab {
       // Studio's own models go where the issuer expects them. The site's own /assets/ models are stand-ins that
       // are not valid models, so any code that read the old /assets/{trophy,badge,key} paths would fail closed.
       fs.mkdirSync(path.join(lab.docroot, 'assets', 'studio'), { recursive: true });
-      for (const f of ['trophy', 'badge', 'key']) for (const ext of ['glb', 'png']) {
+      for (const f of ['trophy', 'badge', 'key', 'necklace', 'gloves', 'shoulders', 'trinket', 'sword-gold', 'sword-silver', 'sword-bronze']) for (const ext of ['glb', 'png']) {
         fs.copyFileSync(path.join(REPO, 'demo-domain-a', 'assets', 'studio', f + '.' + ext), path.join(lab.docroot, 'assets', 'studio', f + '.' + ext));
-        fs.writeFileSync(path.join(lab.docroot, 'assets', f + '.' + ext), SITE_MODEL_STANDIN);
+        if (['trophy', 'badge', 'key'].includes(f)) fs.writeFileSync(path.join(lab.docroot, 'assets', f + '.' + ext), SITE_MODEL_STANDIN);
       }
       for (const ext of ['glb', 'png']) fs.copyFileSync(path.join(REPO, 'demo-domain-a', 'assets', 'compass.' + ext), path.join(lab.docroot, 'assets', 'compass.' + ext));
       fs.mkdirSync(lab.private, { recursive: true, mode: 0o700 });

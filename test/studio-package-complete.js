@@ -47,8 +47,8 @@ const check = (name, fn) => Promise.resolve().then(fn).then(() => console.log('o
       assert.deepStrictEqual(onDisk.filter((f) => f !== 'atlas/studio/inc/storage-root.php' && !pkg.includes(f)), []);
     });
 
-    await check('the six Studio models are in assets/studio/ and nothing is directly in assets/', () => {
-      for (const t of ['trophy', 'badge', 'key']) for (const e of ['glb', 'png']) assert.ok(pkg.includes('assets/studio/' + t + '.' + e), t + '.' + e);
+    await check('the Studio models are in assets/studio/ and nothing is directly in assets/', () => {
+      for (const t of ['trophy', 'badge', 'key', 'necklace', 'gloves', 'shoulders', 'trinket', 'sword-gold', 'sword-silver', 'sword-bronze']) for (const e of ['glb', 'png']) assert.ok(pkg.includes('assets/studio/' + t + '.' + e), t + '.' + e);
       assert.deepStrictEqual(pkg.filter((f) => /^assets\/[^/]+$/.test(f)), []);
     });
 

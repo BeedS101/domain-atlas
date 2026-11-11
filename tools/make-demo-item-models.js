@@ -24,8 +24,8 @@
 //
 // Usage: node tools/make-demo-item-models.js [name ...]
 // Regenerates demo-domain-a/assets/{compass,ring,trophy}.{glb,png} and Asset Studio's own collection,
-// demo-domain-a/assets/studio/{trophy,badge,key}.{glb,png}, in place (only the named models when names are
-// given: compass, ring, trophy, studio/trophy, studio/badge, studio/key, or studio for all three). It never
+// demo-domain-a/assets/studio/{trophy,badge,key,necklace,gloves,shoulders,trinket,sword-gold,sword-silver,sword-bronze}.{glb,png}, in place
+// (only the named models when names are given: compass, ring, trophy, studio/trophy, studio/necklace and so on, or studio for all of them). It never
 // writes /assets/badge.* or /assets/key.*: a site's own badge models live there. Requires Playwright + the sandboxed Chromium build for the
 // thumbnail-rendering step (reuses gltf-mini.js's own previewModel(), the
 // same renderer the wallet's Asset Viewer uses, so a thumbnail is always
@@ -378,6 +378,73 @@ function buildKey() {
   return mesh;
 }
 
+// ---------- Asset Studio equipment models (neck, gloves, shoulders, trinket, sword) ----------
+// The four wearable templates paint their body in the Studio accent yellow (GOLD), which the Studio's 3D preview
+// recolours with the creator's chosen colour; the sword is a held item, so its metal is baked per finish.
+
+const METALS = {
+  gold: GOLD,
+  silver: [0.82, 0.85, 0.9, 1],
+  bronze: BRONZE
+};
+const LEATHER = [0.25, 0.16, 0.1, 1];
+
+function buildNecklace() {
+  const mesh = createMeshBuilder();
+  // A chain loop with a pendant gem hanging from its lowest point.
+  mesh.addPart(torus(0.85, 0.07, 22, 8), GOLD, { rotateX: 90, translate: [0, 0.1, 0] });
+  mesh.addPart(cylinder(0.09, 0.09, 0.12, 8), GOLD, { translate: [0, -0.8, 0] });
+  mesh.addPart(octahedron(1), GEM_BLUE, { scale: [0.2, 0.34, 0.2], translate: [0, -1.05, 0] });
+  return mesh;
+}
+
+function buildGloves() {
+  const mesh = createMeshBuilder();
+  // An upright glove: cuff, palm, four fingers and a thumb.
+  mesh.addPart(cylinder(0.36, 0.34, 0.34, 12), TROPHY_BLACK, { translate: [0, -0.55, 0] });
+  mesh.addPart(box(0.4, 0.28, 0.17), GOLD, { translate: [0, -0.1, 0] });
+  for (let i = 0; i < 4; i++) {
+    const h = i === 1 || i === 2 ? 0.34 : 0.28;
+    mesh.addPart(box(0.075, h / 2 + 0.02, 0.1), GOLD, { translate: [-0.3 + i * 0.2, 0.18 + h / 2, 0] });
+  }
+  mesh.addPart(box(0.075, 0.2, 0.1), GOLD, { rotateZ: -35, translate: [0.5, -0.02, 0] });
+  return mesh;
+}
+
+function buildShoulders() {
+  const mesh = createMeshBuilder();
+  // A pauldron: three stacked, narrowing plates with a rivet on top.
+  mesh.addPart(cylinder(0.95, 0.85, 0.2, 14), GOLD, { translate: [0, -0.3, 0] });
+  mesh.addPart(cylinder(0.78, 0.66, 0.2, 14), GOLD, { translate: [0, -0.1, 0] });
+  mesh.addPart(cylinder(0.58, 0.4, 0.22, 14), GOLD, { translate: [0, 0.11, 0] });
+  mesh.addPart(cylinder(0.97, 0.97, 0.05, 14), TROPHY_BLACK, { translate: [0, -0.43, 0] });
+  mesh.addPart(octahedron(1), GEM_BLUE, { scale: [0.14, 0.14, 0.14], translate: [0, 0.3, 0] });
+  return mesh;
+}
+
+function buildTrinket() {
+  const mesh = createMeshBuilder();
+  // A charm: a small loop with a faceted gem set in a collar.
+  mesh.addPart(torus(0.26, 0.06, 12, 8), GOLD, { rotateX: 90, translate: [0, 0.78, 0] });
+  mesh.addPart(cylinder(0.2, 0.28, 0.14, 8), GOLD, { translate: [0, 0.32, 0] });
+  mesh.addPart(octahedron(1), GEM_BLUE, { scale: [0.44, 0.52, 0.44], translate: [0, -0.1, 0] });
+  mesh.addPart(cylinder(0.05, 0.05, 0.18, 6), GOLD, { translate: [0, 0.58, 0] });
+  return mesh;
+}
+
+function buildSword(finish) {
+  const metal = METALS[finish];
+  const mesh = createMeshBuilder();
+  // Handle at the bottom and blade pointing up along +Y, which is how the hand slot holds an item.
+  mesh.addPart(cylinder(0.055, 0.055, 0.42, 8), LEATHER, { translate: [0, 0.21, 0] });
+  mesh.addPart(octahedron(1), metal, { scale: [0.1, 0.1, 0.1], translate: [0, -0.02, 0] });
+  mesh.addPart(box(0.3, 0.04, 0.07), metal, { translate: [0, 0.44, 0] });
+  mesh.addPart(box(0.1, 0.7, 0.024), metal, { translate: [0, 1.18, 0] });
+  mesh.addPart(octahedron(1), metal, { scale: [0.1, 0.22, 0.024], translate: [0, 1.88, 0] });
+  mesh.addPart(box(0.014, 0.62, 0.03), [Math.min(1, metal[0] + 0.12), Math.min(1, metal[1] + 0.12), Math.min(1, metal[2] + 0.12), 1], { translate: [0, 1.16, 0] });
+  return mesh;
+}
+
 // ---------- thumbnail rendering (Playwright + gltf-mini.js's own previewModel) ----------
 
 async function renderThumbnail(glbBuffer, outPngPath) {
@@ -434,7 +501,14 @@ async function main() {
     { file: 'trophy', mesh: buildTrophy },
     { file: 'studio/trophy', mesh: buildTrophy },
     { file: 'studio/badge', mesh: buildBadge },
-    { file: 'studio/key', mesh: buildKey }
+    { file: 'studio/key', mesh: buildKey },
+    { file: 'studio/necklace', mesh: buildNecklace },
+    { file: 'studio/gloves', mesh: buildGloves },
+    { file: 'studio/shoulders', mesh: buildShoulders },
+    { file: 'studio/trinket', mesh: buildTrinket },
+    { file: 'studio/sword-gold', mesh: () => buildSword('gold') },
+    { file: 'studio/sword-silver', mesh: () => buildSword('silver') },
+    { file: 'studio/sword-bronze', mesh: () => buildSword('bronze') }
   ];
   // Optional names on the command line limit the run, so adding a model does not rewrite the others.
   const only = process.argv.slice(2);
@@ -461,4 +535,4 @@ if (require.main === module) {
   main().catch((err) => { console.error(err); process.exitCode = 1; });
 }
 
-module.exports = { buildCompass, buildRing, buildTrophy, buildBadge, buildKey, buildGLBFromMesh, cylinder, box, torus, octahedron };
+module.exports = { buildCompass, buildRing, buildTrophy, buildBadge, buildKey, buildNecklace, buildGloves, buildShoulders, buildTrinket, buildSword, buildGLBFromMesh, cylinder, box, torus, octahedron };

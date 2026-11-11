@@ -8,6 +8,7 @@ if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVE
 require_once __DIR__ . '/design-fingerprint.php';
 require_once __DIR__ . '/model-catalog.php';
 require_once __DIR__ . '/keys.php';
+require_once __DIR__ . '/equipment.php';
 
 const ATLAS_STUDIO_CLASS = 'atlas.demo.studio.collectible';
 const ATLAS_STUDIO_MINT_PURPOSE = 'atlas.studio.mint/1';
@@ -18,6 +19,7 @@ const ATLAS_STUDIO_MINT_PURPOSE = 'atlas.studio.mint/1';
 function atlas_studio_summary($design) {
   $enc = function ($v) { return json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); };
   $text = 'Mint a free demo ' . $design['template'] . ' (' . $design['finish'] . ') named ' . $enc($design['name']);
+  if (atlas_studio_is_equipment($design['template'])) $text .= atlas_studio_equipment_summary($design);
   if (!empty($design['properties'])) {
     $pairs = [];
     foreach ($design['properties'] as $k => $v) $pairs[] = $k . ' ' . $enc($v);
@@ -52,7 +54,7 @@ function atlas_studio_issuance_plan($submitted, $ownerPublicKey, $opts = []) {
     if ($ahead < ($opts['expiryMin'] ?? 3600)) return ['ok'=>false,'error'=>'expiry-too-soon'];
     if ($ahead > ($opts['expiryMax'] ?? 31536000)) return ['ok'=>false,'error'=>'expiry-too-far'];
   }
-  $model = atlas_studio_model_for_template($d['template']);
+  $model = atlas_studio_model_for_template($d['template'], $d['finish']);
   if ($model === null) return ['ok'=>false,'error'=>'model-not-approved'];
   $properties = [
     'atlas.studio.template'=>$d['template'],
@@ -63,6 +65,7 @@ function atlas_studio_issuance_plan($submitted, $ownerPublicKey, $opts = []) {
     'atlas.studio.version'=>'0.1'
   ];
   foreach ($d['properties'] ?? [] as $k => $v) $properties['atlas.studio.custom.' . $k] = $v;
+  if (atlas_studio_is_equipment($d['template'])) $properties = array_merge($properties, atlas_studio_equipment_properties($d));
   return [
     'ok'=>true,
     'requiredClass'=>ATLAS_STUDIO_CLASS,

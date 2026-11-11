@@ -7,7 +7,43 @@ const palette={
  silver:{light:'#f4f9fd',mid:'#c3d2de',dark:'#5d7387',glow:'rgba(170,200,235,.30)'},
  bronze:{light:'#f6c79a',mid:'#cf8650',dark:'#7d3f20',glow:'rgba(232,132,70,.32)'}
 };
-const titles={trophy:'Achievement Trophy',badge:'Explorer Badge',key:'Portal Key'};
+const titles={trophy:'Achievement Trophy',badge:'Explorer Badge',key:'Portal Key',necklace:'Moonstone Necklace',gloves:'Rider Gloves',shoulders:'Bastion Shoulders',trinket:'Lucky Charm',sword:'Ember Blade'};
+// ---- equipment: the same table the issuer enforces (api.php?op=status replaces it with the issuer's own) ----
+const STAT_LABELS={agility:'Agility',intelligence:'Intelligence',strength:'Strength',armor:'Armor',defense:'Defense',resistance:'Resistance',attackSpeed:'Attack Speed',criticalStrike:'Critical Strike',dexterity:'Dexterity',focus:'Focus',luck:'Luck',charisma:'Charisma'};
+let equipment={
+ necklace:{slot:'neck',color:true,budget:5,cap:3,stats:['intelligence','focus','resistance','luck','charisma']},
+ gloves:{slot:'gloves',color:true,budget:5,cap:3,stats:['strength','agility','dexterity','attackSpeed','criticalStrike']},
+ shoulders:{slot:'shoulders',color:true,budget:6,cap:3,stats:['strength','armor','defense','resistance']},
+ trinket:{slot:'trinket',color:true,budget:5,cap:3,stats:['agility','intelligence','strength','armor','defense','resistance','attackSpeed','criticalStrike','dexterity','focus','luck','charisma']},
+ sword:{slot:'hand',color:false,budget:8,cap:4,stats:['strength','agility','dexterity','attackSpeed','criticalStrike']}
+};
+const COLOR_PRESETS=['#2f5d3a','#4a3b6b','#a63d40','#2c3e9a','#d4a017','#3b2a1e','#7a8793','#e8e2d0'];
+let statPoints={};
+const equip=()=>equipment[$('template').value]||null;
+const statsSpent=()=>Object.values(statPoints).reduce((a,b)=>a+b,0);
+function renderStats(){
+ const e=equip(),rows=$('statRows');rows.replaceChildren();rows.dataset.t=$('template').value;
+ if(!e)return;
+ for(const id of e.stats){
+  const row=document.createElement('div');row.className='stat-row';row.dataset.stat=id;
+  const name=document.createElement('span');name.textContent=STAT_LABELS[id]||id;
+  const step=document.createElement('span');step.className='stat-step';
+  const minus=document.createElement('button'),plus=document.createElement('button'),out=document.createElement('output');
+  minus.type=plus.type='button';minus.textContent='\u2212';plus.textContent='+';
+  minus.setAttribute('aria-label','Less '+name.textContent);plus.setAttribute('aria-label','More '+name.textContent);
+  out.textContent=String(statPoints[id]||0);out.setAttribute('aria-live','polite');
+  minus.addEventListener('click',()=>{if((statPoints[id]||0)>0){statPoints[id]--;if(!statPoints[id])delete statPoints[id];renderStats();paint()}});
+  plus.addEventListener('click',()=>{if((statPoints[id]||0)<e.cap&&statsSpent()<e.budget){statPoints[id]=(statPoints[id]||0)+1;renderStats();paint()}});
+  minus.disabled=!(statPoints[id]>0);plus.disabled=(statPoints[id]||0)>=e.cap||statsSpent()>=e.budget;
+  step.append(minus,out,plus);row.append(name,step);rows.append(row);
+ }
+ $('statsLeft').textContent=(e.budget-statsSpent())+' of '+e.budget+' left';
+ $('statsHint').textContent='Up to '+e.cap+' points on one stat. Each Agility, Intelligence or Strength point also raises speed, reach or jump by 1%.';
+}
+function renderColorPresets(){
+ const box=$('colorPresets');if(box.children.length)return;
+ for(const c of COLOR_PRESETS){const b=document.createElement('button');b.type='button';b.className='color-preset';b.style.background=c;b.dataset.color=c;b.setAttribute('aria-label','Colour '+c);b.title=c;b.addEventListener('click',()=>{$('colorInput').value=c;paint()});box.append(b)}
+}
 // ---- creator options: ownership, expiry and labelled properties ----
 // Limits default to the issuer's; checkIssuer() replaces them with what api.php?op=status reports.
 const opts={giftable:true,expiryMin:3600,expiryMax:31536000,maxProps:6};
@@ -40,18 +76,35 @@ function propState(){
 }
 function design(){
  const d={schema:'atlas.asset-studio.design/0.1',template:$('template').value,name:$('assetName').value.trim().slice(0,64),description:$('description').value.trim().slice(0,240),finish:$('finish').value};
- if(scopeValue()==='local')d.tradeScope='local';
- const e=expiryState().value;if(e)d.expiresAt=e;
+ const eq=equip();
+ if(!eq){
+  if(scopeValue()==='local')d.tradeScope='local';
+  const e=expiryState().value;if(e)d.expiresAt=e;
+ } else {
+  if(eq.color)d.color=$('colorInput').value.toLowerCase();
+  if(Object.keys(statPoints).length)d.stats={...statPoints};
+ }
  const p=propState().props;if(Object.keys(p).length)d.properties=p;
  return d;
 }
-const formProblems=()=>[expiryState().problem,...propState().problems].filter(Boolean);
+const formProblems=()=>[equip()?'':expiryState().problem,...propState().problems,equip()&&statsSpent()>equip().budget?'Too many stat points.':''].filter(Boolean);
 
 // ---- flat preview (also the fallback when WebGL or the model is unavailable) ----
 function metal(x0,y0,x1,y1,p){const g=ctx.createLinearGradient(x0,y0,x1,y1);g.addColorStop(0,p.dark);g.addColorStop(.28,p.mid);g.addColorStop(.46,p.light);g.addColorStop(.62,p.mid);g.addColorStop(1,p.dark);return g;}
 function sheen(path,alpha){ctx.save();ctx.globalAlpha=alpha;ctx.fillStyle='#fff';ctx.fill(path);ctx.restore();}
+const thumbs={};
+function thumbFor(d){
+ const name=d.template==='sword'?'sword-'+d.finish:d.template;
+ if(!thumbs[name]){const img=new Image();img.onload=()=>{if(equip())paint()};img.src='/assets/studio/'+name+'.png';thumbs[name]=img}
+ return thumbs[name];
+}
 function paintFlat(d){
  const p=palette[d.finish]||palette.gold;ctx.clearRect(0,0,c.width,c.height);
+ if(equipment[d.template]){
+  const img=thumbFor(d);
+  if(img.complete&&img.naturalWidth){const k=Math.min(c.width/img.naturalWidth,c.height/img.naturalHeight)*.95;ctx.drawImage(img,(c.width-img.naturalWidth*k)/2,(c.height-img.naturalHeight*k)/2,img.naturalWidth*k,img.naturalHeight*k)}
+  return;
+ }
  ctx.save();ctx.translate(250,196);
  const floor=ctx.createRadialGradient(0,150,4,0,150,150);floor.addColorStop(0,'rgba(0,0,0,.5)');floor.addColorStop(1,'rgba(0,0,0,0)');
  ctx.save();ctx.translate(0,152);ctx.scale(1,.2);ctx.fillStyle=floor;ctx.beginPath();ctx.arc(0,0,150,0,Math.PI*2);ctx.fill();ctx.restore();
@@ -103,7 +156,7 @@ function stageNote(text){$('stageNote').textContent=text||'';$('stageNote').hidd
 async function loadModel(){
  if(!viewer){modelState='unavailable';stageNote(location.protocol==='file:'?'3D preview needs the hosted Studio page.':'3D preview is not available in this browser.');showMode('flat');$('viewTabs').hidden=true;return}
  const token=++loadToken,t=$('template').value;modelState='loading';stageNote('Loading 3D model…');
- try{await viewer.load('/assets/studio/'+t+'.glb',{standUp:t!=='trophy'});if(token!==loadToken)return;viewer.setFinish($('finish').value);modelState='ready';stageNote('');showMode(mode==='flat'&&$('viewTabs').dataset.chosen==='flat'?'flat':'3d')}
+ const file=t==='sword'?'sword-'+$('finish').value:t;try{await viewer.load('/assets/studio/'+file+'.glb',{standUp:t==='badge'||t==='key'});if(token!==loadToken)return;viewer.setFinish($('finish').value);viewer.setTint(equip()&&equip().color?$('colorInput').value:null);modelState='ready';stageNote('');showMode(mode==='flat'&&$('viewTabs').dataset.chosen==='flat'?'flat':'3d')}
  catch(error){if(token!==loadToken)return;modelState='failed';stageNote('3D model unavailable; showing the flat preview.');showMode('flat')}
 }
 
@@ -115,15 +168,25 @@ function syncPickers(d){
 }
 function paint(){
  const d=design();paintFlat(d);syncPickers(d);
- if(viewer&&modelState==='ready')viewer.setFinish(d.finish);
+ if(viewer&&modelState==='ready'){viewer.setFinish(d.finish);viewer.setTint(d.color||null)}
+ applyTemplateUi(d);
  $('previewName').textContent=d.name||titles[d.template];$('previewDescription').textContent=d.description;$('json').textContent=JSON.stringify(d,null,2);
  renderFacts(d);
  const problems=formProblems();$('formProblem').hidden=!problems.length;$('formProblem').textContent=problems[0]||'';
  $('propCount').textContent=$('props').children.length+'/'+opts.maxProps;$('addProp').disabled=$('props').children.length>=opts.maxProps;
  refreshMintButton();
 }
+function applyTemplateUi(d){
+ const eq=equipment[d.template]||null;
+ $('colorField').hidden=!(eq&&eq.color);$('statsField').hidden=!eq;$('boundNote').hidden=!eq;$('scopeField').hidden=!!eq;$('expiryField').hidden=!!eq;
+ if(eq&&$('statRows').dataset.t!==d.template){renderStats();$('statRows').dataset.t=d.template}
+ if(eq&&eq.color){renderColorPresets();$('colorHex').textContent=d.color;document.querySelectorAll('#colorPresets .color-preset').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.color===d.color)))}
+}
 function renderFacts(d){
- const items=[['scope',d.tradeScope==='local'?'Giftable on this domain':'Locked to your wallet'],['expiry',d.expiresAt?'Expires '+fmtWhen(new Date(d.expiresAt)):'No expiry']];
+ const eq=equipment[d.template]||null;
+ const items=eq?[['scope','Locked to your wallet, never expires'],['slot','Worn in the '+(eq.slot==='hand'?'hand':eq.slot)+' slot']]:[['scope',d.tradeScope==='local'?'Giftable on this domain':'Locked to your wallet'],['expiry',d.expiresAt?'Expires '+fmtWhen(new Date(d.expiresAt)):'No expiry']];
+ if(d.color)items.push(['color','Colour '+d.color]);
+ Object.entries(d.stats||{}).forEach(([k,v])=>items.push(['stat',(STAT_LABELS[k]||k)+' +'+v]));
  Object.entries(d.properties||{}).forEach(([k,v])=>items.push(['prop',k.replace(/_/g,' ')+': '+v]));
  $('facts').replaceChildren(...items.map(([kind,text])=>{const li=document.createElement('li');li.className='fact fact-'+kind;li.textContent=text;return li}));
 }
@@ -146,7 +209,9 @@ function addProp(k='',v=''){
  $('props').append(row);paint();return pk;
 }
 ['assetName','description','finish'].forEach(id=>$(id).addEventListener('input',paint));
-$('template').addEventListener('change',()=>{$('assetName').value=titles[$('template').value];paint();loadModel()});
+$('template').addEventListener('change',()=>{$('assetName').value=titles[$('template').value];statPoints={};renderStats();paint();loadModel()});
+$('finish').addEventListener('input',()=>{if($('template').value==='sword')loadModel()});
+$('colorInput').addEventListener('input',paint);
 // The tile and swatch groups drive the underlying selects, which stay the source of the design values.
 function pick(groupId,selectId,value){const s=$(selectId);if(s.value===value)return;s.value=value;s.dispatchEvent(new Event(selectId==='template'?'change':'input',{bubbles:true}))}
 [['templateTiles','template'],['finishSwatches','finish']].forEach(([groupId,selectId])=>{
@@ -198,7 +263,7 @@ async function checkWallet(){
  }finally{checking=false;refreshMintButton()}
 }
 async function checkIssuer(){
- try{if(location.protocol!=='file:'){const s=await (await fetch('api.php?op=status',{cache:'no-store'})).json();mintEnabled=s.mintEnabled===true;const o=s.options;if(o){opts.giftable=o.giftable!==false;if(Number.isInteger(o.expiryMinSeconds))opts.expiryMin=o.expiryMinSeconds;if(Number.isInteger(o.expiryMaxSeconds))opts.expiryMax=o.expiryMaxSeconds;if(Number.isInteger(o.maxProperties))opts.maxProps=o.maxProperties}}}catch{}
+ try{if(location.protocol!=='file:'){const s=await (await fetch('api.php?op=status',{cache:'no-store'})).json();mintEnabled=s.mintEnabled===true;const o=s.options;if(o){opts.giftable=o.giftable!==false;if(Number.isInteger(o.expiryMinSeconds))opts.expiryMin=o.expiryMinSeconds;if(Number.isInteger(o.expiryMaxSeconds))opts.expiryMax=o.expiryMaxSeconds;if(Number.isInteger(o.maxProperties))opts.maxProps=o.maxProperties;if(o.equipment&&typeof o.equipment==='object')equipment=o.equipment;$('statRows').dataset.t=''}}}catch{}
  applyOptions();paint();
 }
 window.addEventListener('focus',checkWallet);

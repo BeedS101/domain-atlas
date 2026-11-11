@@ -20,7 +20,7 @@ const { FILES } = require('./lib/studio-files');
 
 // Every asset file in the package must sit in assets/studio/, never directly in assets/.
 for (const [, dest] of FILES) {
-  if (dest.startsWith('assets/') && !/^assets\/studio\/(trophy|badge|key)\.(glb|png)$/.test(dest)) { console.error('refusing a model outside assets/studio/: ' + dest); process.exit(1); }
+  if (dest.startsWith('assets/') && !/^assets\/studio\/(trophy|badge|key|necklace|gloves|shoulders|trinket|sword-gold|sword-silver|sword-bronze)\.(glb|png)$/.test(dest)) { console.error('refusing a model outside assets/studio/: ' + dest); process.exit(1); }
 }
 
 const STATE = /(^|\/)(atlas-[^/]*\.(json|txt)|[^/]*\.pem|[^/]*private[^/]*|[^/]*config[^/]*\.json|\.salt|replay|journal|holdings)(\/|$)/i;

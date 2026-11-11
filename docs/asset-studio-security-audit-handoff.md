@@ -52,7 +52,11 @@ Please conduct a **read-only adversarial audit** of this code. Do not enable min
 - `issuer-server/server.js` (`RESTRICTED_ISSUANCE_CLASSES`)
 - `issuer-php/atlas/studio/studio.js`, `index.html`
 - `extension/page-bridge.js`, `content.js`, `confirm-bridge.js`, `wallet.js` (`queueBridgeOffer`, `claimBridgeOffer`, `verifyCredential`)
-- `test/studio-lab.js`, `test/asset-studio-integration.js`, `test/manual-studio-wallet-flow.js`, `test/asset-studio-*.php`
+- `test/studio-lab.js`, `test/asset-studio-integration.js`, `test/manual-studio-wallet-flow.js`, `test/manual-studio-equipment-flow.js`, `test/asset-studio-*.php`
+
+## Equipment templates (also in audit scope)
+
+Necklace, gloves, shoulders, trinket and sword add `color` and `stats` to the design and make the issuer sign `atlas.avatar.slot` / `atlas.avatar.handItem`, `atlas.avatar.color` and `atlas.avatar.stat.<id>` properties. Review `inc/equipment.php` (the table, budgets and caps) and its use in `design-validator.php` and `issuance-plan.php`: that no input can exceed a budget, name a stat outside a template's list, carry a colour that is not `#rrggbb`, or reach the signed properties by another route, and that equipment stays bound and non-expiring. Tests: `test/asset-studio-equipment.php`, the equipment cases in `test/asset-studio-integration.js` and `test/manual-studio-equipment-flow.js`. Minting remains disabled until the audit is done.
 
 ## Attack surfaces to cover
 
@@ -61,7 +65,7 @@ Please conduct a **read-only adversarial audit** of this code. Do not enable min
 3. **Class authority:** every path that reaches `issue_asset()` or `mint_asset_by_class()` (issue, mint, purchase, mail gift, ticket send, split, consolidate, convert, reissue, clawback, demo routes), the Node equivalents, and whether the class can be minted, edited, split, merged, converted or traded outside Studio. Confirm the credential is non-fungible, owner-bound and no-value.
 4. **Abuse limits:** per-address rate limits, per-recipient and global quotas, outstanding-challenge cap, body limits, Origin handling, lack of CORS, fail-closed configuration, and storage growth.
 5. **Private storage:** storage root versus document root and symlinks, file modes, TOCTOU on the config and challenge files, hard links, hostile file contents, and pruning.
-6. **Models:** that only the three approved template files can be referenced, the magic-byte check, and the https URL construction from the request host (`atlas_domain()` comes from the Host header; the configured `domain` must equal it).
+6. **Models:** that only the approved template files (ten models, the sword one per finish) can be referenced, the magic-byte check, and the https URL construction from the request host (`atlas_domain()` comes from the Host header; the configured `domain` must equal it).
 7. **Wallet delivery:** the page only offers a complete issuer-signed credential; the wallet verifies it independently; an offer is never treated as ownership.
 8. **Information leakage** in errors and stored files.
 
