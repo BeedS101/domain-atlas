@@ -1775,10 +1775,13 @@
   // the head lands the eyes roughly inside the head box, so at camera
   // distance 0 (see cameraDistance in init()) the camera sits about where
   // a head would be without anything needing to be perfectly to-scale.
-  // A held tool is drawn in the right hand: the model's bounding box is scaled so its longest side is
-  // HAND_ITEM_LENGTH, gripped about 18% up from its lowest point (a handle at the bottom, a head at the top) and
-  // tilted forward. Returns the matrix from model space to the right arm's local space (the origin is the
-  // shoulder, the arm hangs along -y).
+  // Backpedal speed in units per second, before equipment multipliers (a walk is 2.4).
+  const BACKPEDAL_SPEED = 1.2;
+  // A held item is drawn in a hand: the model's bounding box is scaled so its longest side is HAND_ITEM_LENGTH,
+  // gripped about 18% up from its lowest point (a handle at the bottom, a head at the top) and tilted forward.
+  // The character faces -z, so a model's front (+z, the side a thumbnail shows) is turned to face the same way.
+  // Returns the matrix from model space to the arm's local space (the origin is the shoulder, the arm hangs
+  // along -y).
   const HAND_ITEM_LENGTH = 0.8;
   const HAND_ITEM_GRIP = 0.18;
   const HAND_ITEM_TILT = 0.5; // radians, top of the item leaning forward
@@ -1790,7 +1793,7 @@
     const py = bounds.min[1] + HAND_ITEM_GRIP * size[1];
     return mat4Multiply(
       mat4Translate(0, -character.armLen + 0.03, 0),
-      mat4Multiply(mat4RotateX(HAND_ITEM_TILT), mat4Multiply(mat4Scale(k), mat4Translate(-px, -py, -pz)))
+      mat4Multiply(mat4RotateX(-HAND_ITEM_TILT), mat4Multiply(mat4RotateY(Math.PI), mat4Multiply(mat4Scale(k), mat4Translate(-px, -py, -pz))))
     );
   }
 
@@ -2950,7 +2953,10 @@
       // share this one base value — an equipped shoe's and hat's own
       // atlas.avatar.*SpeedMultiplier stack multiplicatively, since they're
       // two separate equip slots that can both be worn at the same time.
-      const speed = ((keys['ShiftLeft'] || keys['ShiftRight']) ? 4.5 : 2.4) * localAvatarShoeSpeedMultiplier * localAvatarHatSpeedMultiplier * localAvatarExtras.speed;
+      // Holding back (without forward) is a backpedal: slower than a walk whatever Shift says, and the
+      // character keeps facing the way the camera looks instead of turning around.
+      const backpedal = !!(keys['KeyS'] || keys['ArrowDown']) && !(keys['KeyW'] || keys['ArrowUp']) && !(heldMouseButtons.has(0) && heldMouseButtons.has(2));
+      const speed = (backpedal ? BACKPEDAL_SPEED : ((keys['ShiftLeft'] || keys['ShiftRight']) ? 4.5 : 2.4)) * localAvatarShoeSpeedMultiplier * localAvatarHatSpeedMultiplier * localAvatarExtras.speed;
       const forward = [Math.sin(camera.yaw), -Math.cos(camera.yaw)];
       const right = [Math.cos(camera.yaw), Math.sin(camera.yaw)];
       let mx = 0, mz = 0;
@@ -2975,7 +2981,7 @@
         // Same [sin(yaw), -cos(yaw)] convention the forward/right vectors
         // above are built from — inverting it here turns "which way am I
         // actually walking" back into a yaw the character can face.
-        characterYaw = Math.atan2(mx, -mz);
+        characterYaw = backpedal ? camera.yaw : Math.atan2(mx, -mz);
       }
 
       // Walk-cycle: a plain sine swing for arms/legs, phase only advancing
@@ -2986,8 +2992,9 @@
       // scale/duration the difference isn't visible.
       // The legs only cycle on the ground; in the air they hold the neutral pose.
       const walking = isMoving && body.grounded;
-      if (walking) walkPhase += dt * (speed > 3 ? 11 : 8);
-      const limbSwing = walking ? Math.sin(walkPhase) * 0.55 : 0;
+      if (walking) walkPhase += dt * (backpedal ? 6 : (speed > 3 ? 11 : 8));
+      // Backpedalling swings the limbs the other way, so the feet move against the direction of travel.
+      const limbSwing = walking ? Math.sin(walkPhase) * 0.55 * (backpedal ? -1 : 1) : 0;
       const actionPose = actionPoseStep(dt);
 
       // Jump height scales with the square of launch velocity (basic

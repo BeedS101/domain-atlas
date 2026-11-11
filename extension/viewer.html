@@ -62,29 +62,24 @@
   #scene3d.active { display: block; }
   /* Game layers step aside while the wallet or the Character window is open. */
   body.wallet-open #actionBar, body.wallet-open #atlasCompassHud { display: none !important; }
+  /* The control reminder sits at the top of the canvas, below the header; the action bar has the bottom edge. */
   #scene3dHint {
-    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
     font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
     padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3c44; display: none;
   }
   #scene3dHint.active { display: block; }
-  /* Task #208 — "E — <label>" prompt for a scene.json interactable
-     (loot crate, mining node) within range in the 3D renderer. Sits just
-     above #scene3dHint's permanent control reminder rather than replacing
-     it, since both can be relevant at once (you can see how to move AND
-     that something's in reach right now); only ever shown while gltf-mini
-     actually reports something in range (see onInteractPrompt in
-     viewer.js), so an ordinary walk-through world with no interactables
-     never shows it at all. */
+  /* "E - <label>" prompt for an interactable (loot crate, mining node) in range in the 3D renderer; sits above
+     the action bar and only shows while gltf-mini reports something in range (see onInteractPrompt in viewer.js). */
   #scene3dInteractHint {
-    position: fixed; bottom: 52px; left: 50%; transform: translateX(-50%);
+    position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
     font-size: 13px; font-weight: 600; color: #e8f0f2; background: rgba(20,31,38,0.9);
     padding: 7px 14px; border-radius: 999px; border: 1px solid #3a8f6f; display: none;
   }
   #scene3dInteractHint.active { display: block; }
 
   #presenceTransientHint {
-    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    position: fixed; top: 104px; left: 50%; transform: translateX(-50%);
     font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
     padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3c44; display: none;
   }
@@ -103,7 +98,7 @@
   #presenceApprovalBox .subhead { margin-bottom: 8px; }
   #presenceApprovalDetails { font-size: 12px; margin-bottom: 8px; word-break: break-all; }
   #hint {
-    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
     font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
     padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3c44;
   }

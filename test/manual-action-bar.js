@@ -391,6 +391,33 @@ function injectClasses(docroot) {
     assertTrue((await rect('#actionBar')) && (await rect('#atlasCompassHud')), 'and come back when it closes');
     console.log('PASS: movement, buffs and equipment unchanged; layers step aside');
 
+    console.log('STEP 10b: the controls hint is at the top of the canvas, the bar at the bottom, and back is a slow backpedal');
+    {
+      const hintRect = await rect('#scene3dHint'), barRect3 = await rect('#actionBar');
+      assertTrue(hintRect && barRect3, 'both are visible in the 3D world');
+      assertTrue(hintRect.y < 100 && hintRect.y >= 56, 'the hint sits at the top of the canvas, just below the header: ' + JSON.stringify(hintRect));
+      assertTrue(barRect3.y + barRect3.h > 800 - 40 && barRect3.y + barRect3.h <= 800, 'the bar sits on the bottom edge: ' + JSON.stringify(barRect3));
+      assertTrue(!overlaps(barRect3, hintRect) && !overlaps(barRect3, await rect('#chatWidget')), 'and they cover neither each other nor the chat');
+      if (SHOT_DIR) await site.screenshot({ path: path.join(SHOT_DIR, 'world-hint-top-bar-bottom.png') });
+      await frame.locator('#scene3d').focus();
+      const walk = async (code, ms) => {
+        await frame.evaluate(() => { const c = window.__atlasActive3D.camera.pos; c[0] = 0.5; c[2] = 0.5; });
+        const a = await frame.evaluate(() => window.__atlasActive3D.camera.pos.slice());
+        await site.keyboard.down(code); await sleep(ms); await site.keyboard.up(code);
+        const b = await frame.evaluate(() => window.__atlasActive3D.camera.pos.slice());
+        return Math.hypot(b[0] - a[0], b[2] - a[2]);
+      };
+      const forwardDist = await walk('KeyW', 600);
+      const yawBefore = await frame.evaluate(() => ({ cam: window.__atlasActive3D.camera.yaw, face: window.__atlasActive3D.getCharacterYaw() }));
+      const backDist = await walk('KeyS', 600);
+      const yawAfter = await frame.evaluate(() => ({ cam: window.__atlasActive3D.camera.yaw, face: window.__atlasActive3D.getCharacterYaw() }));
+      assertTrue(forwardDist > 0.3, 'walking forward moves the character: ' + forwardDist);
+      assertTrue(backDist > 0.1 && backDist < forwardDist * 0.65, 'backpedalling is slower than a walk: ' + backDist.toFixed(2) + ' against ' + forwardDist.toFixed(2));
+      const diff = Math.abs(Math.atan2(Math.sin(yawAfter.face - yawAfter.cam), Math.cos(yawAfter.face - yawAfter.cam)));
+      assertTrue(diff < 0.01, 'the character keeps facing the way the camera looks while backing up: ' + JSON.stringify(yawAfter));
+    }
+    console.log('PASS: hint on top, bar on the bottom edge, back is a slower backpedal that does not turn the character');
+
     console.log('STEP 11: world transitions');
     await frame.locator('#scene3d').focus();
     await site.keyboard.down('Digit5');

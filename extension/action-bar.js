@@ -266,7 +266,7 @@
     const style = doc.createElement('style');
     style.id = STYLE_ID;
     style.textContent =
-      '#actionBar{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);z-index:8;display:none;flex-direction:column;align-items:center;gap:6px;font:600 11px system-ui,sans-serif;color:#e8f0f2;user-select:none}' +
+      '#actionBar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:8;display:none;flex-direction:column;align-items:center;gap:6px;font:600 11px system-ui,sans-serif;color:#e8f0f2;user-select:none}' +
       '#actionBar.shown{display:flex}' +
       '#actionBar .ab-row{display:flex;gap:4px;padding:5px;background:rgba(20,31,38,0.88);border:1px solid #2c3c44;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.4)}' +
       '#actionBar .ab-slot{position:relative;width:50px;height:46px;box-sizing:border-box;border:1px solid #3a4b54;border-radius:7px;background:#16222a;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;cursor:pointer;padding:2px}' +
