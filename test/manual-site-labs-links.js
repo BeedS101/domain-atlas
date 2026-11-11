@@ -50,7 +50,9 @@ async function serve(site) {
       console.log('\n== ' + d.site + (d.site === 'demo-domain-a' ? ' (evtec.co.za)' : ' (domain-atlas.co.za)'));
 
       const before = execFileSync('git', ['show', 'HEAD:' + d.site + '/index.html'], { cwd: REPO }).toString();
-      const outside = (t) => t.replace(/[ \t]*<section class="labs"[\s\S]*?<\/section>\n\n/, '').replace(/[ \t]*<!-- atlas-demos:start -->[\s\S]*?<!-- atlas-demos:end -->\n\n?/, '').replace(/^ {2}\.labs[^\n]*\n/gm, '');
+      // The demo callouts were replaced by the directory, so the earlier page is compared without them; the extension callout stays.
+      const noDemoCallouts = (t) => t.replace(/[ \t]*<div class="callout">(?:(?!<\/div>)[\s\S])*?<\/div>\n\n?/g, (m) => (m.includes('Walking into these spaces') ? m : ''));
+      const outside = (t) => noDemoCallouts(t).replace(/[ \t]*<section class="labs"[\s\S]*?<\/section>\n\n/, '').replace(/[ \t]*<!-- atlas-demos:start -->[\s\S]*?<!-- atlas-demos:end -->\n\n?/, '').replace(/^ {2}\.labs[^\n]*\n/gm, '');
       line(outside(html) === outside(before), 'nothing else on the page changed: removing the new section and its styles gives back the previous page');
 
       const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
@@ -72,8 +74,7 @@ async function serve(site) {
         const body = await res.text();
         line(res.status === 200 && /<title>/.test(body), name + ' resolves: ' + href + ' answers 200 with a page', res.status);
       }
-      const callouts = (html.match(/class="callout"/g) || []).length;
-      line(callouts === (before.match(/class="callout"/g) || []).length && (await page.locator('.callout').count()) === callouts && callouts >= 3, 'the existing callouts and the wallet extension steps are all still there (' + callouts + ')');
+      line((html.match(/class="callout"/g) || []).length === 1 && (await page.locator('.callout').count()) === 1 && (await page.locator('.callout li').count()) === 3 && /Walking into these spaces needs the wallet extension/.test(await page.locator('.callout').innerText()), 'the wallet extension steps are still there as the one callout, and the demos are not listed twice');
       line((await page.locator('.atlas-risk-notice').count()) === 1 && (await page.locator('footer.atlas-site-footer a[href="/terms/"]').count()) === 1, 'the experimental-platform notice and the terms footer are untouched');
 
       for (const [label, vp] of [['desktop', { width: 1280, height: 800 }], ['mobile', { width: 375, height: 667 }]]) {

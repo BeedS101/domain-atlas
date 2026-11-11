@@ -81,6 +81,8 @@ for (const s of SITES) {
   const other = cfg.sites[SITES.find((x) => x !== s)].host;
   const expected = cfg.demos.map((d) => (d.runsOn || SITES).includes(s) ? '/' + d.file : 'https://' + cfg.sites[(d.runsOn || SITES)[0]].host + '/' + d.file);
   line(JSON.stringify(hrefs) === JSON.stringify(cfg.groups.flatMap((g) => cfg.demos.filter((d) => d.group === g.id).map((d) => expected[cfg.demos.indexOf(d)]))), s + ' home page links each demo to this domain, or to the domain that runs it', hrefs);
+  const once = cfg.demos.filter((d) => (html.match(new RegExp('href="[^"]*/' + d.file.replace(/[.]/g, '[.]') + '"', 'g')) || []).length !== 1);
+  line(once.length === 0, s + ' home page links each demo exactly once (no second list beside the directory)', once.map((d) => d.file));
   line(hrefs.filter((h) => h.startsWith('http')).every((h) => h.startsWith('https://' + other + '/')), s + ' home page has no external link except to ' + other);
 }
 

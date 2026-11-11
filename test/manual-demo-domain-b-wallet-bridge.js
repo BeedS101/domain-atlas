@@ -1,6 +1,6 @@
 // Manual check: the actual demo-domain-b live pages — index.html's new
 // "Walking into these spaces needs the wallet extension" callout, its
-// centered logo, and the link to the new wallet-bridge-demo.html page;
+// centered logo, and the directory link to the wallet-bridge-demo.html page;
 // and wallet-bridge-demo.html itself, which exercises SPEC.md §3.8/§3.8.1/
 // §3.8.2 for real against demo-domain-b's own manifest (policy.
 // walletBridge: { read: true, sign: ["demo-login"], offer:
@@ -18,8 +18,8 @@
 // demo-domain-b folder on disk.
 //
 // Four things this test exists to prove, in order: (1) index.html's logo
-// is centered and both new callouts are present, with the second one
-// linking to wallet-bridge-demo.html; (2) wallet-bridge-demo.html's
+// is centered, the extension callout is present and the demo directory
+// links wallet-bridge-demo.html; (2) wallet-bridge-demo.html's
 // "Check my wallet" button correctly reports no active identity before
 // one exists, and a real one once it does; (3) "Ask for a signature"
 // shows the real non-spoofable prompt and reports a real signed envelope
@@ -88,7 +88,7 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-demo-b-profile-
     if (!background) background = await context.waitForEvent('serviceworker');
     const extensionId = new URL(background.url()).host;
 
-    console.log('STEP 1: index.html — logo is centered, both new callouts present, second one links to wallet-bridge-demo.html');
+    console.log('STEP 1: index.html — logo is centered, the extension callout is present, and the demo directory links wallet-bridge-demo.html');
     const indexPage = await context.newPage();
     await indexPage.goto('http://' + DOMAIN + '/index.html', { waitUntil: 'load' });
     const logoMarginLeftPx = await indexPage.locator('.logo').evaluate((img) => parseFloat(getComputedStyle(img).marginLeft));
@@ -100,11 +100,11 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-demo-b-profile-
     if (logoMarginLeftPx === 0) throw new Error('Expected the logo to actually have non-zero auto margins once centered, got 0px both sides — probably not centered at all');
     const bodyText = await indexPage.locator('body').innerText();
     if (!bodyText.includes('Walking into these spaces needs the wallet extension')) throw new Error('Expected the wallet-extension callout text on index.html');
-    if (!bodyText.includes('talk to that wallet directly')) throw new Error('Expected the new wallet-bridge-demo callout text on index.html');
+    if (!bodyText.includes('Wallet bridge demo')) throw new Error('Expected the wallet bridge demo card in the demo directory on index.html');
     const bridgeDemoLinkHref = await indexPage.locator('a[href="/wallet-bridge-demo.html"]').getAttribute('href');
     if (bridgeDemoLinkHref !== '/wallet-bridge-demo.html') throw new Error('Expected a link to /wallet-bridge-demo.html on index.html');
     await indexPage.close();
-    console.log('PASS: index.html centers the logo and carries both new callouts, one linking to the new demo page');
+    console.log('PASS: index.html centers the logo, carries the extension callout and links the demo page from its directory');
 
     console.log('STEP 2: wallet-bridge-demo.html — "Check my wallet" correctly reports no active identity before one exists');
     const demoPage = await context.newPage();
@@ -208,7 +208,7 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-demo-b-profile-
     await demoPage.close();
     console.log('PASS: the offer prompt named the real asset class, and approval queued the real minted credential into pending bridge offers without touching the live wallet');
 
-    console.log('\nALL CHECKS PASSED — demo-domain-b\'s index.html centers its logo and carries both new callouts, and wallet-bridge-demo.html genuinely exercises SPEC.md §3.8/§3.8.1/§3.8.2 end to end against this domain\'s own manifest: Check my wallet, Ask for a signature, and Offer me a collectible all do exactly what their on-page copy claims.');
+    console.log('\nALL CHECKS PASSED — demo-domain-b\'s index.html centers its logo, carries the extension callout and lists the wallet bridge demo in its directory, and wallet-bridge-demo.html genuinely exercises SPEC.md §3.8/§3.8.1/§3.8.2 end to end against this domain\'s own manifest: Check my wallet, Ask for a signature, and Offer me a collectible all do exactly what their on-page copy claims.');
   } finally {
     await context.close().catch(() => {});
     serverProc.kill();

@@ -79,7 +79,7 @@ Public static pages, plus two issuer files for the federation demo (below), into
 
 | File | Status |
 | --- | --- |
-| `index.html` | changed (the Demo directory section) |
+| `index.html` | changed (the Demo directory replaces the old list of demo callouts; the wallet-extension callout stays) |
 | `federation-demo.html` | changed (second domain defaults to the other domain) |
 | `reserve-bank-demo.html` | changed (sibling domain defaults to the other domain) |
 | `email-ticket-demo.html` | new (it was only on `domain-atlas.co.za`) |
@@ -88,7 +88,7 @@ Public static pages, plus two issuer files for the federation demo (below), into
 
 | File | Status |
 | --- | --- |
-| `index.html` | changed (the Demo directory section) |
+| `index.html` | changed (the Demo directory replaces the old list of demo callouts; the wallet-extension callout stays) |
 | `email-ticket-demo.html` | changed (the back link no longer names one domain) |
 | `business-demo.html`, `cafeteria-demo.html`, `login-demo.html`, `warranty-demo.html`, `recall-demo.html`, `attestation-demo.html`, `bank-demo.html`, `clawback-demo.html`, `governance-demo.html`, `oracle-demo.html`, `reserve-bank-demo.html`, `federation-demo.html` | new |
 
