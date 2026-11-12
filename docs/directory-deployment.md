@@ -152,6 +152,22 @@ After uploading:
 5. Search for one of its worlds on the page.
 6. Run the cron command once by hand and check the summary line.
 
+## The directory page
+
+`index.html` lists **sites**, not single worlds: one compact row per domain
+(or, for a key-anchored manifest, per verified identity key, never an invented
+domain) with its world count, genres, scales and how many sites link to it. The
+button on the right of a row (or the row itself) opens the site's worlds, with
+their descriptions, genres, access rules and portals. The page asks
+`search?groupBy=site`, which pages by site and reports `count` (sites) and
+`worldCount` (matching worlds in all pages), so the totals are right however
+many sites there are. Without `groupBy` the endpoint still returns the flat,
+paged list of worlds, now with each world's `portals` as well.
+
+The page and the PHP files go together: upload `index.html`, `search.php` and
+`lib/` in the same step when updating. The new page tells you if it is talking
+to an older directory. No data changes and no cron changes are involved.
+
 ## Which worlds will appear
 
 Only worlds whose manifest marks them `discoverable` are indexed. Live
@@ -170,6 +186,7 @@ DIRECTORY_IMPL=php node test/verify-directory-security.js
 node test/verify-directory-rebinding.js             # Node: DNS rebinding
 php test/verify-directory-rebinding.php             # PHP: DNS rebinding
 php test/verify-directory-storage.php               # PHP: the SQLite storage
+node test/manual-directory-groups.js                # the page, in headless Chromium (needs playwright; DIRECTORY_IMPL=php for PHP)
 ```
 
 Each run starts its own throw-away directory and manifest servers on local

@@ -319,26 +319,84 @@ function dir_search($params) {
 
   $limit = min(max((int) ($params['limit'] ?? 0) ?: $cfg['defaultLimit'], 1), $cfg['maxLimit']);
   $offset = max((int) ($params['offset'] ?? 0), 0);
+  if (($params['groupBy'] ?? null) === 'site') return dir_search_by_site($db, $scored, $inboundFor, $limit, $offset);
   $page = array_slice($scored, $offset, $limit);
-  $failures = [];
-  if ($page) {
-    $urls = array_values(array_unique(array_map(function ($row) { return $row['w']['manifestUrl']; }, $page)));
-    $get = $db->prepare('SELECT url, consecutive_failures FROM manifests WHERE url IN (' . implode(',', array_fill(0, count($urls), '?')) . ')');
-    $get->execute($urls);
-    foreach ($get->fetchAll() as $m) $failures[$m['url']] = (int) $m['consecutive_failures'];
-  }
+  $failures = dir_manifest_failures($db, $page);
   $results = [];
-  foreach ($page as $row) {
+  foreach ($page as $row) $results[] = dir_world_result($row['w'], $inboundFor, $failures);
+  return ['count' => count($scored), 'limit' => $limit, 'offset' => $offset, 'results' => $results];
+}
+
+// The consecutive-failure count of every manifest the given worlds came from, to mark stale listings.
+function dir_manifest_failures($db, $rows) {
+  $failures = [];
+  if (!$rows) return $failures;
+  $urls = array_values(array_unique(array_map(function ($row) { return $row['w']['manifestUrl']; }, $rows)));
+  $get = $db->prepare('SELECT url, consecutive_failures FROM manifests WHERE url IN (' . implode(',', array_fill(0, count($urls), '?')) . ')');
+  $get->execute($urls);
+  foreach ($get->fetchAll() as $m) $failures[$m['url']] = (int) $m['consecutive_failures'];
+  return $failures;
+}
+
+function dir_world_result($w, $inboundFor, $failures) {
+  return [
+    'anchorType' => $w['anchorType'], 'domain' => $w['domain'], 'identityKey' => $w['identityKey'],
+    'worldId' => $w['worldId'], 'name' => $w['name'], 'description' => $w['description'] ?? null,
+    'ownerName' => $w['ownerName'], 'genre' => $w['genre'], 'scale' => $w['scale'], 'capabilities' => $w['capabilities'],
+    'guestAccess' => $w['guestAccess'], 'identityRequired' => $w['identityRequired'],
+    'acceptedItemClasses' => $w['acceptedItemClasses'], 'portals' => $w['portalsRaw'], 'manifestUrl' => $w['manifestUrl'],
+    'inboundPortalCount' => $inboundFor($w),
+    'stale' => ($failures[$w['manifestUrl']] ?? 0) >= dir_config()['staleAfterFailures'],
+  ];
+}
+
+// groupBy=site: the same matches, grouped under the site that published them (its domain, or for a key-anchored manifest its
+// verified identity key). Groups are paged, not worlds, and worldCount is the number of matching worlds in all groups, so
+// the counts stay right however many pages there are.
+function dir_search_by_site($db, $scored, $inboundFor, $limit, $offset) {
+  $groups = [];
+  foreach ($scored as $row) {
     $w = $row['w'];
-    $results[] = [
-      'anchorType' => $w['anchorType'], 'domain' => $w['domain'], 'identityKey' => $w['identityKey'],
-      'worldId' => $w['worldId'], 'name' => $w['name'], 'description' => $w['description'] ?? null,
-      'ownerName' => $w['ownerName'], 'genre' => $w['genre'], 'scale' => $w['scale'], 'capabilities' => $w['capabilities'],
-      'guestAccess' => $w['guestAccess'], 'identityRequired' => $w['identityRequired'],
-      'acceptedItemClasses' => $w['acceptedItemClasses'], 'manifestUrl' => $w['manifestUrl'],
-      'inboundPortalCount' => $inboundFor($w),
-      'stale' => ($failures[$w['manifestUrl']] ?? 0) >= $cfg['staleAfterFailures'],
+    $anchor = dir_anchor_of($w);
+    if (!isset($groups[$anchor])) {
+      $groups[$anchor] = ['anchorType' => $w['anchorType'], 'domain' => $w['domain'], 'identityKey' => $w['identityKey'], 'ownerName' => $w['ownerName'], 'anchor' => $anchor, 'matched' => 0, 'worlds' => []];
+    }
+    $g = &$groups[$anchor];
+    if (empty($g['identityKey']) && !empty($w['identityKey'])) $g['identityKey'] = $w['identityKey'];
+    if (empty($g['ownerName']) && !empty($w['ownerName'])) $g['ownerName'] = $w['ownerName'];
+    $g['matched'] = max($g['matched'], (int) $row['matched']);
+    $g['worlds'][] = $row;
+    unset($g);
+  }
+  $ordered = array_values($groups);
+  usort($ordered, function ($a, $b) use ($inboundFor) {
+    if ($a['matched'] !== $b['matched']) return $b['matched'] - $a['matched'];
+    $ia = $inboundFor($a['worlds'][0]['w']); $ib = $inboundFor($b['worlds'][0]['w']);
+    if ($ia !== $ib) return $ib - $ia;
+    $byName = strcasecmp($a['anchor'], $b['anchor']);
+    return $byName !== 0 ? $byName : strcmp($a['anchor'], $b['anchor']);
+  });
+  $page = array_slice($ordered, $offset, $limit);
+  $rows = [];
+  foreach ($page as $g) foreach ($g['worlds'] as $row) $rows[] = $row;
+  $failures = dir_manifest_failures($db, $rows);
+  $out = [];
+  foreach ($page as $g) {
+    $results = [];
+    $genres = [];
+    $scales = [];
+    foreach ($g['worlds'] as $row) {
+      $results[] = dir_world_result($row['w'], $inboundFor, $failures);
+      if (!empty($row['w']['genre'])) $genres[$row['w']['genre']] = true;
+      if (!empty($row['w']['scale'])) $scales[$row['w']['scale']] = true;
+    }
+    $stale = false;
+    foreach ($results as $r) if ($r['stale']) $stale = true;
+    $out[] = [
+      'anchorType' => $g['anchorType'], 'domain' => $g['domain'], 'identityKey' => $g['identityKey'], 'ownerName' => $g['ownerName'],
+      'worldCount' => count($g['worlds']), 'genres' => array_slice(array_map('strval', array_keys($genres)), 0, 5), 'scales' => array_map('strval', array_keys($scales)),
+      'inboundPortalCount' => $inboundFor($g['worlds'][0]['w']), 'stale' => $stale, 'worlds' => $results,
     ];
   }
-  return ['count' => count($scored), 'limit' => $limit, 'offset' => $offset, 'results' => $results];
+  return ['count' => count($ordered), 'worldCount' => count($scored), 'limit' => $limit, 'offset' => $offset, 'groups' => $out];
 }

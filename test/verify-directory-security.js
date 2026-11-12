@@ -189,6 +189,34 @@ async function main() {
     for (let off = 0; off < 40; off += 7) tiedPaged.push(...(await search(L, 'domain=' + encodeURIComponent(tied.host) + '&limit=7&offset=' + off)).results.map((w) => w.worldId));
     check('worlds that tie on name and rank come back in one fixed order, the same on every page', tiedAll.length === 40 && tiedAll.join() === [...tiedAll].sort().join() && tiedPaged.join() === tiedAll.join(), { first: tiedAll.slice(0, 5), paged: tiedPaged.slice(0, 5) });
 
+    console.log('--- grouping by site ---');
+    const sites = [];
+    for (const [n, count] of [['alpha', 30], ['bravo', 5], ['charlie', 2], ['delta', 2]]) {
+      sites.push(track(await manifestServer((host) => ({
+        spec: 'domain-atlas/1.0', domain: host, owner: { name: 'Owner ' + n },
+        worlds: Array.from({ length: count }, (_, i) => world(n + i, { name: n + ' world ' + String(i).padStart(2, '0'), profile: { genre: 'grouped-test', scale: i % 2 ? 'room' : 'building', capabilities: { building: 'none', vehicles: false, combat: 'none', landOwnership: false } }, portals: i === 0 ? [{ kind: 'domain', to: sites.length ? sites[0].host : 'alpha.example' }] : [] }))
+      }))));
+    }
+    for (const site of sites) await submit(L, site.url);
+    const flat = await search(L, 'genre=grouped-test&limit=100');
+    const g1 = await search(L, 'genre=grouped-test&groupBy=site&limit=2');
+    check('grouped search pages by site, and the totals cover every page', g1.count === 4 && g1.worldCount === 39 && flat.count === 39 && g1.groups.length === 2 && g1.limit === 2 && g1.offset === 0, { count: g1.count, worldCount: g1.worldCount, groups: g1.groups.length });
+    const g2 = await search(L, 'genre=grouped-test&groupBy=site&limit=2&offset=2');
+    const all = [...g1.groups, ...g2.groups];
+    check('the next page continues with the other sites and repeats none', g2.groups.length === 2 && new Set(all.map((g) => g.domain)).size === 4 && g2.count === 4 && g2.worldCount === 39, g2.groups.map((g) => g.domain));
+    const alpha = all.find((g) => g.domain === sites[0].host);
+    check('a site\'s world count is its full count, though one page of worlds holds fewer', alpha && alpha.worldCount === 30 && alpha.worlds.length === 30 && all.reduce((n, g) => n + g.worldCount, 0) === 39, alpha && alpha.worldCount);
+    check('the busiest-linked site comes first', g1.groups[0].domain === sites[0].host && g1.groups[0].inboundPortalCount >= 0, g1.groups.map((g) => [g.domain, g.inboundPortalCount]));
+    check('a group summarises its worlds', alpha.genres.join() === 'grouped-test' && alpha.scales.slice().sort().join() === 'building,room' && alpha.ownerName === 'Owner alpha' && alpha.stale === false, alpha);
+    check('a world lists its portals', alpha.worlds.some((w) => Array.isArray(w.portals)) && alpha.worlds.find((w) => w.worldId === 'alpha0').portals.length === 1, alpha.worlds[0]);
+    const paged = [];
+    for (let off = 0; off < 4; off += 1) paged.push(...(await search(L, 'genre=grouped-test&groupBy=site&limit=1&offset=' + off)).groups.map((g) => g.domain));
+    check('the order is the same however it is paged', paged.join() === all.map((g) => g.domain).join(), paged);
+    const filtered = await search(L, 'genre=grouped-test&scale=room&groupBy=site&limit=100');
+    check('filters count only the matching worlds in each group', filtered.worldCount === 19 && filtered.groups.find((g) => g.domain === sites[0].host).worldCount === 15 && filtered.groups.reduce((n, g) => n + g.worldCount, 0) === 19, filtered.worldCount);
+    check('without groupBy the answer is the flat list as before', Array.isArray(flat.results) && flat.groups === undefined && flat.results.every((w) => Array.isArray(w.portals)));
+    check('an unknown groupBy value is ignored', Array.isArray((await search(L, 'genre=grouped-test&groupBy=nonsense&limit=3')).results));
+
     console.log('--- public mode: addresses a directory must never contact ---');
     const refused = [
       'https://localhost/.well-known/spatial.json', 'https://foo.localhost/.well-known/spatial.json',

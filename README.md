@@ -467,8 +467,10 @@ curl "http://localhost:8003/search?scale=district"
 curl "http://localhost:8003/search?q=workshop"
 ```
 
-Or open `http://localhost:8003` for a small search UI, which also has a
-form for listing your own domain. Results are ranked by the number of
+Or open `http://localhost:8003` for a small search UI that groups worlds by
+site (one expandable row per domain or verified key), which also has a
+form for listing your own domain. `search?groupBy=site` gives the same
+grouping as JSON, with accurate site and world counts across pages. Results are ranked by the number of
 distinct other sites that link in with a `"kind": "domain"` portal (the
 same insight PageRank started from, applied to this much smaller graph),
 and domain-anchored vs. key-anchored listings are always labeled, never
@@ -2005,6 +2007,7 @@ node test/verify-directory-security.js # directory hardening: spoofing, SSRF ref
 node test/verify-directory-rebinding.js # directory DNS rebinding (Node; fake lookups, no network)
 php test/verify-directory-rebinding.php # the same for directory-php/ (needs only php with curl)
 php test/verify-directory-storage.php   # directory-php/'s SQLite storage: schema, rollback, hostile text, limits under load
+node test/manual-directory-groups.js    # the directory page in headless Chromium: grouped rows, expand/collapse, paging, phone width
 node test/verify-asset-cache.js        # gltf-mini's local GLB cache: fresh on first load, 304'd on repeat, re-fetched on real change
 node test/verify-identity-backup.js    # password identity lifecycle: onboarding, lock/unlock, export/import by password + seed phrase
 ```

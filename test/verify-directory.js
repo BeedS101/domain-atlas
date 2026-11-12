@@ -199,6 +199,14 @@ async function main() {
   assert(found && found.anchorType === 'key', 'expected the key-anchored world to be indexed and labeled anchorType "key"');
   console.log('PASS: validly-signed key-anchored manifest accepted and correctly labeled');
 
+  // Grouped by site (groupBy=site): a key-anchored manifest is its own group, named by its verified key, never by an invented domain.
+  const grouped = await fetch(DIRECTORY + '/search?groupBy=site&limit=100').then((r) => r.json());
+  const keyGroup = grouped.groups.find((g) => g.identityKey === identityKey);
+  assert(keyGroup && keyGroup.anchorType === 'key' && keyGroup.domain === null && keyGroup.worldCount === 1 && keyGroup.worlds[0].name === 'Key World', 'expected the key-anchored manifest to be one group named by its identity key, with no domain: ' + JSON.stringify(keyGroup));
+  assert(grouped.groups.every((g) => g.worldCount === g.worlds.length) && grouped.groups.reduce((n, g) => n + g.worldCount, 0) === grouped.worldCount && grouped.worldCount === allResults.count, 'expected group counts to add up to the number of matching worlds');
+  assert(grouped.groups.filter((g) => g.anchorType === 'domain').every((g) => typeof g.domain === 'string' && g.domain), 'expected every domain group to carry its domain');
+  console.log('PASS: grouped search keeps key-anchored sites separate and the counts add up');
+
   // Tamper: change the name in the SERVED manifest without re-signing.
   keyServer.state.manifest = { ...keyServer.state.manifest, worlds: [{ ...keyServer.state.manifest.worlds[0], name: 'Tampered Name' }] };
   const tamperSubmit = await fetch(DIRECTORY + '/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: keyUrl }) }).then((r) => r.json());

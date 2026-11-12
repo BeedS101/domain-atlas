@@ -453,28 +453,60 @@ function search(params) {
   }
   const limit = Math.min(Math.max(parseInt(params.limit, 10) || DEFAULT_LIMIT, 1), MAX_LIMIT);
   const offset = Math.max(parseInt(params.offset, 10) || 0, 0);
-  const page = scored.slice(offset, offset + limit).map(({ w }) => {
-    const m = manifests.get(w.manifestUrl);
+  if (params.groupBy === 'site') return searchBySite(scored, limit, offset);
+  const page = scored.slice(offset, offset + limit).map(({ w }) => worldResult(w));
+  return { count: scored.length, limit, offset, results: page };
+}
+function worldResult(w) {
+  const m = manifests.get(w.manifestUrl);
+  return {
+    anchorType: w.anchorType,
+    domain: w.domain,
+    identityKey: w.identityKey,
+    worldId: w.worldId,
+    name: w.name,
+    description: w.description,
+    ownerName: w.ownerName,
+    genre: w.genre,
+    scale: w.scale,
+    capabilities: w.capabilities,
+    guestAccess: w.guestAccess,
+    identityRequired: w.identityRequired,
+    acceptedItemClasses: w.acceptedItemClasses,
+    portals: w.portalsRaw,
+    manifestUrl: w.manifestUrl,
+    inboundPortalCount: inboundCountFor(w),
+    stale: !!(m && m.consecutiveFailures >= STALE_AFTER_FAILURES)
+  };
+}
+// groupBy=site: the same matches, grouped under the site that published them (its domain, or for a key-anchored manifest its
+// verified identity key). Groups are paged, not worlds, and worldCount is the number of matching worlds in all groups, so
+// the counts stay right however many pages there are.
+function searchBySite(scored, limit, offset) {
+  const groups = new Map();
+  for (const { w, matched } of scored) {
+    const anchor = anchorOf(w);
+    let g = groups.get(anchor);
+    if (!g) {
+      g = { anchorType: w.anchorType, domain: w.domain, identityKey: w.identityKey, ownerName: w.ownerName, anchor, matched: matched || 0, worlds: [] };
+      groups.set(anchor, g);
+    }
+    if (!g.identityKey && w.identityKey) g.identityKey = w.identityKey;
+    if (!g.ownerName && w.ownerName) g.ownerName = w.ownerName;
+    g.matched = Math.max(g.matched, matched || 0);
+    g.worlds.push(w);
+  }
+  const ordered = [...groups.values()].sort((a, b) => (b.matched - a.matched) || (inboundCountFor(b.worlds[0]) - inboundCountFor(a.worlds[0])) || a.anchor.toLowerCase().localeCompare(b.anchor.toLowerCase()) || (a.anchor < b.anchor ? -1 : a.anchor > b.anchor ? 1 : 0));
+  const page = ordered.slice(offset, offset + limit).map((g) => {
+    const results = g.worlds.map(worldResult);
+    const distinct = (field) => [...new Set(g.worlds.map((w) => w[field]).filter(Boolean))];
     return {
-      anchorType: w.anchorType,
-      domain: w.domain,
-      identityKey: w.identityKey,
-      worldId: w.worldId,
-      name: w.name,
-      description: w.description,
-      ownerName: w.ownerName,
-      genre: w.genre,
-      scale: w.scale,
-      capabilities: w.capabilities,
-      guestAccess: w.guestAccess,
-      identityRequired: w.identityRequired,
-      acceptedItemClasses: w.acceptedItemClasses,
-      manifestUrl: w.manifestUrl,
-      inboundPortalCount: inboundCountFor(w),
-      stale: !!(m && m.consecutiveFailures >= STALE_AFTER_FAILURES)
+      anchorType: g.anchorType, domain: g.domain, identityKey: g.identityKey, ownerName: g.ownerName,
+      worldCount: g.worlds.length, genres: distinct('genre').slice(0, 5), scales: distinct('scale'),
+      inboundPortalCount: inboundCountFor(g.worlds[0]), stale: results.some((r) => r.stale), worlds: results
     };
   });
-  return { count: scored.length, limit, offset, results: page };
+  return { count: ordered.length, worldCount: scored.length, limit, offset, groups: page };
 }
 
 // ---------- HTTP layer ----------
@@ -572,7 +604,7 @@ async function main() {
         const q = url.searchParams;
         return sendJson(res, 200, search({
           q: (q.get('q') || '').slice(0, 200), genre: q.get('genre'), scale: q.get('scale'), combat: q.get('combat'), domain: q.get('domain'),
-          anchorType: q.get('anchorType'), identityRequired: q.get('identityRequired'), limit: q.get('limit'), offset: q.get('offset')
+          anchorType: q.get('anchorType'), identityRequired: q.get('identityRequired'), limit: q.get('limit'), offset: q.get('offset'), groupBy: q.get('groupBy')
         }));
       }
 
