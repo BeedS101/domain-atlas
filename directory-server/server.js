@@ -96,7 +96,11 @@ let inboundCounts = new Map(); // domain or key -> number of distinct other anch
 function loadSnapshot() {
   try {
     const raw = JSON.parse(fs.readFileSync(SNAPSHOT_FILE, 'utf8'));
-    for (const m of raw.manifests || []) manifests.set(m.url, m);
+    for (const m of raw.manifests || []) {
+      // A snapshot from before lastSuccessAt existed: a manifest whose last crawl worked was last seen at that crawl.
+      if (m.lastSuccessAt === undefined && m.status === 'ok' && m.lastCrawledAt) m.lastSuccessAt = m.lastCrawledAt;
+      manifests.set(m.url, m);
+    }
     for (const w of raw.worlds || []) worlds.set(w.worldKey, w);
     console.log(`Loaded snapshot: ${manifests.size} manifest(s), ${worlds.size} world(s).`);
   } catch {
@@ -358,6 +362,7 @@ async function crawlOne(url) {
       anchorType,
       anchorKey,
       lastCrawledAt: new Date().toISOString(),
+      lastSuccessAt: new Date().toISOString(), // only a fetched and validated manifest sets this; a failed crawl keeps the old value
       nextCrawlAt: Date.now() + CRAWL_INTERVAL_MS,
       status: 'ok',
       lastError: undefined,
@@ -500,10 +505,17 @@ function searchBySite(scored, limit, offset) {
   const page = ordered.slice(offset, offset + limit).map((g) => {
     const results = g.worlds.map(worldResult);
     const distinct = (field) => [...new Set(g.worlds.map((w) => w[field]).filter(Boolean))];
+    // The newest successful check among the manifests this site's worlds came from (UTC, to the second).
+    let seen = 0;
+    for (const w of g.worlds) {
+      const t = Date.parse((manifests.get(w.manifestUrl) || {}).lastSuccessAt);
+      if (t > seen) seen = t;
+    }
     return {
       anchorType: g.anchorType, domain: g.domain, identityKey: g.identityKey, ownerName: g.ownerName,
       worldCount: g.worlds.length, genres: distinct('genre').slice(0, 5), scales: distinct('scale'),
-      inboundPortalCount: inboundCountFor(g.worlds[0]), stale: results.some((r) => r.stale), worlds: results
+      inboundPortalCount: inboundCountFor(g.worlds[0]), stale: results.some((r) => r.stale),
+      lastSeenAt: seen ? new Date(seen).toISOString().replace(/\.\d+Z$/, 'Z') : null, worlds: results
     };
   });
   return { count: ordered.length, worldCount: scored.length, limit, offset, groups: page };

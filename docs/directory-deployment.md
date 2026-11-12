@@ -164,9 +164,27 @@ their descriptions, genres, access rules and portals. The page asks
 many sites there are. Without `groupBy` the endpoint still returns the flat,
 paged list of worlds, now with each world's `portals` as well.
 
+Each domain row has a **Visit site** link (a new tab, to the domain's https
+homepage). It is built only from a strictly checked host name, so no other
+scheme, path, credentials or address can end up in it; a key-anchored site has
+no verified address and gets no link.
+
+Each row also shows **Last seen**: when the directory last fetched and
+validated that site's manifest, shown in the visitor's own time zone (the UTC
+time is on hover). It is `lastSeenAt` in the grouped search (UTC, ISO 8601, the
+newest among the site's manifests, `null` when unknown). Only a successful
+crawl or submission sets it; a failed crawl does not, and the existing stale
+and failure handling is unchanged.
+
 The page and the PHP files go together: upload `index.html`, `search.php` and
 `lib/` in the same step when updating. The new page tells you if it is talking
-to an older directory. No data changes and no cron changes are involved.
+to an older directory. No cron changes are involved.
+
+The PHP directory's SQLite file gains one column (`manifests.last_success_at`,
+schema version 2) the first time the new code opens it, in one transaction, and
+keeps every manifest and world. A site whose last crawl had worked is dated at
+that crawl; one that was failing shows no time until its next good crawl. The
+Node directory does the same for an existing snapshot file when it starts.
 
 ## Which worlds will appear
 
@@ -199,7 +217,9 @@ a job cannot pass while testing a different PHP.
 The storage test checks the schema, that a failed change leaves nothing
 behind, that hostile text is stored and searched as plain text, that the
 database is refused inside the web root, and that the rate limit and the
-manifest limit hold when many PHP processes hit the same file at once.
+manifest limit hold when many PHP processes hit the same file at once. It also
+upgrades a hand-built version 1 database, checks that rows and worlds survive
+and that the last-seen time is kept through a failed crawl.
 
 The rebinding tests check that a public-looking name resolving to a private,
 loopback, link-local or mixed set of addresses is refused before any

@@ -1,7 +1,8 @@
 // The directory page (directory-server/index.html, the same file as directory-php/atlas/directory/index.html) in a real
 // browser: sites are grouped, collapsed by default, expandable with the mouse and the keyboard, filters and paging keep the
-// counts right, key-anchored sites are named by their verified key, and it fits a phone screen. Everything is served from
-// throw-away local servers; the page is driven in headless Chromium.
+// counts right, key-anchored sites are named by their verified key, the Visit site link is safe, last-seen times are shown in
+// the visitor's time zone, and it fits a phone screen. Everything is served from throw-away local servers; the page is driven
+// in headless Chromium.
 //
 //   node test/manual-directory-groups.js                       (Node directory)
 //   DIRECTORY_IMPL=php node test/manual-directory-groups.js    (PHP directory)
@@ -88,6 +89,8 @@ function serve(build) {
     const keyText = await keyRow.innerText();
     check('a key-anchored site is named by its verified key, with no domain invented', keyText.includes('verified key') && keyText.includes(identityKey.slice(0, 12)) && !keyText.includes('127.0.0.1') && /1 world/.test(keyText), keyText);
     check('the full key is available on hover', (await keyRow.locator('.key').last().getAttribute('title')) === identityKey);
+    check('every row says when the site was last seen, as the directory reports it', (await page.locator('.group .seen').count()) === 6 && /Last seen/.test(await alphaRow.innerText()), await alphaRow.innerText());
+    check('a host that is not a real domain name gets no website link', (await page.locator('.group a').count()) === 0);
     await shot('1-collapsed-desktop');
 
     console.log('--- expanding ---');
@@ -155,6 +158,53 @@ function serve(build) {
     await page.click('#more');
     await page.waitForFunction(() => document.querySelectorAll('.group').length === 6);
     check('the last page removes the button, and no site appears twice', (await page.locator('#more').isHidden()) && new Set(await page.locator('.group').evaluateAll((l) => l.map((x) => x.dataset.key))).size === 6 && (await text('#status')) === '6 sites · 10 worlds found');
+
+    console.log('--- visit link and last seen ---');
+    // The fixtures live on 127.0.0.1, which never gets a link (a site address must be a real host name), so the search answers
+    // are rewritten here: valid names to check the link, hostile ones to check nothing unsafe becomes a link. Nothing outside
+    // 127.0.0.1 is ever requested: the context aborts it.
+    const domains = ['alpha.example', 'beta.example:8443', 'javascript:alert(1)', 'evil.example/x?y=1', 'user@evil.example'];
+    const withRewrites = async (contextOptions) => {
+      const context = await browser.newContext(contextOptions);
+      await context.route((u) => u.hostname !== '127.0.0.1', (r) => r.abort());
+      const p = await context.newPage();
+      p.on('pageerror', (e) => errors.push(String(e)));
+      await p.route((u) => /\/search(\.php)?$/.test(u.pathname), async (route) => {
+        const res = await route.fetch();
+        const body = await res.json();
+        if (body.groups) {
+          let n = 0;
+          body.groups.forEach((g, i) => { if (g.anchorType === 'domain') g.domain = domains[n++]; g.lastSeenAt = i === 1 ? null : '2026-03-05T21:30:00Z'; });
+        }
+        await route.fulfill({ response: res, json: body });
+      });
+      await p.goto(url);
+      await p.waitForSelector('.group');
+      return { context, p };
+    };
+    const za = await withRewrites({ viewport: { width: 1100, height: 900 }, timezoneId: 'Africa/Johannesburg', locale: 'en-GB' });
+    const links = await za.p.locator('.group a').evaluateAll((as) => as.map((a) => ({ href: a.href, target: a.target, rel: a.rel, text: a.textContent })));
+    check('a valid host name gets a Visit site link to its https homepage, and only those do', links.length === 2 && links.map((l) => l.href).sort().join() === 'https://alpha.example/,https://beta.example:8443/', links);
+    check('...which opens in a new tab without handing over the opener', links.every((l) => l.target === '_blank' && /noopener/.test(l.rel) && /noreferrer/.test(l.rel) && /Visit site/.test(l.text)), links);
+    check('javascript:, paths, credentials and addresses are not turned into links', (await za.p.locator('.group a[href^="javascript"], .group a[href*="evil.example"]').count()) === 0);
+    check('a key-anchored site gets no website link', (await za.p.locator('.group', { hasText: 'verified key' }).locator('a').count()) === 0);
+    const link = za.p.locator('.group a', { hasText: 'Visit site' }).first();
+    const popupPromise = za.context.waitForEvent('page');
+    await link.click();
+    const popup = await popupPromise;
+    await popup.close();
+    check('following the link does not also open the row', (await za.p.locator('.toggle[aria-expanded="true"]').count()) === 0);
+    const first = za.p.locator('.group').filter({ has: za.p.locator('a[href="https://alpha.example/"]') });
+    const seenText = (await first.locator('.seen').innerText()).replace(/\s/g, ' ');
+    check('last seen is shown in the visitor\'s own time zone', /5 Mar 2026/.test(seenText) && /23:30/.test(seenText), seenText);
+    check('...with the UTC time on hover and in the markup', (await first.locator('.seen').getAttribute('title')) === '2026-03-05T21:30:00Z (UTC)' && (await first.locator('time').getAttribute('datetime')) === '2026-03-05T21:30:00.000Z');
+    check('a site with no known time shows no last seen', (await za.p.locator('.seen').count()) === 5, await za.p.locator('.seen').count());
+    if (SHOTS) { fs.mkdirSync(SHOTS, { recursive: true }); await za.p.screenshot({ path: path.join(SHOTS, '5-visit-and-seen-desktop.png'), fullPage: true }); }
+    await za.context.close();
+    const ny = await withRewrites({ viewport: { width: 1100, height: 900 }, timezoneId: 'America/New_York', locale: 'en-US' });
+    const nyText = (await ny.p.locator('.seen').first().innerText()).replace(/\s/g, ' ');
+    check('another time zone shows its own local time for the same moment', /Mar 5, 2026/.test(nyText) && /4:30 PM/.test(nyText), nyText);
+    await ny.context.close();
 
     console.log('--- a phone screen ---');
     const phone = await browser.newPage({ viewport: { width: 375, height: 740 }, deviceScaleFactor: 2 });

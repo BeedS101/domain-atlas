@@ -5,6 +5,7 @@
 //     next to the web root the way a cPanel account lays it out
 //   - every change is one transaction: a failure part way leaves nothing behind
 //   - values are bound, never pasted into SQL: hostile names and search terms are stored and matched as plain text
+//   - the last successful fetch time is kept through a failed crawl, and an older database gets its column added in place
 //   - removing a manifest removes its worlds; the rate limit counts per hashed client, forgets after an hour, and holds when
 //     many requests arrive at once (separate PHP processes sharing the one database file)
 // Everything happens in a throw-away folder and one local server on 127.0.0.1; no real domain is contacted.
@@ -31,6 +32,14 @@ if ($mode !== 'main') {
         });
       }
       echo "done\n";
+    }
+    elseif ($mode === 'migrate') {
+      $db = dir_db();
+      $columns = [];
+      foreach ($db->query('PRAGMA table_info(manifests)')->fetchAll() as $c) $columns[] = $c['name'];
+      echo json_encode(['version' => (int) $db->query('PRAGMA user_version')->fetchColumn(), 'columns' => $columns,
+        'manifests' => $db->query('SELECT url, status, last_crawled_at, last_success_at FROM manifests ORDER BY url')->fetchAll(),
+        'worlds' => (int) $db->query('SELECT COUNT(*) FROM worlds')->fetchColumn()]) . "\n";
     }
     elseif ($mode === 'datadir') { echo dir_data_dir() . "\n"; }
     exit(0);
@@ -203,6 +212,40 @@ try {
   $accepted = 0; $bad = 0;
   foreach ($answers as $a) { if ($a[0] !== 0) $bad++; elseif ($a[1] === '1') $accepted++; }
   check('fourteen submissions at once into a directory with room for nine: exactly nine are tracked', $bad === 0 && $accepted === 9 && dir_manifest_count() === 9, ['accepted' => $accepted, 'errors' => $bad, 'rows' => dir_manifest_count()]);
+
+  // ----- last-seen time -----
+  echo "--- when a manifest was last fetched successfully ---\n";
+  dir_tx(function ($db) {
+    $db->exec("INSERT INTO manifests(url, status, submitted_at, last_crawled_at, last_success_at, next_crawl_at) VALUES('https://seen.example/x', 'ok', 900, 1000, 1000, 1)");
+  });
+  dir_record_failure('https://seen.example/x', 'unreachable');
+  $row = dir_db()->query("SELECT status, last_crawled_at, last_success_at, consecutive_failures FROM manifests WHERE url = 'https://seen.example/x'")->fetch();
+  check('a failed crawl records the failure but keeps the last successful time', $row['status'] === 'error' && (int) $row['consecutive_failures'] === 1 && (int) $row['last_crawled_at'] > 1000 && (int) $row['last_success_at'] === 1000, $row);
+  dir_drop_manifest('https://seen.example/x');
+
+  // A database from before the column existed (schema version 1) is upgraded in place, keeping every row.
+  $oldData = $base . '/old-data';
+  mkdir($oldData);
+  $old = new PDO('sqlite:' . $oldData . '/atlas-directory.sqlite', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+  $old->exec('CREATE TABLE manifests (url TEXT PRIMARY KEY, anchor_type TEXT, anchor_key TEXT, status TEXT NOT NULL, submitted_at INTEGER NOT NULL, last_crawled_at INTEGER, next_crawl_at INTEGER NOT NULL, consecutive_failures INTEGER NOT NULL DEFAULT 0, last_error TEXT, manifest_updated TEXT)');
+  $old->exec('CREATE TABLE worlds (world_key TEXT PRIMARY KEY, manifest_url TEXT NOT NULL REFERENCES manifests(url) ON DELETE CASCADE, anchor_type TEXT NOT NULL, anchor_key TEXT NOT NULL, domain TEXT, identity_key TEXT, world_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT, owner_name TEXT, genre TEXT, scale TEXT, guest_access TEXT, identity_required INTEGER NOT NULL, item_drops_allowed INTEGER NOT NULL, capabilities TEXT, accepted_item_classes TEXT NOT NULL, trusted_issuers TEXT, portals TEXT NOT NULL, indexed_at INTEGER NOT NULL)');
+  $old->exec('CREATE TABLE submit_limits (client TEXT NOT NULL, at INTEGER NOT NULL)');
+  $old->exec("INSERT INTO manifests VALUES('https://good.example/x', 'domain', 'good.example', 'ok', 100, 5000, 9000, 0, NULL, NULL)");
+  $old->exec("INSERT INTO manifests VALUES('https://down.example/x', 'domain', 'down.example', 'error', 100, 6000, 9000, 2, 'unreachable', NULL)");
+  $old->exec("INSERT INTO worlds VALUES('good.example#w', 'https://good.example/x', 'domain', 'good.example', 'good.example', NULL, 'w', 'Kept World', NULL, NULL, NULL, NULL, 'open', 0, 0, NULL, '[]', NULL, '[]', 5000)");
+  $old->exec('PRAGMA user_version=1');
+  $old = null;
+  $env = ['DIRECTORY_DATA_DIR' => $oldData];
+  [$code, $out] = child(['migrate'], $env);
+  $m = json_decode($out, true);
+  $byUrl = [];
+  foreach ((array) ($m['manifests'] ?? []) as $r) $byUrl[$r['url']] = $r;
+  check('an old database gains the column and the new schema version', $code === 0 && in_array('last_success_at', $m['columns'], true) && $m['version'] === DIRECTORY_SCHEMA_VERSION, $out);
+  check('its manifests and indexed worlds are all still there', count($byUrl) === 2 && $m['worlds'] === 1, $out);
+  check('a site whose last crawl worked is last seen at that crawl', (int) $byUrl['https://good.example/x']['last_success_at'] === 5000, $byUrl);
+  check('one that was failing has no known time rather than a made-up one', $byUrl['https://down.example/x']['last_success_at'] === null, $byUrl);
+  [$code, $again] = child(['migrate'], $env);
+  check('opening it again changes nothing', $code === 0 && $again === $out, $again);
 
   // ----- where the database lives -----
   echo "--- outside the web root ---\n";

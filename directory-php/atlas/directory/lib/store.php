@@ -7,7 +7,7 @@
 // Every statement is prepared. Every change runs in one BEGIN IMMEDIATE transaction, so two requests (or a request and the
 // cron job) can never interleave half-written changes; a failure rolls the whole change back.
 
-const DIRECTORY_SCHEMA_VERSION = 1;
+const DIRECTORY_SCHEMA_VERSION = 2;
 
 // The folder that holds the database. It is the configured dataDir (DIRECTORY_DATA_DIR or lib/atlas-directory-config.json) or,
 // failing that, an existing atlas-directory-private folder in the nearest parent folder of this code that has one; that is the
@@ -52,6 +52,7 @@ function dir_db() {
         status TEXT NOT NULL,
         submitted_at INTEGER NOT NULL,
         last_crawled_at INTEGER,
+        last_success_at INTEGER,
         next_crawl_at INTEGER NOT NULL,
         consecutive_failures INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
@@ -84,6 +85,14 @@ function dir_db() {
       $db->exec('CREATE INDEX IF NOT EXISTS worlds_anchor ON worlds(anchor_type, anchor_key)');
       $db->exec('CREATE TABLE IF NOT EXISTS submit_limits (client TEXT NOT NULL, at INTEGER NOT NULL)');
       $db->exec('CREATE INDEX IF NOT EXISTS submit_limits_client ON submit_limits(client, at)');
+      // Version 2: when the manifest was last fetched and validated successfully. A database from version 1 keeps all its rows;
+      // one whose last crawl worked was last seen at that crawl, the others have no known time until their next good crawl.
+      $columns = [];
+      foreach ($db->query('PRAGMA table_info(manifests)')->fetchAll() as $column) $columns[] = $column['name'];
+      if (!in_array('last_success_at', $columns, true)) {
+        $db->exec('ALTER TABLE manifests ADD COLUMN last_success_at INTEGER');
+        $db->exec('UPDATE manifests SET last_success_at = last_crawled_at WHERE status = \'ok\' AND last_crawled_at IS NOT NULL');
+      }
       $db->exec('PRAGMA user_version=' . DIRECTORY_SCHEMA_VERSION);
     }, $db);
   }

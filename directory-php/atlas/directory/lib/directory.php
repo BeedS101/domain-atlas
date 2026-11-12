@@ -138,11 +138,11 @@ function dir_crawl_one($url) {
     dir_tx(function ($db) use ($url, $anchorType, $anchorKey, $entries, $updated, $cfg) {
       $now = time();
       // Update, or insert when the row is not there (an UPDATE then INSERT keeps this working on older SQLite versions).
-      $update = $db->prepare('UPDATE manifests SET anchor_type = ?, anchor_key = ?, status = \'ok\', last_crawled_at = ?, next_crawl_at = ?, consecutive_failures = 0, last_error = NULL, manifest_updated = ? WHERE url = ?');
-      $update->execute([$anchorType, $anchorKey, $now, $now + $cfg['crawlIntervalSeconds'], $updated, $url]);
+      $update = $db->prepare('UPDATE manifests SET anchor_type = ?, anchor_key = ?, status = \'ok\', last_crawled_at = ?, last_success_at = ?, next_crawl_at = ?, consecutive_failures = 0, last_error = NULL, manifest_updated = ? WHERE url = ?');
+      $update->execute([$anchorType, $anchorKey, $now, $now, $now + $cfg['crawlIntervalSeconds'], $updated, $url]);
       if ($update->rowCount() === 0) {
-        $db->prepare('INSERT INTO manifests(url, anchor_type, anchor_key, status, submitted_at, last_crawled_at, next_crawl_at, consecutive_failures, last_error, manifest_updated) VALUES(?, ?, ?, \'ok\', ?, ?, ?, 0, NULL, ?)')
-          ->execute([$url, $anchorType, $anchorKey, $now, $now, $now + $cfg['crawlIntervalSeconds'], $updated]);
+        $db->prepare('INSERT INTO manifests(url, anchor_type, anchor_key, status, submitted_at, last_crawled_at, last_success_at, next_crawl_at, consecutive_failures, last_error, manifest_updated) VALUES(?, ?, ?, \'ok\', ?, ?, ?, ?, 0, NULL, ?)')
+          ->execute([$url, $anchorType, $anchorKey, $now, $now, $now, $now + $cfg['crawlIntervalSeconds'], $updated]);
       }
       // A world that was discoverable last crawl and is not now must not linger.
       $db->prepare('DELETE FROM worlds WHERE anchor_type = ? AND anchor_key = ?')->execute([$anchorType, $anchorKey]);
@@ -338,6 +338,17 @@ function dir_manifest_failures($db, $rows) {
   return $failures;
 }
 
+// When each given manifest was last fetched and validated successfully (epoch seconds), by manifest URL.
+function dir_manifest_last_success($db, $rows) {
+  $seen = [];
+  if (!$rows) return $seen;
+  $urls = array_values(array_unique(array_map(function ($row) { return $row['w']['manifestUrl']; }, $rows)));
+  $get = $db->prepare('SELECT url, last_success_at FROM manifests WHERE url IN (' . implode(',', array_fill(0, count($urls), '?')) . ')');
+  $get->execute($urls);
+  foreach ($get->fetchAll() as $m) $seen[$m['url']] = $m['last_success_at'] === null ? null : (int) $m['last_success_at'];
+  return $seen;
+}
+
 function dir_world_result($w, $inboundFor, $failures) {
   return [
     'anchorType' => $w['anchorType'], 'domain' => $w['domain'], 'identityKey' => $w['identityKey'],
@@ -380,6 +391,7 @@ function dir_search_by_site($db, $scored, $inboundFor, $limit, $offset) {
   $rows = [];
   foreach ($page as $g) foreach ($g['worlds'] as $row) $rows[] = $row;
   $failures = dir_manifest_failures($db, $rows);
+  $lastSuccess = dir_manifest_last_success($db, $rows);
   $out = [];
   foreach ($page as $g) {
     $results = [];
@@ -392,10 +404,17 @@ function dir_search_by_site($db, $scored, $inboundFor, $limit, $offset) {
     }
     $stale = false;
     foreach ($results as $r) if ($r['stale']) $stale = true;
+    // The newest successful check among the manifests this site's worlds came from (UTC, to the second).
+    $seen = 0;
+    foreach ($g['worlds'] as $row) {
+      $t = $lastSuccess[$row['w']['manifestUrl']] ?? null;
+      if ($t !== null && $t > $seen) $seen = $t;
+    }
     $out[] = [
       'anchorType' => $g['anchorType'], 'domain' => $g['domain'], 'identityKey' => $g['identityKey'], 'ownerName' => $g['ownerName'],
       'worldCount' => count($g['worlds']), 'genres' => array_slice(array_map('strval', array_keys($genres)), 0, 5), 'scales' => array_map('strval', array_keys($scales)),
-      'inboundPortalCount' => $inboundFor($g['worlds'][0]['w']), 'stale' => $stale, 'worlds' => $results,
+      'inboundPortalCount' => $inboundFor($g['worlds'][0]['w']), 'stale' => $stale,
+      'lastSeenAt' => $seen ? gmdate('Y-m-d\TH:i:s\Z', $seen) : null, 'worlds' => $results,
     ];
   }
   return ['count' => count($ordered), 'worldCount' => count($scored), 'limit' => $limit, 'offset' => $offset, 'groups' => $out];

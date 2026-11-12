@@ -47,7 +47,7 @@ async function startDirectory({ impl = process.env.DIRECTORY_IMPL || 'node', por
     }, 1000);
   } else {
     fullEnv.PORT = String(port);
-    fullEnv.DIRECTORY_SNAPSHOT_FILE = path.join(dataDir, 'index.json');
+    if (!env.DIRECTORY_SNAPSHOT_FILE) fullEnv.DIRECTORY_SNAPSHOT_FILE = path.join(dataDir, 'index.json');
     base = 'http://127.0.0.1:' + port;
     child = spawn('node', [...nodeArgs, path.join(repo, 'directory-server', 'server.js')], { env: fullEnv, stdio: 'pipe' });
   }

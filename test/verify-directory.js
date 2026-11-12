@@ -148,6 +148,10 @@ async function main() {
     assert(submitRes.indexed === 1, 'expected the mutable manifest to index 1 world initially');
     const before = await fetch(DIRECTORY + '/search?domain=' + encodeURIComponent('127.0.0.1:' + mutable.port)).then((r) => r.json());
     assert(before.results[0].genre === 'genre-alpha', 'expected initial genre to be genre-alpha, got ' + before.results[0].genre);
+    // A first successful submission sets the site's last-seen time (UTC, to the second).
+    const groupedBy = (domain) => fetch(DIRECTORY + '/search?groupBy=site&domain=' + encodeURIComponent(domain)).then((r) => r.json()).then((j) => j.groups[0]);
+    const seenFirst = (await groupedBy('127.0.0.1:' + mutable.port)).lastSeenAt;
+    assert(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(seenFirst) && Math.abs(Date.now() - Date.parse(seenFirst)) < 60000, 'expected a submission to set lastSeenAt to about now, got ' + seenFirst);
 
     // Change the served manifest's genre without resubmitting — only the
     // background scheduler, not this test, should pick it up.
@@ -157,6 +161,9 @@ async function main() {
     const after = await fetch(DIRECTORY + '/search?domain=' + encodeURIComponent('127.0.0.1:' + mutable.port)).then((r) => r.json());
     assert(after.results[0].genre === 'genre-beta', 'expected the scheduler to have picked up the genre change to genre-beta, got ' + after.results[0].genre);
     console.log('PASS: scheduler re-crawled unattended and picked up the genre change');
+    const seenAfter = (await groupedBy('127.0.0.1:' + mutable.port)).lastSeenAt;
+    assert(Date.parse(seenAfter) > Date.parse(seenFirst), 'expected the scheduled crawl to move lastSeenAt forward: ' + seenFirst + ' -> ' + seenAfter);
+    console.log('PASS: a successful scheduled crawl updates lastSeenAt');
 
     // Now flip discoverable:false — the world should disappear from the
     // index entirely on the next crawl, not just show stale data.
@@ -206,6 +213,8 @@ async function main() {
   assert(grouped.groups.every((g) => g.worldCount === g.worlds.length) && grouped.groups.reduce((n, g) => n + g.worldCount, 0) === grouped.worldCount && grouped.worldCount === allResults.count, 'expected group counts to add up to the number of matching worlds');
   assert(grouped.groups.filter((g) => g.anchorType === 'domain').every((g) => typeof g.domain === 'string' && g.domain), 'expected every domain group to carry its domain');
   console.log('PASS: grouped search keeps key-anchored sites separate and the counts add up');
+  const keySeen = keyGroup.lastSeenAt;
+  assert(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(keySeen) && Math.abs(Date.now() - Date.parse(keySeen)) < 60000, 'expected the first successful submission to set lastSeenAt, got ' + keySeen);
 
   // Tamper: change the name in the SERVED manifest without re-signing.
   keyServer.state.manifest = { ...keyServer.state.manifest, worlds: [{ ...keyServer.state.manifest.worlds[0], name: 'Tampered Name' }] };
@@ -217,7 +226,40 @@ async function main() {
   assert(stillThere, 'expected the last-known-GOOD entry ("Key World") to remain indexed after a failed re-crawl, not be wiped');
   assert(!tamperedNotIndexed, 'expected the tampered content to never make it into the index at all');
   console.log('PASS: tampered key-anchored manifest rejected; prior good entry left untouched (cached, not wiped)');
+  // A failed crawl never moves the last-seen time; the next good one does.
+  const keyGroupAfterFail = (await fetch(DIRECTORY + '/search?groupBy=site&limit=100').then((r) => r.json())).groups.find((g) => g.identityKey === identityKey);
+  assert(keyGroupAfterFail && keyGroupAfterFail.lastSeenAt === keySeen, 'expected a failed crawl to leave lastSeenAt at ' + keySeen + ', got ' + (keyGroupAfterFail && keyGroupAfterFail.lastSeenAt));
+  await new Promise((r) => setTimeout(r, 1100));
+  keyServer.state.manifest = await buildSignedManifest('Key World');
+  const recovered = await fetch(DIRECTORY + '/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: keyUrl }) }).then((r) => r.json());
+  assert(recovered.indexed === 1, 'expected the good manifest to be accepted again, got ' + JSON.stringify(recovered));
+  const keyGroupRecovered = (await fetch(DIRECTORY + '/search?groupBy=site&limit=100').then((r) => r.json())).groups.find((g) => g.identityKey === identityKey);
+  assert(Date.parse(keyGroupRecovered.lastSeenAt) > Date.parse(keySeen), 'expected a good crawl after the failure to move lastSeenAt forward');
+  console.log('PASS: a failed crawl leaves lastSeenAt alone; the next successful one updates it');
   keyServer.server.close();
+
+  if (dir.impl === 'node') {
+    console.log('STEP 6: a snapshot from before lastSeenAt existed keeps its sites and dates the healthy ones');
+    const os = require('os');
+    const snapDir = fs.mkdtempSync(path.join(os.tmpdir(), 'directory-snapshot-'));
+    const snapFile = path.join(snapDir, 'index.json');
+    const later = Date.now() + 3600000;
+    const oldWorld = (domain) => ({ worldKey: `domain:${domain}:w`, anchorType: 'domain', domain, identityKey: null, worldId: 'w', name: 'Old World ' + domain, description: null, ownerName: null, genre: 'old', scale: 'room', capabilities: null, guestAccess: 'open', identityRequired: false, itemDropsAllowed: false, acceptedItemClasses: [], trustedIssuers: null, portalsRaw: [], manifestUrl: `https://${domain}/.well-known/spatial.json`, indexedAt: '2026-01-01T00:00:00.000Z' });
+    const oldManifest = (domain, status, failures) => ({ url: `https://${domain}/.well-known/spatial.json`, anchorType: 'domain', anchorKey: domain, submittedAt: '2026-01-01T00:00:00.000Z', lastCrawledAt: '2026-01-02T03:04:05.000Z', nextCrawlAt: later, status, consecutiveFailures: failures });
+    fs.writeFileSync(snapFile, JSON.stringify({ manifests: [oldManifest('healthy.example', 'ok', 0), oldManifest('failing.example', 'error', 2)], worlds: [oldWorld('healthy.example'), oldWorld('failing.example')] }));
+    const old = await startDirectory({ port: 8098, env: { DIRECTORY_ALLOW_LOCAL: '1', DIRECTORY_SNAPSHOT_FILE: snapFile } });
+    try {
+      const oldGroups = (await fetch(old.base + '/search?groupBy=site&limit=100').then((r) => r.json())).groups;
+      const byDomain = Object.fromEntries(oldGroups.map((g) => [g.domain, g]));
+      assert(oldGroups.length === 2 && byDomain['healthy.example'].worldCount === 1, 'expected both sites from the old snapshot to still be listed, got ' + JSON.stringify(oldGroups.map((g) => g.domain)));
+      assert(byDomain['healthy.example'].lastSeenAt === '2026-01-02T03:04:05Z', 'expected the healthy site to be last seen at its last crawl, got ' + byDomain['healthy.example'].lastSeenAt);
+      assert(byDomain['failing.example'].lastSeenAt === null, 'expected a site that was failing to have no last-seen time, got ' + byDomain['failing.example'].lastSeenAt);
+    } finally {
+      old.stop();
+      fs.rmSync(snapDir, { recursive: true, force: true });
+    }
+    console.log('PASS: an old snapshot loads unchanged, with lastSeenAt dated only where it is known');
+  }
   } finally {
     dir.stop();
     servers.forEach((srv) => srv.close());
