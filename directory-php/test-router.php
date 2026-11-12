@@ -3,6 +3,8 @@
 // the same clean-URL rule as atlas/directory/.htaccess and refuses the lib/ folder the way
 // lib/.htaccess does. Not part of the deployable bundle.
 $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+// Lets a test confirm which PHP is actually serving it.
+if ($uri === '/__php_version') { header('Content-Type: text/plain'); echo PHP_VERSION; return true; }
 $path = realpath(__DIR__ . $uri);
 if ($path !== false && strpos($uri, '/lib/') !== false) { http_response_code(403); echo 'Forbidden'; return true; }
 if ($uri !== '/' && !is_file(__DIR__ . $uri) && is_file(__DIR__ . $uri . '.php')) {

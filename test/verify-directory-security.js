@@ -179,6 +179,15 @@ async function main() {
     const page2 = await search(L, 'domain=' + encodeURIComponent(bulky.host) + '&limit=5&offset=5');
     check('offset pages through the results', page2.results.length === 5 && page2.results[0].worldId !== b.results[0].worldId && page2.offset === 5);
     check('limit is capped', (await search(L, 'limit=100000')).limit === 100);
+    const tied = track(await manifestServer((host) => ({
+      spec: 'domain-atlas/1.0', domain: host,
+      worlds: Array.from({ length: 40 }, (_, i) => world('t' + String(i).padStart(2, '0'), { name: 'Same name' }))
+    })));
+    await submit(L, tied.url);
+    const tiedAll = (await search(L, 'domain=' + encodeURIComponent(tied.host) + '&limit=100')).results.map((w) => w.worldId);
+    const tiedPaged = [];
+    for (let off = 0; off < 40; off += 7) tiedPaged.push(...(await search(L, 'domain=' + encodeURIComponent(tied.host) + '&limit=7&offset=' + off)).results.map((w) => w.worldId));
+    check('worlds that tie on name and rank come back in one fixed order, the same on every page', tiedAll.length === 40 && tiedAll.join() === [...tiedAll].sort().join() && tiedPaged.join() === tiedAll.join(), { first: tiedAll.slice(0, 5), paged: tiedPaged.slice(0, 5) });
 
     console.log('--- public mode: addresses a directory must never contact ---');
     const refused = [

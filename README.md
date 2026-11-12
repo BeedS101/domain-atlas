@@ -2002,6 +2002,8 @@ node test/verify-loadout-trading.js    # loadouts and resource mining
 node test/verify-directory.js          # directory service: crawl/index/rank, filters, free-text, key-anchored verification
 node test/verify-directory-security.js # directory hardening: spoofing, SSRF refusals, limits, rate limit, blocklist
 #   both accept DIRECTORY_IMPL=php to test directory-php/ instead of the Node service
+node test/verify-directory-rebinding.js # directory DNS rebinding (Node; fake lookups, no network)
+php test/verify-directory-rebinding.php # the same for directory-php/ (needs only php with curl)
 node test/verify-asset-cache.js        # gltf-mini's local GLB cache: fresh on first load, 304'd on repeat, re-fetched on real change
 node test/verify-identity-backup.js    # password identity lifecycle: onboarding, lock/unlock, export/import by password + seed phrase
 ```

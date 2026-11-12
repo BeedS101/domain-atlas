@@ -447,9 +447,9 @@ function search(params) {
     scored = candidates
       .map((w) => ({ w, matched: qTokens.filter((t) => tokenIndex.has(t) && tokenIndex.get(t).has(w.worldKey)).length }))
       .filter((r) => r.matched > 0)
-      .sort((a, b) => (b.matched - a.matched) || (inboundCountFor(b.w) - inboundCountFor(a.w)) || a.w.name.localeCompare(b.w.name));
+      .sort((a, b) => (b.matched - a.matched) || (inboundCountFor(b.w) - inboundCountFor(a.w)) || a.w.name.localeCompare(b.w.name) || (a.w.worldKey < b.w.worldKey ? -1 : a.w.worldKey > b.w.worldKey ? 1 : 0));
   } else {
-    scored = candidates.map((w) => ({ w })).sort((a, b) => (inboundCountFor(b.w) - inboundCountFor(a.w)) || a.w.name.localeCompare(b.w.name));
+    scored = candidates.map((w) => ({ w })).sort((a, b) => (inboundCountFor(b.w) - inboundCountFor(a.w)) || a.w.name.localeCompare(b.w.name) || (a.w.worldKey < b.w.worldKey ? -1 : a.w.worldKey > b.w.worldKey ? 1 : 0));
   }
   const limit = Math.min(Math.max(parseInt(params.limit, 10) || DEFAULT_LIMIT, 1), MAX_LIMIT);
   const offset = Math.max(parseInt(params.offset, 10) || 0, 0);

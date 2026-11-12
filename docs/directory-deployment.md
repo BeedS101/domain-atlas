@@ -137,13 +137,24 @@ node test/verify-directory.js                       # Node, self-contained
 DIRECTORY_IMPL=php node test/verify-directory.js    # PHP
 node test/verify-directory-security.js              # Node, about 70 checks
 DIRECTORY_IMPL=php node test/verify-directory-security.js
+node test/verify-directory-rebinding.js             # Node: DNS rebinding
+php test/verify-directory-rebinding.php             # PHP: DNS rebinding
 ```
 
 Each run starts its own throw-away directory and manifest servers on local
-ports. Not covered: a public name that resolves to a private address
-(DNS rebinding). The address-classification table and the URL refusals are
-tested; the resolve-and-pin step itself needs real DNS and has only been
-reviewed by reading.
+ports. The workflow `.github/workflows/directory.yml` runs the PHP versions
+of all of these on PHP 7.4, 8.1 and 8.3 (and the Node ones once), only when
+the directory or its tests change. A PHP run is refused unless the server
+process itself reports the expected PHP version (`DIRECTORY_EXPECT_PHP`), so
+a job cannot pass while testing a different PHP.
+
+The rebinding tests check that a public-looking name resolving to a private,
+loopback, link-local or mixed set of addresses is refused before any
+connection, and that the connection goes to the address that was checked
+(a changed second answer is never used). They use made-up lookup answers and
+make no request to any real domain. What they cannot show is the behaviour
+of a real resolver on a real host, so the first run on the test subdomain
+should include the checks in the Verification section above.
 
 ## Later ideas
 

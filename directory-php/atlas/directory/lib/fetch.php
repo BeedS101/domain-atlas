@@ -98,11 +98,13 @@ function dir_resolve($hostname) {
   return array_values(array_unique($ips));
 }
 
-// Returns the response body (a string) or throws a DirectoryException with a plain reason.
-function dir_fetch($parsed) {
+// Returns the response body (a string) or throws a DirectoryException with a plain reason. $resolver is for tests: a
+// function taking a host name and returning its addresses, used instead of the real lookup.
+function dir_fetch($parsed, $resolver = null) {
   $cfg = dir_config();
   if (!function_exists('curl_init')) throw new DirectoryException('this host has no curl extension, so manifests cannot be fetched');
-  $ips = dir_resolve($parsed['hostname']);
+  // The name is resolved once. The addresses checked below are the ones curl is told to connect to.
+  $ips = $resolver !== null ? $resolver($parsed['hostname']) : dir_resolve($parsed['hostname']);
   if (!$ips) throw new DirectoryException('host name did not resolve');
   if (!$cfg['allowLocal']) foreach ($ips as $ip) if (!dir_is_public_address($ip)) throw new DirectoryException('host resolves to a non-public address');
   usort($ips, function ($a, $b) { return (strpos($a, ':') === false ? 0 : 1) - (strpos($b, ':') === false ? 0 : 1); });

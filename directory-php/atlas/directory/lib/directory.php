@@ -257,7 +257,9 @@ function dir_search($params) {
     if ($a['matched'] !== null && $a['matched'] !== $b['matched']) return $b['matched'] - $a['matched'];
     $ia = $inboundFor($a['w']); $ib = $inboundFor($b['w']);
     if ($ia !== $ib) return $ib - $ia;
-    return strcasecmp($a['w']['name'], $b['w']['name']);
+    $byName = strcasecmp($a['w']['name'], $b['w']['name']);
+    // A last tie-break keeps the order total: PHP before 8.0 does not keep equal items in their order.
+    return $byName !== 0 ? $byName : strcmp($a['w']['worldKey'], $b['w']['worldKey']);
   });
 
   $limit = min(max((int) ($params['limit'] ?? 0) ?: $cfg['defaultLimit'], 1), $cfg['maxLimit']);
