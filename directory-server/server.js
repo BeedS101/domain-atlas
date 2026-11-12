@@ -90,6 +90,7 @@ async function verifyKeyAnchoredManifest(manifest) {
 // ---------- storage ----------
 const manifests = new Map(); // url -> crawl state
 const worlds = new Map();    // worldKey -> indexed fields
+const services = new Map(); // serviceKey -> an advertised service of one site
 let tokenIndex = new Map();  // token -> Set(worldKey)
 let inboundCounts = new Map(); // domain or key -> number of distinct other anchors linking to it
 
@@ -102,6 +103,9 @@ function loadSnapshot() {
       manifests.set(m.url, m);
     }
     for (const w of raw.worlds || []) worlds.set(w.worldKey, w);
+    for (const sv of raw.services || []) if (SERVICE_BY_KEY.has(sv.service)) services.set(sv.serviceKey, sv);
+    // A snapshot from before services were indexed: crawl every site again soon, so its services appear without waiting.
+    if (!Array.isArray(raw.services)) for (const m of manifests.values()) m.nextCrawlAt = Math.min(m.nextCrawlAt || 0, Date.now());
     console.log(`Loaded snapshot: ${manifests.size} manifest(s), ${worlds.size} world(s).`);
   } catch {
     // No snapshot yet, or it is corrupt: start empty. A directory can always be rebuilt by re-submitting.
@@ -110,7 +114,7 @@ function loadSnapshot() {
 
 // Written to a temporary file and renamed, so a crash mid-write never leaves a half-written index.
 function saveSnapshot() {
-  const doc = { manifests: [...manifests.values()], worlds: [...worlds.values()] };
+  const doc = { manifests: [...manifests.values()], worlds: [...worlds.values()], services: [...services.values()] };
   const tmp = SNAPSHOT_FILE + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(doc, null, 2));
   fs.renameSync(tmp, SNAPSHOT_FILE);
@@ -280,6 +284,72 @@ function effectivePolicyField(manifest, world, field) {
   return policy[field] !== undefined ? policy[field] : manifest[field];
 }
 
+// ---------- advertised services ----------
+// A domain says what it offers with top-level declarations in its manifest, next to `worlds`: `true`, or
+// { "enabled": true, "url": "https://..." } for a service with a public page. A declaration only advertises: it does
+// not show the service is running or trustworthy, and the directory never contacts a service URL.
+// This table is the whole list the directory knows. To list a new module, add a line here and the same line to
+// SERVICE_TYPES in directory-php/atlas/directory/lib/directory.php (test/verify-directory-services.js compares the two).
+// `aliases` are alternative spellings accepted for the same service; a declaration under the main name wins.
+const SERVICE_CATEGORIES = ['communication', 'assets', 'ledger', 'trading', 'directory', 'other'];
+const SERVICE_TYPES = [
+  { key: 'postOffice', label: 'Post Office', category: 'communication' },
+  { key: 'mailRelay', label: 'Mail Relay', category: 'communication' },
+  { key: 'chat', label: 'Site chat', category: 'communication' },
+  { key: 'inWorldChat', label: 'In-world chat', category: 'communication' },
+  { key: 'voiceCalling', label: 'Voice calling', category: 'communication' },
+  { key: 'assetStudio', label: 'Asset Studio', category: 'assets' },
+  { key: 'chainLabs', label: 'Chain Labs', category: 'ledger', aliases: ['chainlabs'] },
+  { key: 'scanner', label: 'Scanner', category: 'ledger' },
+  { key: 'tradingStation', label: 'Trading station', category: 'trading', aliases: ['trading'] },
+  { key: 'directory', label: 'Directory', category: 'directory' },
+  { key: 'calendar', label: 'Calendar', category: 'other' }
+];
+const SERVICE_BY_KEY = new Map(SERVICE_TYPES.map((t, i) => [t.key, { ...t, order: i }]));
+const SITE_CATEGORIES = new Set(['all', 'worlds', ...SERVICE_CATEGORIES]);
+
+// The one address shape a service may link to: https, a real host name (no address, no login details, no fragment) on
+// the manifest's own domain or a subdomain of it, and only URL-safe characters. Anything else is dropped, and the
+// service is listed without a link. A key-anchored manifest has no verified host, so its services never get one.
+const SERVICE_URL_RE = /^https:\/\/((?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z][a-zA-Z0-9-]{0,61}[a-zA-Z0-9])(?::([0-9]{1,5}))?(\/[A-Za-z0-9._~!$&'()*+,;=:@%\/-]*)?(\?[A-Za-z0-9._~!$&'()*+,;=:@%\/?-]*)?$/;
+function safeServiceUrl(value, anchorType, anchorKey) {
+  if (anchorType !== 'domain' || typeof value !== 'string' || value.length > 300) return null;
+  const m = SERVICE_URL_RE.exec(value);
+  if (!m) return null;
+  const host = m[1].toLowerCase();
+  if (host.length > 253) return null;
+  if (m[2] !== undefined && (Number(m[2]) < 1 || Number(m[2]) > 65535)) return null;
+  const domainHost = String(anchorKey).replace(/:\d+$/, '');
+  if (host !== domainHost && !host.endsWith('.' + domainHost)) return null;
+  return 'https://' + host + (m[2] !== undefined ? ':' + Number(m[2]) : '') + (m[3] || '/') + (m[4] || '');
+}
+
+function readServices(manifest, anchorType, anchorKey) {
+  const found = [];
+  for (const type of SERVICE_TYPES) {
+    const name = [type.key, ...(type.aliases || [])].find((n) => Object.prototype.hasOwnProperty.call(manifest, n));
+    if (name === undefined) continue;
+    const declared = manifest[name];
+    if (declared === true) found.push({ service: type.key, url: null });
+    else if (declared && typeof declared === 'object' && !Array.isArray(declared) && declared.enabled === true) found.push({ service: type.key, url: safeServiceUrl(declared.url, anchorType, anchorKey) });
+  }
+  return found;
+}
+
+function indexService(manifest, found, anchorType, anchorKey, pinnedIdentityKey, url) {
+  return {
+    serviceKey: `${anchorType}:${anchorKey}:${found.service}`,
+    anchorType,
+    domain: anchorType === 'domain' ? anchorKey : null,
+    identityKey: anchorType === 'key' ? anchorKey : pinnedIdentityKey,
+    service: found.service,
+    url: found.url,
+    ownerName: str(manifest.owner && manifest.owner.name, 120),
+    manifestUrl: url,
+    indexedAt: new Date().toISOString()
+  };
+}
+
 function indexWorld(manifest, world, anchorType, anchorKey, pinnedIdentityKey, url) {
   const policy = world.policy || {};
   const profile = world.profile || {};
@@ -356,6 +426,17 @@ async function crawlOne(url) {
       indexed++;
     }
 
+    // The same for services: what the manifest no longer advertises goes, and what it advertises now is indexed.
+    for (const [key, sv] of services) {
+      if (sv.anchorType === anchorType && anchorOf(sv) === anchorKey) services.delete(key);
+    }
+    let advertised = 0;
+    for (const found of readServices(manifest, anchorType, anchorKey)) {
+      const entry = indexService(manifest, found, anchorType, anchorKey, pinnedIdentityKey, url);
+      services.set(entry.serviceKey, entry);
+      advertised++;
+    }
+
     manifests.set(url, {
       ...(record || { url, submittedAt: new Date().toISOString() }),
       url,
@@ -372,7 +453,7 @@ async function crawlOne(url) {
 
     rebuildTokenIndex();
     rebuildLinkGraph();
-    return { ok: true, worldsIndexed: indexed };
+    return { ok: true, worldsIndexed: indexed, servicesIndexed: advertised };
   } catch (err) {
     const failures = ((record && record.consecutiveFailures) || 0) + 1;
     const firstTime = !record || !record.lastCrawledAt || record.status === 'pending';
@@ -401,6 +482,9 @@ function dropManifest(url) {
   if (record && record.anchorKey) {
     for (const [key, w] of worlds) {
       if (w.manifestUrl === url) worlds.delete(key);
+    }
+    for (const [key, sv] of services) {
+      if (sv.manifestUrl === url) services.delete(key);
     }
     rebuildTokenIndex();
     rebuildLinkGraph();
@@ -445,7 +529,10 @@ function matchesFilters(w, f) {
 }
 
 function search(params) {
-  const candidates = [...worlds.values()].filter((w) => matchesFilters(w, params));
+  const bySite = params.groupBy === 'site';
+  const category = bySite && SITE_CATEGORIES.has(params.category) ? params.category : 'all';
+  // groupBy=site&category=<a kind of service> lists sites by what they advertise, so no world is considered at all.
+  const candidates = bySite && category !== 'all' && category !== 'worlds' ? [] : [...worlds.values()].filter((w) => matchesFilters(w, params));
   let scored;
   if (params.q && params.q.trim()) {
     const qTokens = tokenize(params.q);
@@ -458,7 +545,7 @@ function search(params) {
   }
   const limit = Math.min(Math.max(parseInt(params.limit, 10) || DEFAULT_LIMIT, 1), MAX_LIMIT);
   const offset = Math.max(parseInt(params.offset, 10) || 0, 0);
-  if (params.groupBy === 'site') return searchBySite(scored, limit, offset);
+  if (bySite) return searchBySite(params, category, scored, limit, offset);
   const page = scored.slice(offset, offset + limit).map(({ w }) => worldResult(w));
   return { count: scored.length, limit, offset, results: page };
 }
@@ -484,41 +571,76 @@ function worldResult(w) {
     stale: !!(m && m.consecutiveFailures >= STALE_AFTER_FAILURES)
   };
 }
+// The advertised services that match a groupBy=site search. category=worlds has none. A world-only filter (genre, scale,
+// combat, identityRequired) says nothing about services, so with category=all it leaves them out, and with a service
+// category it is ignored. domain, anchorType and q apply to services as they do to worlds (q: the site's domain, the
+// service's name or its category).
+function matchingServices(params, category) {
+  if (category === 'worlds') return [];
+  const worldOnly = !!(params.genre || params.scale || params.combat || params.identityRequired === 'true' || params.identityRequired === 'false');
+  if (category === 'all' && worldOnly) return [];
+  const qTokens = params.q && params.q.trim() ? tokenize(params.q) : null;
+  const out = [];
+  for (const sv of services.values()) {
+    const type = SERVICE_BY_KEY.get(sv.service);
+    if (!type || (category !== 'all' && type.category !== category)) continue;
+    if (params.domain && sv.domain !== normalizeHost(params.domain)) continue;
+    if (params.anchorType && sv.anchorType !== params.anchorType) continue;
+    let matched = 0;
+    if (qTokens) {
+      const have = new Set([...tokenize(sv.domain || ''), ...tokenize(type.label), ...tokenize(type.key), ...tokenize(type.category)]);
+      matched = qTokens.filter((t) => have.has(t)).length;
+      if (!matched) continue;
+    }
+    out.push({ sv, type, matched });
+  }
+  return out;
+}
+
 // groupBy=site: the same matches, grouped under the site that published them (its domain, or for a key-anchored manifest its
-// verified identity key). Groups are paged, not worlds, and worldCount is the number of matching worlds in all groups, so
-// the counts stay right however many pages there are.
-function searchBySite(scored, limit, offset) {
+// verified identity key). A site appears when it has a matching world or a matching advertised service. Groups are paged, not
+// worlds, and worldCount and serviceCount are the numbers of matches in all groups, so the counts stay right however many pages
+// there are.
+function searchBySite(params, category, scored, limit, offset) {
   const groups = new Map();
-  for (const { w, matched } of scored) {
-    const anchor = anchorOf(w);
+  const groupFor = (item, matched) => {
+    const anchor = anchorOf(item);
     let g = groups.get(anchor);
     if (!g) {
-      g = { anchorType: w.anchorType, domain: w.domain, identityKey: w.identityKey, ownerName: w.ownerName, anchor, matched: matched || 0, worlds: [] };
+      g = { anchorType: item.anchorType, domain: item.domain, identityKey: item.identityKey, ownerName: item.ownerName, anchor, ref: item, matched: 0, worlds: [], services: [] };
       groups.set(anchor, g);
     }
-    if (!g.identityKey && w.identityKey) g.identityKey = w.identityKey;
-    if (!g.ownerName && w.ownerName) g.ownerName = w.ownerName;
+    if (!g.identityKey && item.identityKey) g.identityKey = item.identityKey;
+    if (!g.ownerName && item.ownerName) g.ownerName = item.ownerName;
     g.matched = Math.max(g.matched, matched || 0);
-    g.worlds.push(w);
-  }
-  const ordered = [...groups.values()].sort((a, b) => (b.matched - a.matched) || (inboundCountFor(b.worlds[0]) - inboundCountFor(a.worlds[0])) || a.anchor.toLowerCase().localeCompare(b.anchor.toLowerCase()) || (a.anchor < b.anchor ? -1 : a.anchor > b.anchor ? 1 : 0));
+    return g;
+  };
+  for (const { w, matched } of scored) groupFor(w, matched).worlds.push(w);
+  const serviceMatches = matchingServices(params, category);
+  for (const { sv, type, matched } of serviceMatches) groupFor(sv, matched).services.push({ sv, type });
+  const ordered = [...groups.values()].sort((a, b) => (b.matched - a.matched) || (inboundCountFor(b.ref) - inboundCountFor(a.ref)) || a.anchor.toLowerCase().localeCompare(b.anchor.toLowerCase()) || (a.anchor < b.anchor ? -1 : a.anchor > b.anchor ? 1 : 0));
   const page = ordered.slice(offset, offset + limit).map((g) => {
     const results = g.worlds.map(worldResult);
     const distinct = (field) => [...new Set(g.worlds.map((w) => w[field]).filter(Boolean))];
-    // The newest successful check among the manifests this site's worlds came from (UTC, to the second).
+    g.services.sort((a, b) => SERVICE_BY_KEY.get(a.sv.service).order - SERVICE_BY_KEY.get(b.sv.service).order);
+    // The newest successful check among the manifests this site's worlds and services came from (UTC, to the second).
     let seen = 0;
-    for (const w of g.worlds) {
-      const t = Date.parse((manifests.get(w.manifestUrl) || {}).lastSuccessAt);
+    let stale = results.some((r) => r.stale);
+    for (const url of new Set([...g.worlds.map((w) => w.manifestUrl), ...g.services.map(({ sv }) => sv.manifestUrl)])) {
+      const m = manifests.get(url) || {};
+      const t = Date.parse(m.lastSuccessAt);
       if (t > seen) seen = t;
+      if (m.consecutiveFailures >= STALE_AFTER_FAILURES) stale = true;
     }
     return {
       anchorType: g.anchorType, domain: g.domain, identityKey: g.identityKey, ownerName: g.ownerName,
-      worldCount: g.worlds.length, genres: distinct('genre').slice(0, 5), scales: distinct('scale'),
-      inboundPortalCount: inboundCountFor(g.worlds[0]), stale: results.some((r) => r.stale),
-      lastSeenAt: seen ? new Date(seen).toISOString().replace(/\.\d+Z$/, 'Z') : null, worlds: results
+      worldCount: g.worlds.length, serviceCount: g.services.length, genres: distinct('genre').slice(0, 5), scales: distinct('scale'),
+      inboundPortalCount: inboundCountFor(g.ref), stale,
+      lastSeenAt: seen ? new Date(seen).toISOString().replace(/\.\d+Z$/, 'Z') : null, worlds: results,
+      services: g.services.map(({ sv, type }) => ({ key: type.key, label: type.label, category: type.category, url: sv.url || null }))
     };
   });
-  return { count: ordered.length, worldCount: scored.length, limit, offset, groups: page };
+  return { count: ordered.length, worldCount: scored.length, serviceCount: serviceMatches.length, limit, offset, groups: page };
 }
 
 // ---------- HTTP layer ----------
@@ -596,7 +718,7 @@ async function handleSubmit(req, res) {
   const result = await crawlShared(manifestUrl);
   saveSnapshot();
   if (!result.ok) return sendJson(res, 422, { error: result.error });
-  return sendJson(res, 200, { indexed: result.worldsIndexed, manifest: manifestUrl });
+  return sendJson(res, 200, { indexed: result.worldsIndexed, services: result.servicesIndexed, manifest: manifestUrl });
 }
 
 async function main() {
@@ -616,12 +738,12 @@ async function main() {
         const q = url.searchParams;
         return sendJson(res, 200, search({
           q: (q.get('q') || '').slice(0, 200), genre: q.get('genre'), scale: q.get('scale'), combat: q.get('combat'), domain: q.get('domain'),
-          anchorType: q.get('anchorType'), identityRequired: q.get('identityRequired'), limit: q.get('limit'), offset: q.get('offset'), groupBy: q.get('groupBy')
+          anchorType: q.get('anchorType'), identityRequired: q.get('identityRequired'), limit: q.get('limit'), offset: q.get('offset'), groupBy: q.get('groupBy'), category: q.get('category')
         }));
       }
 
       if (req.method === 'GET' && url.pathname === '/stats') {
-        return sendJson(res, 200, { manifestsTracked: manifests.size, worldsIndexed: worlds.size, crawlIntervalMs: CRAWL_INTERVAL_MS });
+        return sendJson(res, 200, { manifestsTracked: manifests.size, worldsIndexed: worlds.size, servicesIndexed: services.size, crawlIntervalMs: CRAWL_INTERVAL_MS });
       }
 
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return serveIndex(res);
@@ -647,4 +769,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { isPublicAddress, checkUrl, canonicalize };
+module.exports = { isPublicAddress, checkUrl, canonicalize, SERVICE_TYPES, SERVICE_CATEGORIES, readServices, safeServiceUrl };

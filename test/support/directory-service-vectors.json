@@ -1,0 +1,664 @@
+{
+ "urlCases": [
+  {
+   "note": "a plain https page on the domain",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com/chain-labs/index.html",
+   "expect": "https://example.com/chain-labs/index.html"
+  },
+  {
+   "note": "the host is lower-cased, the path is not touched",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://EXAMPLE.com/Path",
+   "expect": "https://example.com/Path"
+  },
+  {
+   "note": "a subdomain of the domain",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://studio.example.com/",
+   "expect": "https://studio.example.com/"
+  },
+  {
+   "note": "a port",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com:8443/x",
+   "expect": "https://example.com:8443/x"
+  },
+  {
+   "note": "port 0",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com:0/x",
+   "expect": null
+  },
+  {
+   "note": "port out of range",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com:99999/x",
+   "expect": null
+  },
+  {
+   "note": "no path becomes /",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com",
+   "expect": "https://example.com/"
+  },
+  {
+   "note": "a query",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com/a?b=1&c=%20",
+   "expect": "https://example.com/a?b=1&c=%20"
+  },
+  {
+   "note": "@ inside the path is fine",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com/a@b",
+   "expect": "https://example.com/a@b"
+  },
+  {
+   "note": "a domain with a port: the host is what counts",
+   "anchorType": "domain",
+   "anchorKey": "example.com:8443",
+   "url": "https://example.com/x",
+   "expect": "https://example.com/x"
+  },
+  {
+   "note": "another domain",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.org/",
+   "expect": null
+  },
+  {
+   "note": "a host that only ends the same way",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://notexample.com/",
+   "expect": null
+  },
+  {
+   "note": "the domain as a prefix of another host",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com.evil.net/",
+   "expect": null
+  },
+  {
+   "note": "the domain inside a path",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://evil.net/https://example.com/",
+   "expect": null
+  },
+  {
+   "note": "not https",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "http://example.com/",
+   "expect": null
+  },
+  {
+   "note": "scheme in capitals",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "HTTPS://example.com/",
+   "expect": null
+  },
+  {
+   "note": "javascript:",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "javascript:alert(1)",
+   "expect": null
+  },
+  {
+   "note": "data:",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "data:text/html,<script>alert(1)</script>",
+   "expect": null
+  },
+  {
+   "note": "ftp:",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "ftp://example.com/",
+   "expect": null
+  },
+  {
+   "note": "scheme-relative",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "//example.com/",
+   "expect": null
+  },
+  {
+   "note": "relative",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "/relative/path",
+   "expect": null
+  },
+  {
+   "note": "login name",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://user@example.com/",
+   "expect": null
+  },
+  {
+   "note": "login name and password",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://user:pw@example.com/",
+   "expect": null
+  },
+  {
+   "note": "fragment",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com/#frag",
+   "expect": null
+  },
+  {
+   "note": "backslash",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com\\@evil.net/",
+   "expect": null
+  },
+  {
+   "note": "space",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com/a b",
+   "expect": null
+  },
+  {
+   "note": "newline",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com/a\nb",
+   "expect": null
+  },
+  {
+   "note": "quote and angle brackets",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com/\"><script>",
+   "expect": null
+  },
+  {
+   "note": "trailing dot",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com./",
+   "expect": null
+  },
+  {
+   "note": "non-ASCII host",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://exaämple.com/",
+   "expect": null
+  },
+  {
+   "note": "an address, even when it is the domain itself",
+   "anchorType": "domain",
+   "anchorKey": "127.0.0.1",
+   "url": "https://127.0.0.1/",
+   "expect": null
+  },
+  {
+   "note": "an IPv6 address",
+   "anchorType": "domain",
+   "anchorKey": "127.0.0.1",
+   "url": "https://[::1]/",
+   "expect": null
+  },
+  {
+   "note": "a name with no dot",
+   "anchorType": "domain",
+   "anchorKey": "localhost",
+   "url": "https://localhost/",
+   "expect": null
+  },
+  {
+   "note": "longer than 300 characters",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "expect": null
+  },
+  {
+   "note": "empty",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": "",
+   "expect": null
+  },
+  {
+   "note": "null",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": null,
+   "expect": null
+  },
+  {
+   "note": "a number",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": 5,
+   "expect": null
+  },
+  {
+   "note": "an object",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "url": {
+    "a": 1
+   },
+   "expect": null
+  },
+  {
+   "note": "key-anchored: never a link",
+   "anchorType": "key",
+   "anchorKey": "AbCdEf",
+   "url": "https://example.com/x",
+   "expect": null
+  },
+  {
+   "note": "key-anchored: not even on a look-alike host",
+   "anchorType": "key",
+   "anchorKey": "AbCdEf",
+   "url": "https://abcdef.example.com/x",
+   "expect": null
+  }
+ ],
+ "declarationCases": [
+  {
+   "note": "no declarations at all (an existing world-only manifest)",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "spec": "domain-atlas/1.0",
+    "domain": "example.com",
+    "worlds": [
+     {
+      "id": "a"
+     }
+    ]
+   },
+   "expect": []
+  },
+  {
+   "note": "existing boolean declarations",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "postOffice": true,
+    "chat": true,
+    "calendar": true,
+    "tradingStation": true
+   },
+   "expect": [
+    {
+     "service": "postOffice",
+     "url": null
+    },
+    {
+     "service": "chat",
+     "url": null
+    },
+    {
+     "service": "tradingStation",
+     "url": null
+    },
+    {
+     "service": "calendar",
+     "url": null
+    }
+   ]
+  },
+  {
+   "note": "false and null advertise nothing",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "postOffice": false,
+    "chat": null,
+    "calendar": false
+   },
+   "expect": []
+  },
+  {
+   "note": "only true counts: 1, strings and lists do not",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "postOffice": 1,
+    "chat": "yes",
+    "calendar": "true",
+    "mailRelay": [
+     true
+    ],
+    "scanner": [
+     "x"
+    ]
+   },
+   "expect": []
+  },
+  {
+   "note": "object style with a url",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "assetStudio": {
+     "enabled": true,
+     "url": "https://example.com/atlas/studio/"
+    }
+   },
+   "expect": [
+    {
+     "service": "assetStudio",
+     "url": "https://example.com/atlas/studio/"
+    }
+   ]
+  },
+  {
+   "note": "object style without a url",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "chainLabs": {
+     "enabled": true
+    }
+   },
+   "expect": [
+    {
+     "service": "chainLabs",
+     "url": null
+    }
+   ]
+  },
+  {
+   "note": "an object that is not enabled",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "scanner": {
+     "enabled": false,
+     "url": "https://example.com/s"
+    },
+    "directory": {
+     "url": "https://example.com/d"
+    },
+    "assetStudio": {
+     "enabled": "true",
+     "url": "https://example.com/a"
+    },
+    "calendar": {}
+   },
+   "expect": []
+  },
+  {
+   "note": "an unsafe url drops the link, not the service",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "scanner": {
+     "enabled": true,
+     "url": "javascript:alert(1)"
+    },
+    "assetStudio": {
+     "enabled": true,
+     "url": "https://evil.net/x"
+    }
+   },
+   "expect": [
+    {
+     "service": "assetStudio",
+     "url": null
+    },
+    {
+     "service": "scanner",
+     "url": null
+    }
+   ]
+  },
+  {
+   "note": "aliases are accepted",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "chainlabs": true,
+    "trading": {
+     "enabled": true,
+     "url": "https://example.com/m"
+    }
+   },
+   "expect": [
+    {
+     "service": "chainLabs",
+     "url": null
+    },
+    {
+     "service": "tradingStation",
+     "url": "https://example.com/m"
+    }
+   ]
+  },
+  {
+   "note": "the main name wins over its alias",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "chainLabs": false,
+    "chainlabs": true,
+    "tradingStation": true,
+    "trading": false
+   },
+   "expect": [
+    {
+     "service": "tradingStation",
+     "url": null
+    }
+   ]
+  },
+  {
+   "note": "fields that are not services are ignored",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "emailTickets": {
+     "intakeAddress": "tickets@example.com"
+    },
+    "fileTransfer": {
+     "classes": [
+      "atlas.wearable"
+     ]
+    },
+    "presence": true,
+    "owner": {
+     "name": "x"
+    },
+    "defaultWorld": "a",
+    "somethingNew": true,
+    "constructor": true
+   },
+   "expect": []
+  },
+  {
+   "note": "the full example, in the order services are listed",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "spec": "domain-atlas/1.0",
+    "domain": "example.com",
+    "postOffice": true,
+    "mailRelay": true,
+    "chat": true,
+    "calendar": true,
+    "chainlabs": {
+     "enabled": true,
+     "url": "https://example.com/chain-labs/index.html"
+    },
+    "scanner": {
+     "enabled": true,
+     "url": "https://example.com/chain-labs/scan35.html"
+    },
+    "assetStudio": {
+     "enabled": true,
+     "url": "https://example.com/atlas/studio/"
+    },
+    "trading": {
+     "enabled": true,
+     "url": "https://example.com/market/"
+    },
+    "directory": {
+     "enabled": true,
+     "url": "https://example.com/atlas/directory/index.html"
+    },
+    "voiceCalling": true,
+    "inWorldChat": true,
+    "worlds": []
+   },
+   "expect": [
+    {
+     "service": "postOffice",
+     "url": null
+    },
+    {
+     "service": "mailRelay",
+     "url": null
+    },
+    {
+     "service": "chat",
+     "url": null
+    },
+    {
+     "service": "inWorldChat",
+     "url": null
+    },
+    {
+     "service": "voiceCalling",
+     "url": null
+    },
+    {
+     "service": "assetStudio",
+     "url": "https://example.com/atlas/studio/"
+    },
+    {
+     "service": "chainLabs",
+     "url": "https://example.com/chain-labs/index.html"
+    },
+    {
+     "service": "scanner",
+     "url": "https://example.com/chain-labs/scan35.html"
+    },
+    {
+     "service": "tradingStation",
+     "url": "https://example.com/market/"
+    },
+    {
+     "service": "directory",
+     "url": "https://example.com/atlas/directory/index.html"
+    },
+    {
+     "service": "calendar",
+     "url": null
+    }
+   ]
+  },
+  {
+   "note": "a key-anchored manifest lists its services but never links them",
+   "anchorType": "key",
+   "anchorKey": "AbCdEf",
+   "manifest": {
+    "spec": "domain-atlas/1.0",
+    "domain": "example.com",
+    "postOffice": true,
+    "mailRelay": true,
+    "chat": true,
+    "calendar": true,
+    "chainlabs": {
+     "enabled": true,
+     "url": "https://example.com/chain-labs/index.html"
+    },
+    "scanner": {
+     "enabled": true,
+     "url": "https://example.com/chain-labs/scan35.html"
+    },
+    "assetStudio": {
+     "enabled": true,
+     "url": "https://example.com/atlas/studio/"
+    },
+    "trading": {
+     "enabled": true,
+     "url": "https://example.com/market/"
+    },
+    "directory": {
+     "enabled": true,
+     "url": "https://example.com/atlas/directory/index.html"
+    },
+    "voiceCalling": true,
+    "inWorldChat": true,
+    "worlds": []
+   },
+   "expect": [
+    {
+     "service": "postOffice",
+     "url": null
+    },
+    {
+     "service": "mailRelay",
+     "url": null
+    },
+    {
+     "service": "chat",
+     "url": null
+    },
+    {
+     "service": "inWorldChat",
+     "url": null
+    },
+    {
+     "service": "voiceCalling",
+     "url": null
+    },
+    {
+     "service": "assetStudio",
+     "url": null
+    },
+    {
+     "service": "chainLabs",
+     "url": null
+    },
+    {
+     "service": "scanner",
+     "url": null
+    },
+    {
+     "service": "tradingStation",
+     "url": null
+    },
+    {
+     "service": "directory",
+     "url": null
+    },
+    {
+     "service": "calendar",
+     "url": null
+    }
+   ]
+  }
+ ]
+}

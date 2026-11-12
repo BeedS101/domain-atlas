@@ -1,10 +1,11 @@
 <?php
 // The PHP directory's SQLite storage (directory-php/atlas/directory/lib/store.php), tested directly:
-//   - the schema is the three tables and nothing else, in a file of its own, with no JSON index files
+//   - the schema is the four tables (manifests, worlds, services, submit_limits) and nothing else, in a file of its own, with no JSON index files
 //   - the database is kept outside the web root: a data directory inside the document root is refused, and a missing one is found
 //     next to the web root the way a cPanel account lays it out
 //   - every change is one transaction: a failure part way leaves nothing behind
 //   - values are bound, never pasted into SQL: hostile names and search terms are stored and matched as plain text
+//   - a service goes with its manifest
 //   - the last successful fetch time is kept through a failed crawl, and an older database gets its column added in place
 //   - removing a manifest removes its worlds; the rate limit counts per hashed client, forgets after an hour, and holds when
 //     many requests arrive at once (separate PHP processes sharing the one database file)
@@ -38,8 +39,10 @@ if ($mode !== 'main') {
       $columns = [];
       foreach ($db->query('PRAGMA table_info(manifests)')->fetchAll() as $c) $columns[] = $c['name'];
       echo json_encode(['version' => (int) $db->query('PRAGMA user_version')->fetchColumn(), 'columns' => $columns,
-        'manifests' => $db->query('SELECT url, status, last_crawled_at, last_success_at FROM manifests ORDER BY url')->fetchAll(),
-        'worlds' => (int) $db->query('SELECT COUNT(*) FROM worlds')->fetchColumn()]) . "\n";
+        'manifests' => $db->query('SELECT url, status, last_crawled_at, last_success_at, next_crawl_at FROM manifests ORDER BY url')->fetchAll(),
+        'worlds' => (int) $db->query('SELECT COUNT(*) FROM worlds')->fetchColumn(),
+        'serviceTable' => (bool) $db->query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'services'")->fetchColumn(),
+        'services' => (int) $db->query('SELECT COUNT(*) FROM services')->fetchColumn()]) . "\n";
     }
     elseif ($mode === 'datadir') { echo dir_data_dir() . "\n"; }
     exit(0);
@@ -107,10 +110,10 @@ require_once $repoLib . '/bootstrap.php';
 
 try {
   // ----- schema -----
-  echo "--- one database of three tables, in a folder of its own ---\n";
+  echo "--- one database of four tables, in a folder of its own ---\n";
   $db = dir_db();
   $tables = $db->query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")->fetchAll(PDO::FETCH_COLUMN);
-  check('the tables are manifests, submit_limits and worlds, and nothing else', $tables === ['manifests', 'submit_limits', 'worlds'], $tables);
+  check('the tables are manifests, services, submit_limits and worlds, and nothing else', $tables === ['manifests', 'services', 'submit_limits', 'worlds'], $tables);
   check('foreign keys are enforced', (int) $db->query('PRAGMA foreign_keys')->fetchColumn() === 1);
   check('the schema version is recorded', (int) $db->query('PRAGMA user_version')->fetchColumn() === DIRECTORY_SCHEMA_VERSION);
   $file = $data . '/atlas-directory.sqlite';
@@ -213,6 +216,18 @@ try {
   foreach ($answers as $a) { if ($a[0] !== 0) $bad++; elseif ($a[1] === '1') $accepted++; }
   check('fourteen submissions at once into a directory with room for nine: exactly nine are tracked', $bad === 0 && $accepted === 9 && dir_manifest_count() === 9, ['accepted' => $accepted, 'errors' => $bad, 'rows' => dir_manifest_count()]);
 
+  // ----- advertised services -----
+  echo "--- services go with their manifest ---\n";
+  dir_tx(function ($db) {
+    $db->exec("INSERT INTO manifests(url, status, submitted_at, next_crawl_at) VALUES('https://svc.example/x', 'ok', 1, 1)");
+    $db->exec("INSERT INTO services(service_key, manifest_url, anchor_type, anchor_key, domain, service, url, indexed_at) VALUES('domain:svc.example:postOffice', 'https://svc.example/x', 'domain', 'svc.example', 'svc.example', 'postOffice', NULL, 1)");
+  });
+  check('a service is stored with its manifest', dir_service_count() === 1);
+  try { dir_db()->exec("INSERT INTO services(service_key, manifest_url, anchor_type, anchor_key, service, indexed_at) VALUES('k', 'https://nobody.example/x', 'domain', 'nobody.example', 'postOffice', 1)"); $orphan = true; } catch (PDOException $e) { $orphan = false; }
+  check('a service cannot exist without its manifest', $orphan === false);
+  dir_drop_manifest('https://svc.example/x');
+  check('removing a manifest removes its services', dir_service_count() === 0);
+
   // ----- last-seen time -----
   echo "--- when a manifest was last fetched successfully ---\n";
   dir_tx(function ($db) {
@@ -242,10 +257,30 @@ try {
   foreach ((array) ($m['manifests'] ?? []) as $r) $byUrl[$r['url']] = $r;
   check('an old database gains the column and the new schema version', $code === 0 && in_array('last_success_at', $m['columns'], true) && $m['version'] === DIRECTORY_SCHEMA_VERSION, $out);
   check('its manifests and indexed worlds are all still there', count($byUrl) === 2 && $m['worlds'] === 1, $out);
+  check('it gains the services table, empty', $m['services'] === 0 && $m['serviceTable'] === true, $out);
+  check('a site that was crawled fine is due for a crawl at once, so its services appear soon', (int) $byUrl['https://good.example/x']['next_crawl_at'] <= time() && (int) $byUrl['https://down.example/x']['next_crawl_at'] === 9000, $byUrl);
   check('a site whose last crawl worked is last seen at that crawl', (int) $byUrl['https://good.example/x']['last_success_at'] === 5000, $byUrl);
   check('one that was failing has no known time rather than a made-up one', $byUrl['https://down.example/x']['last_success_at'] === null, $byUrl);
   [$code, $again] = child(['migrate'], $env);
   check('opening it again changes nothing', $code === 0 && $again === $out, $again);
+
+  // The database the live directory has now (schema version 2, with last_success_at) gets the services table the same way.
+  $v2Data = $base . '/v2-data';
+  mkdir($v2Data);
+  $v2 = new PDO('sqlite:' . $v2Data . '/atlas-directory.sqlite', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+  $v2->exec('CREATE TABLE manifests (url TEXT PRIMARY KEY, anchor_type TEXT, anchor_key TEXT, status TEXT NOT NULL, submitted_at INTEGER NOT NULL, last_crawled_at INTEGER, last_success_at INTEGER, next_crawl_at INTEGER NOT NULL, consecutive_failures INTEGER NOT NULL DEFAULT 0, last_error TEXT, manifest_updated TEXT)');
+  $v2->exec('CREATE TABLE worlds (world_key TEXT PRIMARY KEY, manifest_url TEXT NOT NULL REFERENCES manifests(url) ON DELETE CASCADE, anchor_type TEXT NOT NULL, anchor_key TEXT NOT NULL, domain TEXT, identity_key TEXT, world_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT, owner_name TEXT, genre TEXT, scale TEXT, guest_access TEXT, identity_required INTEGER NOT NULL, item_drops_allowed INTEGER NOT NULL, capabilities TEXT, accepted_item_classes TEXT NOT NULL, trusted_issuers TEXT, portals TEXT NOT NULL, indexed_at INTEGER NOT NULL)');
+  $v2->exec('CREATE TABLE submit_limits (client TEXT NOT NULL, at INTEGER NOT NULL)');
+  $v2->exec("INSERT INTO manifests VALUES('https://live.example/x', 'domain', 'live.example', 'ok', 100, 5000, 4000, 9999999999, 0, NULL, NULL)");
+  $v2->exec("INSERT INTO worlds VALUES('live.example#w', 'https://live.example/x', 'domain', 'live.example', 'live.example', NULL, 'w', 'Live World', NULL, NULL, NULL, NULL, 'open', 0, 0, NULL, '[]', NULL, '[]', 5000)");
+  $v2->exec('PRAGMA user_version=2');
+  $v2 = null;
+  [$code, $out2] = child(['migrate'], ['DIRECTORY_DATA_DIR' => $v2Data]);
+  $m2 = json_decode($out2, true);
+  check('a version 2 database becomes version 3 with its rows, worlds and last-seen times intact', $code === 0 && $m2['version'] === DIRECTORY_SCHEMA_VERSION && $m2['serviceTable'] === true && $m2['worlds'] === 1 && (int) $m2['manifests'][0]['last_success_at'] === 4000, $out2);
+  check('...and its site is due for a crawl at once', (int) $m2['manifests'][0]['next_crawl_at'] <= time(), $out2);
+  [$code, $again2] = child(['migrate'], ['DIRECTORY_DATA_DIR' => $v2Data]);
+  check('opening it again changes nothing', $code === 0 && $again2 === $out2, $again2);
 
   // ----- where the database lives -----
   echo "--- outside the web root ---\n";

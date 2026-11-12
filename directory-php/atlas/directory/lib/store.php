@@ -7,7 +7,7 @@
 // Every statement is prepared. Every change runs in one BEGIN IMMEDIATE transaction, so two requests (or a request and the
 // cron job) can never interleave half-written changes; a failure rolls the whole change back.
 
-const DIRECTORY_SCHEMA_VERSION = 2;
+const DIRECTORY_SCHEMA_VERSION = 3;
 
 // The folder that holds the database. It is the configured dataDir (DIRECTORY_DATA_DIR or lib/atlas-directory-config.json) or,
 // failing that, an existing atlas-directory-private folder in the nearest parent folder of this code that has one; that is the
@@ -83,6 +83,25 @@ function dir_db() {
       )');
       $db->exec('CREATE INDEX IF NOT EXISTS worlds_manifest ON worlds(manifest_url)');
       $db->exec('CREATE INDEX IF NOT EXISTS worlds_anchor ON worlds(anchor_type, anchor_key)');
+      // Version 3: what each site advertises besides its worlds (see dir_service_types()). A database from an older version
+      // keeps every row and gets the empty table; its sites are due for a crawl at once so their services appear without
+      // waiting out the crawl interval.
+      $hadServices = (bool) $db->query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'services'")->fetchColumn();
+      $db->exec('CREATE TABLE IF NOT EXISTS services (
+        service_key TEXT PRIMARY KEY,
+        manifest_url TEXT NOT NULL REFERENCES manifests(url) ON DELETE CASCADE,
+        anchor_type TEXT NOT NULL,
+        anchor_key TEXT NOT NULL,
+        domain TEXT,
+        identity_key TEXT,
+        owner_name TEXT,
+        service TEXT NOT NULL,
+        url TEXT,
+        indexed_at INTEGER NOT NULL
+      )');
+      $db->exec('CREATE INDEX IF NOT EXISTS services_manifest ON services(manifest_url)');
+      $db->exec('CREATE INDEX IF NOT EXISTS services_anchor ON services(anchor_type, anchor_key)');
+      if (!$hadServices) $db->prepare("UPDATE manifests SET next_crawl_at = ? WHERE status = 'ok' AND next_crawl_at > ?")->execute([time(), time()]);
       $db->exec('CREATE TABLE IF NOT EXISTS submit_limits (client TEXT NOT NULL, at INTEGER NOT NULL)');
       $db->exec('CREATE INDEX IF NOT EXISTS submit_limits_client ON submit_limits(client, at)');
       // Version 2: when the manifest was last fetched and validated successfully. A database from version 1 keeps all its rows;
@@ -116,6 +135,10 @@ function dir_tx($fn, $db = null) {
 
 function dir_manifest_count() {
   return (int) dir_db()->query('SELECT COUNT(*) FROM manifests')->fetchColumn();
+}
+
+function dir_service_count() {
+  return (int) dir_db()->query('SELECT COUNT(*) FROM services')->fetchColumn();
 }
 
 function dir_world_count() {

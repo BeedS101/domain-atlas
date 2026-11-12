@@ -154,37 +154,92 @@ After uploading:
 
 ## The directory page
 
-`index.html` lists **sites**, not single worlds: one compact row per domain
-(or, for a key-anchored manifest, per verified identity key, never an invented
-domain) with its world count, genres, scales and how many sites link to it. The
-button on the right of a row (or the row itself) opens the site's worlds, with
-their descriptions, genres, access rules and portals. The page asks
-`search?groupBy=site`, which pages by site and reports `count` (sites) and
-`worldCount` (matching worlds in all pages), so the totals are right however
-many sites there are. Without `groupBy` the endpoint still returns the flat,
-paged list of worlds, now with each world's `portals` as well.
+The page is the **Domain Atlas Network Directory**: it lists **sites**, not single
+worlds, and what each site advertises. A site is a domain (or, for a key-anchored
+manifest, a verified identity key, never an invented domain) and gets one compact
+row: its name, `N worlds · M services`, genres, scales, how many sites link to it,
+when it was last seen and a Visit site link. The button on the right of a row (or
+the row itself) opens it, showing its **Worlds** (descriptions, genres, access
+rules, portals) and its **Services**. A domain with no worlds but one or more
+advertised services is listed with `0 worlds`. A site with nothing discoverable
+and nothing advertised does not appear.
 
-Each domain row has a **Visit site** link (a new tab, to the domain's https
-homepage). It is built only from a strictly checked host name, so no other
-scheme, path, credentials or address can end up in it; a key-anchored site has
-no verified address and gets no link.
+The buttons above the list browse by functionality: All, Worlds, Communication,
+Assets, Ledger / Chain Labs, Trading, Directories and Other services. While one
+of the service categories is chosen, the scale and combat filters (which describe
+worlds) are switched off.
 
-Each row also shows **Last seen**: when the directory last fetched and
-validated that site's manifest, shown in the visitor's own time zone (the UTC
-time is on hover). It is `lastSeenAt` in the grouped search (UTC, ISO 8601, the
-newest among the site's manifests, `null` when unknown). Only a successful
-crawl or submission sets it; a failed crawl does not, and the existing stale
-and failure handling is unchanged.
+The page asks `search?groupBy=site[&category=...]`, which pages by site and
+reports `count` (sites), `worldCount` and `serviceCount` (matches in all pages), so
+the totals are right however many sites there are. Each site carries its
+`worlds`, its `services` (`key`, `label`, `category`, `url`) and `lastSeenAt`.
+Without `groupBy` the endpoint still returns the flat, paged list of worlds.
 
-The page and the PHP files go together: upload `index.html`, `search.php` and
-`lib/` in the same step when updating. The new page tells you if it is talking
-to an older directory. No cron changes are involved.
+A domain row's **Visit site** link opens the domain's https homepage in a new tab;
+it is built only from a strictly checked host name, so no other scheme, path,
+credentials or address can end up in it, and a key-anchored site has no link.
+**Last seen** is when the directory last fetched and validated the site's manifest
+(`lastSeenAt`, UTC, `null` when unknown), shown in the visitor's own time zone with
+the UTC time on hover. Only a successful crawl or submission sets it.
 
-The PHP directory's SQLite file gains one column (`manifests.last_success_at`,
-schema version 2) the first time the new code opens it, in one transaction, and
-keeps every manifest and world. A site whose last crawl had worked is dated at
-that crawl; one that was failing shows no time until its next good crawl. The
-Node directory does the same for an existing snapshot file when it starts.
+### Advertising services
+
+A domain says what it offers in its existing `/.well-known/spatial.json`, next to
+`worlds` (SPEC.md section 3.9). There is no second manifest, and `"worlds": []` is
+fine. Each declaration is `true` or `{ "enabled": true, "url": "https://..." }`:
+
+```json
+{ "spec": "domain-atlas/1.0", "domain": "example.com",
+  "postOffice": true, "mailRelay": true, "chat": true, "calendar": true,
+  "chainLabs":   { "enabled": true, "url": "https://example.com/chain-labs/index.html" },
+  "scanner":     { "enabled": true, "url": "https://example.com/chain-labs/scan35.html" },
+  "assetStudio": { "enabled": true, "url": "https://example.com/atlas/studio/" },
+  "tradingStation": { "enabled": true, "url": "https://example.com/market/" },
+  "directory":   { "enabled": true, "url": "https://example.com/atlas/directory/index.html" },
+  "voiceCalling": true, "inWorldChat": true, "worlds": [] }
+```
+
+The names the directory knows are `postOffice`, `mailRelay`, `chat` (site-wide),
+`inWorldChat`, `voiceCalling`, `assetStudio`, `chainLabs`, `scanner`,
+`tradingStation`, `directory` and `calendar`; `chainlabs` and `trading` are also
+read. Other fields are ignored. To list a new module later, add one line to
+`SERVICE_TYPES` in `directory-server/server.js` and the same line to
+`dir_service_types()` in `directory-php/atlas/directory/lib/directory.php`
+(`test/verify-directory-services.js` fails if they differ); the page needs no
+change, because it shows whatever label and category the directory sends (a
+new category also needs a button in `CATEGORIES` in `index.html`).
+
+What this does and does not mean:
+
+- A listing says a domain **advertises** a service. It does not show that the
+  service is running or trustworthy, and the directory is not an authority.
+- The directory never fetches, probes or follows a service address. A service
+  address becomes an **Open** link only if it is `https` on the domain itself or
+  one of its subdomains, with no login details or fragment. Anything else is
+  listed without a link. Key-anchored sites never get a link.
+- Nothing private is shown: only the public page a domain chose to name. Post
+  Office, Chain Labs, Asset Studio and the rest keep working whether or not any
+  directory is online.
+- Services are refreshed on every crawl. A service the manifest stops
+  advertising disappears at its next crawl; a failed crawl keeps the last good
+  list and changes neither the stale marking nor the last-seen time.
+
+### Updating a live PHP directory
+
+Upload these files, replacing the old ones, and nothing else (the data folder,
+the secret file and the cron job stay exactly as they are):
+
+- `atlas/directory/index.html`
+- `atlas/directory/search.php`, `submit.php`, `stats.php`
+- `atlas/directory/lib/directory.php`, `lib/store.php`
+
+The first request or cron run afterwards upgrades the SQLite file in place, in one
+transaction (schema version 3 adds a `services` table; version 2 added
+`manifests.last_success_at`). Every manifest and indexed world is kept. The sites
+already listed are marked due for a crawl, so their services appear after the
+next cron run rather than after a full crawl interval. For a Node directory,
+replace `server.js` and `index.html`; an existing snapshot file is read as it
+is and its sites are crawled again at once.
 
 ## Which worlds will appear
 
@@ -199,12 +254,15 @@ which is the intended behaviour.
 ```bash
 node test/verify-directory.js                       # Node, self-contained
 DIRECTORY_IMPL=php node test/verify-directory.js    # PHP
+node test/verify-directory-services.js              # services: reading, indexing, categories, counts, crawls (DIRECTORY_IMPL=php for PHP)
+php test/verify-directory-services.php              # PHP: the same table of declarations and addresses
 node test/verify-directory-security.js              # Node, about 70 checks
 DIRECTORY_IMPL=php node test/verify-directory-security.js
 node test/verify-directory-rebinding.js             # Node: DNS rebinding
 php test/verify-directory-rebinding.php             # PHP: DNS rebinding
 php test/verify-directory-storage.php               # PHP: the SQLite storage
 node test/manual-directory-groups.js                # the page, in headless Chromium (needs playwright; DIRECTORY_IMPL=php for PHP)
+node test/manual-directory-services-page.js         # the page with services: rows, categories, Open links, phone width
 ```
 
 Each run starts its own throw-away directory and manifest servers on local
@@ -213,6 +271,11 @@ of all of these on PHP 7.4, 8.1 and 8.3 (and the Node ones once), only when
 the directory or its tests change. A PHP run is refused unless the server
 process itself reports the expected PHP version (`DIRECTORY_EXPECT_PHP`), so
 a job cannot pass while testing a different PHP.
+
+The services tests check every kind of declaration (existing booleans, objects,
+aliases, disabled and removed services), which addresses may become a link, the
+counts across pages, key-anchored manifests, and that a failed crawl changes
+nothing.
 
 The storage test checks the schema, that a failed change leaves nothing
 behind, that hostile text is stored and searched as plain text, that the

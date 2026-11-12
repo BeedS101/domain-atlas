@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Domain Atlas Directory</title>
+<title>Domain Atlas Network Directory</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -49,12 +49,18 @@
   .badge.stale { background: #4a1f1f; color: #ff9f9f; }
   .empty { color: #6c7d86; padding: 30px 0; text-align: center; list-style: none; }
   code { background: #1b2830; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .cats { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+  .cat { background: #1b2830; border-color: #2c3b44; color: #b6c6cd; font-weight: 500; font-size: 13px; padding: 5px 11px; border-radius: 999px; }
+  .cat:hover { background: #22323b; }
+  .cat[aria-pressed="true"] { background: #21453f; border-color: #2c7568; color: #eafff9; font-weight: 600; }
+  .cat:focus-visible { outline: 2px solid #7fc3ff; outline-offset: 2px; }
+  select:disabled { opacity: .5; }
   .summary-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; }
   .summary-row #status { margin: 0; }
   .link-btn { background: none; border: 0; padding: 4px 2px; color: #7fc3ff; font-weight: 500; font-size: 13px; }
   .link-btn:hover { background: none; text-decoration: underline; }
   .link-btn[hidden] { display: none; }
-  ul.groups, ul.worlds { list-style: none; margin: 0; padding: 0; }
+  ul.groups, ul.worlds, ul.services { list-style: none; margin: 0; padding: 0; }
   .group { border: 1px solid #223038; border-radius: 8px; background: #161e23; margin-bottom: 8px; overflow: hidden; }
   .group-row {
     display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.6fr) auto; align-items: center; gap: 8px 16px;
@@ -66,12 +72,13 @@
   .group-sub { color: #8fa2ab; font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
   .group-sub > * + *::before { content: '·'; margin: 0 6px; color: #55666f; }
   .group-sub .seen { white-space: nowrap; }
-  .group-sub a { color: #7fc3ff; text-decoration: none; padding: 2px 0; }
+  .group-sub a { color: #7fc3ff; text-decoration: none; padding: 2px 0; white-space: nowrap; }
   .group-sub a:hover { text-decoration: underline; }
   .group-sub a:focus-visible { outline: 2px solid #7fc3ff; outline-offset: 2px; border-radius: 2px; }
   .chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
   .chip { font-size: 12px; color: #b6c6cd; background: #1b2830; border: 1px solid #263640; border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
   .chip.count { color: #eafff9; background: #21453f; border-color: #2c7568; font-weight: 600; }
+  .chip.count.svc { background: #2b3550; border-color: #4a5c91; color: #e6ecff; }
   .chip.muted { color: #8fa2ab; }
   .toggle {
     display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0;
@@ -83,10 +90,16 @@
   .group.open .chev { transform: rotate(180deg); }
   @media (prefers-reduced-motion: reduce) { .chev { transition: none; } }
   .group.open .group-row { border-bottom: 1px solid #223038; }
-  ul.worlds { padding: 4px 16px 8px; }
+  .panel { padding: 2px 16px 10px; }
+  .panel h3 { margin: 12px 0 2px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #8fa2ab; font-weight: 600; }
   .world { padding: 12px 0; border-top: 1px solid #1f2b32; }
   .world:first-child { border-top: 0; }
-  .world h3 { margin: 0; font-size: 15px; display: inline; }
+  .world h4 { margin: 0; font-size: 15px; display: inline; }
+  ul.services { display: flex; flex-wrap: wrap; gap: 8px 10px; padding: 8px 0 2px; }
+  .service { display: inline-flex; align-items: center; gap: 8px; background: #1b2830; border: 1px solid #263640; border-radius: 8px; padding: 6px 10px; font-size: 14px; max-width: 100%; }
+  .service a.open { color: #7fc3ff; text-decoration: none; font-size: 13px; padding: 2px 0; }
+  .service a.open:hover { text-decoration: underline; }
+  .service a.open:focus-visible { outline: 2px solid #7fc3ff; outline-offset: 2px; border-radius: 2px; }
   .world .wid { color: #6c7d86; font-size: 12px; margin-left: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .world .desc { margin: 4px 0 8px; color: #b6c6cd; font-size: 14px; overflow-wrap: anywhere; }
   .facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px 16px; margin: 0; }
@@ -101,7 +114,8 @@
     main { padding: 14px 12px; }
     .group-row { grid-template-columns: minmax(0, 1fr) auto; padding: 10px 10px 10px 12px; }
     .group-row .chips { grid-column: 1 / -1; grid-row: 2; }
-    ul.worlds { padding: 2px 12px 6px; }
+    .panel { padding: 0 12px 8px; }
+    .service { width: 100%; justify-content: space-between; }
     .facts { grid-template-columns: 1fr 1fr; }
     .toggle { width: 40px; height: 40px; }
   }
@@ -109,12 +123,12 @@
 </head>
 <body>
 <header>
-  <h1>Domain Atlas Directory</h1>
-  <p>A reference implementation of SPEC.md §3.3 — crawls submitted manifests on a schedule and ranks worlds by inbound <code>"kind": "domain"</code> portal count. Anyone may run a competing directory against the same public manifests.</p>
+  <h1>Domain Atlas Network Directory</h1>
+  <p>A reference implementation of SPEC.md §3.3 — crawls submitted manifests on a schedule and lists the worlds and services each domain advertises, ranking worlds by inbound <code>"kind": "domain"</code> portal count. A listing says a domain advertises something, not that it is running or trustworthy. Anyone may run a competing directory against the same public manifests.</p>
 </header>
 <main>
   <div class="search-row">
-    <input id="q" type="text" placeholder="Search name, genre, domain…">
+    <input id="q" type="text" placeholder="Search name, genre, domain, service…">
     <select id="scale">
       <option value="">Any scale</option>
       <option>room</option><option>building</option><option>district</option>
@@ -126,6 +140,7 @@
     </select>
     <button id="searchBtn">Search</button>
   </div>
+  <div id="cats" class="cats" role="group" aria-label="Browse by functionality"></div>
   <div class="summary-row">
     <p id="status" role="status">Loading…</p>
     <button id="toggleAll" class="link-btn" type="button" hidden>Expand all</button>
@@ -156,9 +171,17 @@ const combatEl = document.getElementById('combat');
 const PAGE = Math.min(Math.max(parseInt(new URLSearchParams(location.search).get('groups'), 10) || 20, 1), 50);
 
 let loaded = [];       // the sites shown so far
-let total = { sites: 0, worlds: 0 };
+let total = { sites: 0, worlds: 0, services: 0 };
+let category = 'all';  // what is being browsed: one of CATEGORIES
 let opened = new Set(); // sites that are expanded, by key
 let requestId = 0;
+
+// Ways to browse. 'worlds' and every id after it except 'all' map to the directory's category parameter.
+const CATEGORIES = [
+  ['all', 'All'], ['worlds', 'Worlds'], ['communication', 'Communication'], ['assets', 'Assets'],
+  ['ledger', 'Ledger / Chain Labs'], ['trading', 'Trading'], ['directory', 'Directories'], ['other', 'Other services'],
+];
+const browsingServices = () => category !== 'all' && category !== 'worlds';
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -177,6 +200,23 @@ function siteUrl(g) {
     const u = new URL('https://' + g.domain + '/');
     const clean = u.protocol === 'https:' && u.host === g.domain.toLowerCase() && !u.username && !u.password && u.pathname === '/' && !u.search && !u.hash;
     return clean ? u.href : null;
+  } catch { return null; }
+}
+
+// The public page a service declared, or null. The directory already keeps only https addresses on the site's own domain (or a
+// subdomain); this checks that again before anything becomes a link, and a key-anchored site, which has no verified host,
+// never gets one.
+const SERVICE_URL_RE = /^https:\/\/((?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z][a-zA-Z0-9-]{0,61}[a-zA-Z0-9])(?::([0-9]{1,5}))?(\/[A-Za-z0-9._~!$&'()*+,;=:@%\/-]*)?(\?[A-Za-z0-9._~!$&'()*+,;=:@%\/?-]*)?$/;
+function serviceUrl(g, svc) {
+  if (!g || g.anchorType !== 'domain' || typeof g.domain !== 'string' || !svc || typeof svc.url !== 'string' || svc.url.length > 300) return null;
+  const m = SERVICE_URL_RE.exec(svc.url);
+  if (!m || !HOST_RE.test(g.domain)) return null;
+  const host = m[1].toLowerCase();
+  const domainHost = g.domain.toLowerCase().replace(/:\d+$/, '');
+  if (host !== domainHost && !host.endsWith('.' + domainHost)) return null;
+  try {
+    const u = new URL(svc.url);
+    return u.protocol === 'https:' && u.hostname === host && !u.username && !u.password && !u.hash ? u.href : null;
   } catch { return null; }
 }
 
@@ -199,6 +239,12 @@ function portalSummary(portals) {
   return plural(list.length, 'portal') + ': ' + parts.join(', ');
 }
 
+function renderService(g, svc) {
+  const href = serviceUrl(g, svc);
+  const open = href ? `<a class="open" href="${esc(href)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${esc(svc.label)} of ${esc(g.domain)} (opens in a new tab)">Open ↗</a>` : '';
+  return `<li class="service"><span class="svc-name">${esc(svc.label || svc.key)}</span>${open}</li>`;
+}
+
 function renderWorld(w) {
   const caps = w.capabilities || {};
   const access = [];
@@ -207,7 +253,7 @@ function renderWorld(w) {
   const classes = Array.isArray(w.acceptedItemClasses) ? w.acceptedItemClasses : [];
   return `
     <li class="world">
-      <div><h3>${esc(w.name || w.worldId)}</h3><span class="wid">${esc(w.worldId)}</span></div>
+      <div><h4>${esc(w.name || w.worldId)}</h4><span class="wid">${esc(w.worldId)}</span></div>
       ${w.description ? `<p class="desc">${esc(w.description)}</p>` : ''}
       <dl class="facts">
         <div><dt>Genre</dt><dd>${esc(w.genre || 'unlisted')}</dd></div>
@@ -227,6 +273,10 @@ function renderGroup(g, index) {
     ? `<span class="badge key" title="Identified by a verified key, not a domain">🔑 verified key</span> <span class="key" title="${esc(g.identityKey)}">${esc(shortKey(g.identityKey))}</span>`
     : `<span class="badge domain">🌐</span> ${esc(g.domain)}`;
   const label = g.anchorType === 'key' ? 'key ' + shortKey(g.identityKey) : g.domain;
+  const worlds = Array.isArray(g.worlds) ? g.worlds : [];
+  const serviceList = Array.isArray(g.services) ? g.services : []; // an older directory sends none
+  const worldCount = g.worldCount || 0;
+  const serviceCount = g.serviceCount || 0;
   const genres = (g.genres || []).slice(0, 3).map((x) => `<span class="chip">${esc(x)}</span>`).join('');
   const moreGenres = (g.genres || []).length > 3 ? `<span class="chip muted">+${(g.genres || []).length - 3}</span>` : '';
   const scales = (g.scales || []).map((x) => `<span class="chip muted">${esc(x)}</span>`).join('');
@@ -239,6 +289,8 @@ function renderGroup(g, index) {
     href ? `<a class="visit" href="${esc(href)}" target="_blank" rel="noopener noreferrer" aria-label="Visit ${esc(g.domain)} (opens in a new tab)">Visit site ↗</a>` : ''
   ].filter(Boolean).map((part) => `<span>${part}</span>`).join('');
   const panelId = 'group-' + index;
+  const contents = serviceCount ? (browsingServices() ? plural(serviceCount, 'service') : plural(worldCount, 'world') + ' and ' + plural(serviceCount, 'service')) : plural(worldCount, 'world');
+  const counts = (browsingServices() ? '' : `<span class="chip count">${plural(worldCount, 'world')}</span>`) + (serviceCount ? `<span class="chip count svc">${plural(serviceCount, 'service')}</span>` : '');
   return `
     <li class="group${isOpen ? ' open' : ''}" data-key="${esc(key)}">
       <div class="group-row">
@@ -246,10 +298,13 @@ function renderGroup(g, index) {
           <h2 class="group-name">${name}</h2>
           ${sub ? `<div class="group-sub">${sub}</div>` : ''}
         </div>
-        <div class="chips"><span class="chip count">${plural(g.worldCount, 'world')}</span>${genres}${moreGenres}${scales}${linked}${stale}</div>
-        <button class="toggle" type="button" aria-expanded="${isOpen}" aria-controls="${panelId}" aria-label="${isOpen ? 'Hide' : 'Show'} ${plural(g.worldCount, 'world')} of ${esc(label)}"><span class="chev" aria-hidden="true">▾</span></button>
+        <div class="chips">${counts}${genres}${moreGenres}${scales}${linked}${stale}</div>
+        <button class="toggle" type="button" aria-expanded="${isOpen}" aria-controls="${panelId}" aria-label="${isOpen ? 'Hide' : 'Show'} ${contents} of ${esc(label)}"><span class="chev" aria-hidden="true">▾</span></button>
       </div>
-      <ul class="worlds" id="${panelId}"${isOpen ? '' : ' hidden'}>${(g.worlds || []).map(renderWorld).join('')}</ul>
+      <div class="panel" id="${panelId}"${isOpen ? '' : ' hidden'}>
+        ${worlds.length ? `<h3>Worlds</h3><ul class="worlds">${worlds.map(renderWorld).join('')}</ul>` : ''}
+        ${serviceList.length ? `<h3>Services</h3><ul class="services">${serviceList.map((svc) => renderService(g, svc)).join('')}</ul>` : ''}
+      </div>
     </li>`;
 }
 
@@ -259,8 +314,12 @@ function render() {
   } else {
     groupsEl.innerHTML = loaded.map(renderGroup).join('');
   }
+  // Worlds are counted unless a kind of service is being browsed; services only when there are some (or are being browsed).
+  const found = [plural(total.sites, 'site')];
+  if (!browsingServices()) found.push(plural(total.worlds, 'world'));
+  if (category !== 'worlds' && (total.services > 0 || browsingServices())) found.push(plural(total.services, 'service'));
   statusEl.textContent = total.sites === 0 ? '0 sites found'
-    : `${plural(total.sites, 'site')} · ${plural(total.worlds, 'world')} found` + (loaded.length < total.sites ? ` (showing ${loaded.length} sites)` : '');
+    : found.join(' · ') + ' found' + (loaded.length < total.sites ? ` (showing ${loaded.length} sites)` : '');
   const left = total.sites - loaded.length;
   moreEl.hidden = left <= 0;
   moreEl.textContent = left > 0 ? `Show more sites (${left} left)` : '';
@@ -275,7 +334,7 @@ function setOpen(li, open) {
   const button = li.querySelector('.toggle');
   button.setAttribute('aria-expanded', String(open));
   button.setAttribute('aria-label', button.getAttribute('aria-label').replace(/^(Show|Hide)/, open ? 'Hide' : 'Show'));
-  li.querySelector('.worlds').hidden = !open;
+  li.querySelector('.panel').hidden = !open;
   toggleAllEl.textContent = loaded.every((g) => opened.has(siteKey(g))) ? 'Collapse all' : 'Expand all';
 }
 
@@ -295,8 +354,10 @@ toggleAllEl.addEventListener('click', () => {
 async function fetchPage(offset) {
   const params = new URLSearchParams({ groupBy: 'site', limit: String(PAGE), offset: String(offset) });
   if (qEl.value.trim()) params.set('q', qEl.value.trim());
-  if (scaleEl.value) params.set('scale', scaleEl.value);
-  if (combatEl.value) params.set('combat', combatEl.value);
+  if (category !== 'all') params.set('category', category);
+  // Scale and combat describe worlds, so they are not sent while a kind of service is being browsed.
+  if (scaleEl.value && !browsingServices()) params.set('scale', scaleEl.value);
+  if (combatEl.value && !browsingServices()) params.set('combat', combatEl.value);
   const res = await fetch('search?' + params.toString());
   if (!res.ok) throw new Error('The directory answered ' + res.status);
   const data = await res.json();
@@ -311,7 +372,7 @@ async function runSearch() {
     const data = await fetchPage(0);
     if (mine !== requestId) return;
     loaded = data.groups;
-    total = { sites: data.count, worlds: data.worldCount };
+    total = { sites: data.count, worlds: data.worldCount || 0, services: data.serviceCount || 0 };
     opened = new Set([...opened].filter((k) => loaded.some((g) => siteKey(g) === k)));
     render();
   } catch (e) {
@@ -327,7 +388,7 @@ async function showMore() {
     if (mine !== requestId) return;
     const have = new Set(loaded.map(siteKey));
     loaded = loaded.concat(data.groups.filter((g) => !have.has(siteKey(g))));
-    total = { sites: data.count, worlds: data.worldCount };
+    total = { sites: data.count, worlds: data.worldCount || 0, services: data.serviceCount || 0 };
     render();
   } catch (e) {
     statusEl.textContent = 'Could not load more: ' + e.message;
@@ -349,7 +410,10 @@ async function submitManifest() {
     });
     const data = await res.json().catch(() => ({}));
     if (res.ok) {
-      msg.textContent = 'Added. ' + (data.indexed != null ? data.indexed + ' discoverable world(s) indexed.' : '');
+      const said = [];
+      if (data.indexed != null) said.push(plural(data.indexed, 'discoverable world'));
+      if (data.services != null) said.push(plural(data.services, 'service'));
+      msg.textContent = 'Added.' + (said.length ? ' ' + said.join(' and ') + ' indexed.' : '');
       runSearch();
     } else {
       msg.className = 'err';
@@ -360,6 +424,17 @@ async function submitManifest() {
     msg.textContent = 'Could not reach the directory.';
   }
 }
+
+const catsEl = document.getElementById('cats');
+catsEl.innerHTML = CATEGORIES.map(([id, label]) => `<button type="button" class="cat" data-cat="${id}" aria-pressed="${id === category}">${esc(label)}</button>`).join('');
+catsEl.addEventListener('click', (e) => {
+  const button = e.target.closest('.cat');
+  if (!button || button.dataset.cat === category) return;
+  category = button.dataset.cat;
+  catsEl.querySelectorAll('.cat').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.cat === category)));
+  scaleEl.disabled = combatEl.disabled = browsingServices();
+  runSearch();
+});
 
 document.getElementById('submitBtn').addEventListener('click', submitManifest);
 document.getElementById('searchBtn').addEventListener('click', runSearch);

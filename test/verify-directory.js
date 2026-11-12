@@ -253,6 +253,7 @@ async function main() {
       const byDomain = Object.fromEntries(oldGroups.map((g) => [g.domain, g]));
       assert(oldGroups.length === 2 && byDomain['healthy.example'].worldCount === 1, 'expected both sites from the old snapshot to still be listed, got ' + JSON.stringify(oldGroups.map((g) => g.domain)));
       assert(byDomain['healthy.example'].lastSeenAt === '2026-01-02T03:04:05Z', 'expected the healthy site to be last seen at its last crawl, got ' + byDomain['healthy.example'].lastSeenAt);
+      assert(oldGroups.every((g) => g.serviceCount === 0 && Array.isArray(g.services) && g.services.length === 0), 'expected sites from a snapshot with no services to list none');
       assert(byDomain['failing.example'].lastSeenAt === null, 'expected a site that was failing to have no last-seen time, got ' + byDomain['failing.example'].lastSeenAt);
     } finally {
       old.stop();

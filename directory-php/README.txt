@@ -6,6 +6,7 @@ Same endpoints and rules as directory-server/server.js:
 
   POST submit.php   {"manifest": "https://host/.well-known/spatial.json"}
   GET  search.php   ?q= &scale= &combat= &genre= &anchorType= &identityRequired= &limit= &offset=
+                    &groupBy=site &category=   (sites with their worlds and advertised services)
   GET  stats.php
   CLI  cron.php     the scheduled crawl (404 over the web)
 
@@ -18,6 +19,7 @@ database of its own (atlas-directory.sqlite) in a folder OUTSIDE the web root:
 create atlas-directory-private beside public_html, or set dataDir. The
 directory refuses to run if that folder is inside the web root.
 Tests: DIRECTORY_IMPL=php node test/verify-directory.js
+       DIRECTORY_IMPL=php node test/verify-directory-services.js, php test/verify-directory-services.php
        DIRECTORY_IMPL=php node test/verify-directory-security.js
        php test/verify-directory-rebinding.php
        php test/verify-directory-storage.php

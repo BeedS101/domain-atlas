@@ -91,6 +91,75 @@ function dir_index_world($manifest, $world, $anchorType, $anchorKey, $pinnedKey,
   ];
 }
 
+// ---------- advertised services ----------
+// A domain says what it offers with top-level declarations in its manifest, next to `worlds`: `true`, or
+// { "enabled": true, "url": "https://..." } for a service with a public page. A declaration only advertises: it does
+// not show the service is running or trustworthy, and the directory never contacts a service URL.
+// This list is the whole set the directory knows. To list a new module, add a line here and the same line to SERVICE_TYPES in
+// directory-server/server.js (test/verify-directory-services.js compares the two). 'aliases' are other spellings accepted for
+// the same service; a declaration under the main name wins.
+function dir_service_categories() { return ['communication', 'assets', 'ledger', 'trading', 'directory', 'other']; }
+
+function dir_service_types() {
+  return [
+    ['key' => 'postOffice', 'label' => 'Post Office', 'category' => 'communication', 'aliases' => []],
+    ['key' => 'mailRelay', 'label' => 'Mail Relay', 'category' => 'communication', 'aliases' => []],
+    ['key' => 'chat', 'label' => 'Site chat', 'category' => 'communication', 'aliases' => []],
+    ['key' => 'inWorldChat', 'label' => 'In-world chat', 'category' => 'communication', 'aliases' => []],
+    ['key' => 'voiceCalling', 'label' => 'Voice calling', 'category' => 'communication', 'aliases' => []],
+    ['key' => 'assetStudio', 'label' => 'Asset Studio', 'category' => 'assets', 'aliases' => []],
+    ['key' => 'chainLabs', 'label' => 'Chain Labs', 'category' => 'ledger', 'aliases' => ['chainlabs']],
+    ['key' => 'scanner', 'label' => 'Scanner', 'category' => 'ledger', 'aliases' => []],
+    ['key' => 'tradingStation', 'label' => 'Trading station', 'category' => 'trading', 'aliases' => ['trading']],
+    ['key' => 'directory', 'label' => 'Directory', 'category' => 'directory', 'aliases' => []],
+    ['key' => 'calendar', 'label' => 'Calendar', 'category' => 'other', 'aliases' => []],
+  ];
+}
+
+// The registry by service key, with each entry's position (the order services are listed in).
+function dir_service_by_key() {
+  static $byKey = null;
+  if ($byKey !== null) return $byKey;
+  $byKey = [];
+  foreach (dir_service_types() as $i => $t) { $t['order'] = $i; $byKey[$t['key']] = $t; }
+  return $byKey;
+}
+
+// The one address shape a service may link to: https, a real host name (no address, no login details, no fragment) on the
+// manifest's own domain or a subdomain of it, and only URL-safe characters. Anything else is dropped, and the service is
+// listed without a link. A key-anchored manifest has no verified host, so its services never get one.
+function dir_safe_service_url($value, $anchorType, $anchorKey) {
+  if ($anchorType !== 'domain' || !is_string($value) || strlen($value) > 300) return null;
+  $re = '#^https://((?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z][a-zA-Z0-9-]{0,61}[a-zA-Z0-9])(?::([0-9]{1,5}))?(/[A-Za-z0-9._~!$&\'()*+,;=:@%/-]*)?(\?[A-Za-z0-9._~!$&\'()*+,;=:@%/?-]*)?$#D';
+  if (!preg_match($re, $value, $m)) return null;
+  $host = strtolower($m[1]);
+  if (strlen($host) > 253) return null;
+  $port = isset($m[2]) && $m[2] !== '' ? (int) $m[2] : null;
+  if ($port !== null && ($port < 1 || $port > 65535)) return null;
+  $domainHost = preg_replace('/:\d+$/', '', (string) $anchorKey);
+  $suffix = '.' . $domainHost;
+  if ($host !== $domainHost && substr($host, -strlen($suffix)) !== $suffix) return null;
+  return 'https://' . $host . ($port !== null ? ':' . $port : '') . (isset($m[3]) && $m[3] !== '' ? $m[3] : '/') . (isset($m[4]) ? $m[4] : '');
+}
+
+// The services a manifest advertises, in registry order: [['service' => key, 'url' => string|null], ...].
+function dir_read_services($manifest, $anchorType, $anchorKey) {
+  $found = [];
+  foreach (dir_service_types() as $type) {
+    $name = null;
+    foreach (array_merge([$type['key']], $type['aliases']) as $candidate) {
+      if (array_key_exists($candidate, $manifest)) { $name = $candidate; break; }
+    }
+    if ($name === null) continue;
+    $declared = $manifest[$name];
+    if ($declared === true) $found[] = ['service' => $type['key'], 'url' => null];
+    elseif (is_array($declared) && dir_is_assoc($declared) && isset($declared['enabled']) && $declared['enabled'] === true) {
+      $found[] = ['service' => $type['key'], 'url' => dir_safe_service_url(isset($declared['url']) ? $declared['url'] : null, $anchorType, $anchorKey)];
+    }
+  }
+  return $found;
+}
+
 // Fetches, validates and (re)indexes one manifest. Returns ['ok' => bool, 'worldsIndexed' => int, 'error' => string].
 function dir_crawl_one($url) {
   $cfg = dir_config();
@@ -135,7 +204,9 @@ function dir_crawl_one($url) {
     }
 
     $updated = dir_str(isset($manifest['updated']) ? $manifest['updated'] : null, 40);
-    dir_tx(function ($db) use ($url, $anchorType, $anchorKey, $entries, $updated, $cfg) {
+    $services = dir_read_services($manifest, $anchorType, $anchorKey);
+    $serviceOwner = isset($manifest['owner']) && is_array($manifest['owner']) && isset($manifest['owner']['name']) ? dir_str($manifest['owner']['name'], 120) : null;
+    dir_tx(function ($db) use ($url, $anchorType, $anchorKey, $entries, $updated, $cfg, $services, $serviceOwner, $pinned) {
       $now = time();
       // Update, or insert when the row is not there (an UPDATE then INSERT keeps this working on older SQLite versions).
       $update = $db->prepare('UPDATE manifests SET anchor_type = ?, anchor_key = ?, status = \'ok\', last_crawled_at = ?, last_success_at = ?, next_crawl_at = ?, consecutive_failures = 0, last_error = NULL, manifest_updated = ? WHERE url = ?');
@@ -155,8 +226,15 @@ function dir_crawl_one($url) {
           $e['guestAccess'], $e['identityRequired'] ? 1 : 0, $e['itemDropsAllowed'] ? 1 : 0, dir_json($e['capabilities']), dir_json($e['acceptedItemClasses']), dir_json($e['trustedIssuers']), dir_json($e['portalsRaw']), $now,
         ]);
       }
+      // The same for services: what the manifest no longer advertises goes, and what it advertises now is indexed.
+      $db->prepare('DELETE FROM services WHERE anchor_type = ? AND anchor_key = ?')->execute([$anchorType, $anchorKey]);
+      $addService = $db->prepare('INSERT OR REPLACE INTO services(service_key, manifest_url, anchor_type, anchor_key, domain, identity_key, owner_name, service, url, indexed_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      foreach ($services as $sv) {
+        $addService->execute([$anchorType . ':' . $anchorKey . ':' . $sv['service'], $url, $anchorType, $anchorKey, $anchorType === 'domain' ? $anchorKey : null,
+          $anchorType === 'key' ? $anchorKey : $pinned, $serviceOwner, $sv['service'], $sv['url'], $now]);
+      }
     });
-    return ['ok' => true, 'worldsIndexed' => count($entries)];
+    return ['ok' => true, 'worldsIndexed' => count($entries), 'servicesIndexed' => count($services)];
   } catch (Throwable $e) {
     $message = $e instanceof DirectoryException ? $e->getMessage() : 'the manifest could not be processed';
     dir_record_failure($url, $message);
@@ -291,11 +369,14 @@ function dir_search($params) {
   if (!empty($params['anchorType'])) { $where[] = 'anchor_type = ?'; $bind[] = $params['anchorType']; }
   if (($params['identityRequired'] ?? null) === 'true') $where[] = 'identity_required = 1';
   if (($params['identityRequired'] ?? null) === 'false') $where[] = 'identity_required = 0';
+  // groupBy=site&category=<a kind of service> lists sites by what they advertise, so no world is considered at all.
+  $bySite = ($params['groupBy'] ?? null) === 'site';
+  $category = $bySite && isset($params['category']) && in_array($params['category'], array_merge(['all', 'worlds'], dir_service_categories()), true) ? $params['category'] : 'all';
   $select = $db->prepare('SELECT * FROM worlds' . ($where ? ' WHERE ' . implode(' AND ', $where) : ''));
   $select->execute($bind);
 
   $scored = [];
-  foreach ($select->fetchAll() as $row) {
+  foreach (($bySite && $category !== 'all' && $category !== 'worlds') ? [] : $select->fetchAll() as $row) {
     $w = dir_world_from_row($row);
     if (!empty($params['genre']) && stripos((string) ($w['genre'] ?? ''), $params['genre']) === false) continue;
     if (!empty($params['combat']) && (!is_array($w['capabilities']) || ($w['capabilities']['combat'] ?? null) !== $params['combat'])) continue;
@@ -319,7 +400,7 @@ function dir_search($params) {
 
   $limit = min(max((int) ($params['limit'] ?? 0) ?: $cfg['defaultLimit'], 1), $cfg['maxLimit']);
   $offset = max((int) ($params['offset'] ?? 0), 0);
-  if (($params['groupBy'] ?? null) === 'site') return dir_search_by_site($db, $scored, $inboundFor, $limit, $offset);
+  if ($bySite) return dir_search_by_site($db, $params, $category, $scored, $inboundFor, $limit, $offset);
   $page = array_slice($scored, $offset, $limit);
   $failures = dir_manifest_failures($db, $page);
   $results = [];
@@ -338,17 +419,6 @@ function dir_manifest_failures($db, $rows) {
   return $failures;
 }
 
-// When each given manifest was last fetched and validated successfully (epoch seconds), by manifest URL.
-function dir_manifest_last_success($db, $rows) {
-  $seen = [];
-  if (!$rows) return $seen;
-  $urls = array_values(array_unique(array_map(function ($row) { return $row['w']['manifestUrl']; }, $rows)));
-  $get = $db->prepare('SELECT url, last_success_at FROM manifests WHERE url IN (' . implode(',', array_fill(0, count($urls), '?')) . ')');
-  $get->execute($urls);
-  foreach ($get->fetchAll() as $m) $seen[$m['url']] = $m['last_success_at'] === null ? null : (int) $m['last_success_at'];
-  return $seen;
-}
-
 function dir_world_result($w, $inboundFor, $failures) {
   return [
     'anchorType' => $w['anchorType'], 'domain' => $w['domain'], 'identityKey' => $w['identityKey'],
@@ -361,37 +431,89 @@ function dir_world_result($w, $inboundFor, $failures) {
   ];
 }
 
-// groupBy=site: the same matches, grouped under the site that published them (its domain, or for a key-anchored manifest its
-// verified identity key). Groups are paged, not worlds, and worldCount is the number of matching worlds in all groups, so
-// the counts stay right however many pages there are.
-function dir_search_by_site($db, $scored, $inboundFor, $limit, $offset) {
-  $groups = [];
-  foreach ($scored as $row) {
-    $w = $row['w'];
-    $anchor = dir_anchor_of($w);
-    if (!isset($groups[$anchor])) {
-      $groups[$anchor] = ['anchorType' => $w['anchorType'], 'domain' => $w['domain'], 'identityKey' => $w['identityKey'], 'ownerName' => $w['ownerName'], 'anchor' => $anchor, 'matched' => 0, 'worlds' => []];
+// The advertised services that match a groupBy=site search. category=worlds has none. A world-only filter (genre, scale,
+// combat, identityRequired) says nothing about services, so with category=all it leaves them out, and with a service
+// category it is ignored. domain, anchorType and q apply to services as they do to worlds (q: the site's domain, the
+// service's name or its category).
+function dir_matching_services($db, $params, $category) {
+  if ($category === 'worlds') return [];
+  $worldOnly = !empty($params['genre']) || !empty($params['scale']) || !empty($params['combat']) || in_array($params['identityRequired'] ?? null, ['true', 'false'], true);
+  if ($category === 'all' && $worldOnly) return [];
+  $q = isset($params['q']) ? trim((string) $params['q']) : '';
+  $qTokens = $q !== '' ? dir_tokenize($q) : null;
+  $types = dir_service_by_key();
+  $where = [];
+  $bind = [];
+  if (!empty($params['domain'])) { $where[] = 'domain = ?'; $bind[] = dir_normalize_host($params['domain']); }
+  if (!empty($params['anchorType'])) { $where[] = 'anchor_type = ?'; $bind[] = $params['anchorType']; }
+  $select = $db->prepare('SELECT * FROM services' . ($where ? ' WHERE ' . implode(' AND ', $where) : ''));
+  $select->execute($bind);
+  $out = [];
+  foreach ($select->fetchAll() as $r) {
+    if (!isset($types[$r['service']])) continue;
+    $type = $types[$r['service']];
+    if ($category !== 'all' && $type['category'] !== $category) continue;
+    $matched = 0;
+    if ($qTokens !== null) {
+      $have = array_flip(array_merge(dir_tokenize($r['domain'] ?? ''), dir_tokenize($type['label']), dir_tokenize($type['key']), dir_tokenize($type['category'])));
+      foreach ($qTokens as $t) if (isset($have[$t])) $matched++;
+      if ($matched === 0) continue;
     }
-    $g = &$groups[$anchor];
-    if (empty($g['identityKey']) && !empty($w['identityKey'])) $g['identityKey'] = $w['identityKey'];
-    if (empty($g['ownerName']) && !empty($w['ownerName'])) $g['ownerName'] = $w['ownerName'];
-    $g['matched'] = max($g['matched'], (int) $row['matched']);
-    $g['worlds'][] = $row;
-    unset($g);
+    $out[] = [
+      'sv' => ['anchorType' => $r['anchor_type'], 'domain' => $r['domain'], 'identityKey' => $r['identity_key'], 'ownerName' => $r['owner_name'], 'manifestUrl' => $r['manifest_url'], 'service' => $r['service'], 'url' => $r['url']],
+      'type' => $type, 'matched' => $matched,
+    ];
   }
+  return $out;
+}
+
+// The newest last-success time and the consecutive-failure counts of the manifests a group's worlds and services came from.
+function dir_manifest_state($db, $urls) {
+  $state = [];
+  $urls = array_values(array_unique($urls));
+  if (!$urls) return $state;
+  $get = $db->prepare('SELECT url, consecutive_failures, last_success_at FROM manifests WHERE url IN (' . implode(',', array_fill(0, count($urls), '?')) . ')');
+  $get->execute($urls);
+  foreach ($get->fetchAll() as $m) $state[$m['url']] = ['failures' => (int) $m['consecutive_failures'], 'seen' => $m['last_success_at'] === null ? null : (int) $m['last_success_at']];
+  return $state;
+}
+
+// groupBy=site: the same matches, grouped under the site that published them (its domain, or for a key-anchored manifest its
+// verified identity key). A site appears when it has a matching world or a matching advertised service. Groups are paged, not
+// worlds, and worldCount and serviceCount are the numbers of matches in all groups, so the counts stay right however many pages
+// there are.
+function dir_search_by_site($db, $params, $category, $scored, $inboundFor, $limit, $offset) {
+  $groups = [];
+  $touch = function ($item, $matched) use (&$groups) {
+    $anchor = dir_anchor_of($item);
+    if (!isset($groups[$anchor])) {
+      $groups[$anchor] = ['anchorType' => $item['anchorType'], 'domain' => $item['domain'], 'identityKey' => $item['identityKey'], 'ownerName' => $item['ownerName'], 'anchor' => $anchor, 'ref' => $item, 'matched' => 0, 'worlds' => [], 'services' => []];
+    }
+    if (empty($groups[$anchor]['identityKey']) && !empty($item['identityKey'])) $groups[$anchor]['identityKey'] = $item['identityKey'];
+    if (empty($groups[$anchor]['ownerName']) && !empty($item['ownerName'])) $groups[$anchor]['ownerName'] = $item['ownerName'];
+    $groups[$anchor]['matched'] = max($groups[$anchor]['matched'], (int) $matched);
+    return $anchor;
+  };
+  foreach ($scored as $row) { $a = $touch($row['w'], $row['matched']); $groups[$a]['worlds'][] = $row; }
+  $serviceMatches = dir_matching_services($db, $params, $category);
+  foreach ($serviceMatches as $row) { $a = $touch($row['sv'], $row['matched']); $groups[$a]['services'][] = $row; }
   $ordered = array_values($groups);
   usort($ordered, function ($a, $b) use ($inboundFor) {
     if ($a['matched'] !== $b['matched']) return $b['matched'] - $a['matched'];
-    $ia = $inboundFor($a['worlds'][0]['w']); $ib = $inboundFor($b['worlds'][0]['w']);
+    $ia = $inboundFor($a['ref']); $ib = $inboundFor($b['ref']);
     if ($ia !== $ib) return $ib - $ia;
     $byName = strcasecmp($a['anchor'], $b['anchor']);
     return $byName !== 0 ? $byName : strcmp($a['anchor'], $b['anchor']);
   });
   $page = array_slice($ordered, $offset, $limit);
   $rows = [];
-  foreach ($page as $g) foreach ($g['worlds'] as $row) $rows[] = $row;
+  $urls = [];
+  foreach ($page as $g) {
+    foreach ($g['worlds'] as $row) { $rows[] = $row; $urls[] = $row['w']['manifestUrl']; }
+    foreach ($g['services'] as $row) $urls[] = $row['sv']['manifestUrl'];
+  }
   $failures = dir_manifest_failures($db, $rows);
-  $lastSuccess = dir_manifest_last_success($db, $rows);
+  $state = dir_manifest_state($db, $urls);
   $out = [];
   foreach ($page as $g) {
     $results = [];
@@ -402,20 +524,28 @@ function dir_search_by_site($db, $scored, $inboundFor, $limit, $offset) {
       if (!empty($row['w']['genre'])) $genres[$row['w']['genre']] = true;
       if (!empty($row['w']['scale'])) $scales[$row['w']['scale']] = true;
     }
+    usort($g['services'], function ($a, $b) { return $a['type']['order'] - $b['type']['order']; });
+    $listed = [];
+    foreach ($g['services'] as $row) $listed[] = ['key' => $row['type']['key'], 'label' => $row['type']['label'], 'category' => $row['type']['category'], 'url' => $row['sv']['url']];
+    // The newest successful check among the manifests this site's worlds and services came from (UTC, to the second).
     $stale = false;
     foreach ($results as $r) if ($r['stale']) $stale = true;
-    // The newest successful check among the manifests this site's worlds came from (UTC, to the second).
     $seen = 0;
-    foreach ($g['worlds'] as $row) {
-      $t = $lastSuccess[$row['w']['manifestUrl']] ?? null;
-      if ($t !== null && $t > $seen) $seen = $t;
+    $manifestUrls = [];
+    foreach ($g['worlds'] as $row) $manifestUrls[] = $row['w']['manifestUrl'];
+    foreach ($g['services'] as $row) $manifestUrls[] = $row['sv']['manifestUrl'];
+    foreach (array_unique($manifestUrls) as $u) {
+      if (!isset($state[$u])) continue;
+      if ($state[$u]['seen'] !== null && $state[$u]['seen'] > $seen) $seen = $state[$u]['seen'];
+      if ($state[$u]['failures'] >= dir_config()['staleAfterFailures']) $stale = true;
     }
     $out[] = [
       'anchorType' => $g['anchorType'], 'domain' => $g['domain'], 'identityKey' => $g['identityKey'], 'ownerName' => $g['ownerName'],
-      'worldCount' => count($g['worlds']), 'genres' => array_slice(array_map('strval', array_keys($genres)), 0, 5), 'scales' => array_map('strval', array_keys($scales)),
-      'inboundPortalCount' => $inboundFor($g['worlds'][0]['w']), 'stale' => $stale,
-      'lastSeenAt' => $seen ? gmdate('Y-m-d\TH:i:s\Z', $seen) : null, 'worlds' => $results,
+      'worldCount' => count($g['worlds']), 'serviceCount' => count($g['services']),
+      'genres' => array_slice(array_map('strval', array_keys($genres)), 0, 5), 'scales' => array_map('strval', array_keys($scales)),
+      'inboundPortalCount' => $inboundFor($g['ref']), 'stale' => $stale,
+      'lastSeenAt' => $seen ? gmdate('Y-m-d\TH:i:s\Z', $seen) : null, 'worlds' => $results, 'services' => $listed,
     ];
   }
-  return ['count' => count($ordered), 'worldCount' => count($scored), 'limit' => $limit, 'offset' => $offset, 'groups' => $out];
+  return ['count' => count($ordered), 'worldCount' => count($scored), 'serviceCount' => count($serviceMatches), 'limit' => $limit, 'offset' => $offset, 'groups' => $out];
 }

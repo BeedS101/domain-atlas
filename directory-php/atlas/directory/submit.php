@@ -17,7 +17,7 @@ try {
   $result = dir_submit($url);
   if (!empty($result['full'])) dir_send_json(503, ['error' => 'this directory is not accepting new manifests right now']);
   if (!$result['ok']) dir_send_json(422, ['error' => $result['error']]);
-  dir_send_json(200, ['indexed' => $result['worldsIndexed'], 'manifest' => $url]);
+  dir_send_json(200, ['indexed' => $result['worldsIndexed'], 'services' => $result['servicesIndexed'], 'manifest' => $url]);
 } catch (Throwable $e) {
   error_log('directory submit: ' . $e->getMessage());
   dir_send_json(500, ['error' => 'internal error']);

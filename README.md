@@ -467,10 +467,13 @@ curl "http://localhost:8003/search?scale=district"
 curl "http://localhost:8003/search?q=workshop"
 ```
 
-Or open `http://localhost:8003` for a small search UI that groups worlds by
-site (one expandable row per domain or verified key), which also has a
-form for listing your own domain. `search?groupBy=site` gives the same
-grouping as JSON, with accurate site and world counts across pages and the
+Or open `http://localhost:8003` for a small search UI that lists sites, one
+expandable row per domain or verified key, with the worlds and the services each
+one advertises (SPEC.md §3.9: `postOffice`, `chainLabs`, `assetStudio` and the
+like, declared in the same manifest, so a domain with `"worlds": []` is still
+listed) and buttons to browse by kind of service. It also has a form for listing
+your own domain. `search?groupBy=site` gives the same
+grouping as JSON (`category=` browses by kind of service), with accurate site, world and service counts across pages and the
 time each site's manifest was last fetched successfully (`lastSeenAt`, UTC;
 the page shows it in the visitor's time zone, next to a Visit site link for
 domain-anchored sites). Results are ranked by the number of
@@ -2009,8 +2012,10 @@ node test/verify-directory-security.js # directory hardening: spoofing, SSRF ref
 #   both accept DIRECTORY_IMPL=php to test directory-php/ instead of the Node service
 node test/verify-directory-rebinding.js # directory DNS rebinding (Node; fake lookups, no network)
 php test/verify-directory-rebinding.php # the same for directory-php/ (needs only php with curl)
-php test/verify-directory-storage.php   # directory-php/'s SQLite storage: schema, rollback, hostile text, limits under load
+node test/verify-directory-services.js  # the directory listing services next to worlds (php test/verify-directory-services.php for the PHP reader)
+php test/verify-directory-storage.php   # directory-php/'s SQLite storage: schema, migration, rollback, hostile text, limits under load
 node test/manual-directory-groups.js    # the directory page in headless Chromium: grouped rows, expand/collapse, paging, Visit site link, last seen, phone width
+node test/manual-directory-services-page.js  # the same page with services: worlds and services per row, categories, Open links
 node test/verify-asset-cache.js        # gltf-mini's local GLB cache: fresh on first load, 304'd on repeat, re-fetched on real change
 node test/verify-identity-backup.js    # password identity lifecycle: onboarding, lock/unlock, export/import by password + seed phrase
 ```
