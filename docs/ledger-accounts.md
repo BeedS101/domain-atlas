@@ -1,5 +1,15 @@
 # Ledger accounts in the Gen 1 wallet
 
+> **Retired on the wallet side.** The wallet no longer has the account-reference interface this
+> document describes: no Accounts list, no "Open a ledger account", "Add an account" or "Find my
+> accounts", no experimental Labs 29 / Labs 38 adapters, and no `ledger-core.js`, `ledger-labs29.js`,
+> `ledger-labs38.js` or `ledger-open.js`. The Ledger tab now shows only the chain labs coins (see
+> `docs/chain-labs-spend-protocol.md`). References saved by earlier builds stay in the browser's
+> storage and in backup files untouched, so a restore never fails; they are simply no longer shown.
+> The issuer-side sections (issuing account references, signed balance receipts) describe services
+> that still exist in `issuer-php`. Everything below the wallet-side headings is kept as a historical
+> record of the design.
+
 Status: the wallet side of the Ledger tab is built and tested against local test doubles. An
 **experimental adapter for the Labs 29 prototype is built but switched off by default**, and no
 live testing has been approved. Nothing in this repository has read a real balance.

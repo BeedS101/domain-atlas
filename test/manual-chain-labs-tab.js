@@ -54,10 +54,11 @@ const { A, B, nodes } = S;
     console.log('--- the section ---');
     await openLedger();
     await waitFor(/No domains on the list yet/);
-    const order = await page.evaluate(() => { const s = document.getElementById('chainLabsSection'), a = document.getElementById('ledgerAccountsList'); return !!(s.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING); });
-    check('it sits above the ledger account list, which is still there', order && (await page.$('#ledgerAddBtn')) !== null);
+    const gone = await page.evaluate(() => ['ledgerAccountsList', 'ledgerAddBtn', 'ledgerFindBtn', 'ledgerOpenBtn', 'ledgerExperimental', 'ledgerCredentialInput'].every((id) => !document.getElementById(id)));
+    check('the Ledger tab shows only the chain labs coins; the old account controls are gone', gone && (await page.$('#chainLabsSection')) !== null);
     check('it says the coins are kept by the domains and that adding a domain is the permission to ask', /kept by the domains below, not by this wallet/.test(await section()) && /permission to ask it/.test(await section()));
 
+    if (process.env.LEDGER_SHOT) await page.screenshot({ path: process.env.LEDGER_SHOT });
     console.log('--- adding a domain ---');
     await page.fill('#chainLabsAddInput', 'not a domain');
     await page.getByRole('button', { name: 'Add…', exact: true }).click();

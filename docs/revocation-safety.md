@@ -64,7 +64,7 @@ Decided class by class, not generalised:
 | Class | A 404 on the revocation list | Why |
 |---|---|---|
 | Asset credentials (Gold and every other class, gifts, offers, transfer files, saved copies) | **Unavailable** | SPEC.md §5.3 has an issuer publish the list alongside its key, and both reference issuers create it on first use. Every spend is "check, then sign or mint, then revoke", so a spent credential is exactly what a missing list would let through. Many different domains issue these, so a missing list is more likely a fault than a choice. |
-| Ledger-account references | Counts as empty, **and the verdict says so** (`the issuer publishes no revocation list`) | This is the rule `docs/ledger-accounts.md` has always stated for the ledger classes. The wallet only looks up balances for them at the Labs hosts, they carry no value of their own, and the ledger and the issuer both refuse a revoked account when it is used. Kept for compatibility, not as a precedent; `LEDGER_ABSENT_REVOCATIONS_IS_EMPTY` in `wallet.js` turns it off. |
+| Ledger-account references (no longer read by the wallet) | Counts as empty, **and the verdict says so** (`the issuer publishes no revocation list`) | This is the rule `docs/ledger-accounts.md` has always stated for the ledger classes. The wallet only looks up balances for them at the Labs hosts, they carry no value of their own, and the ledger and the issuer both refuse a revoked account when it is used. Kept for compatibility, not as a precedent; `LEDGER_ABSENT_REVOCATIONS_IS_EMPTY` in `wallet.js` turns it off. |
 | Signed ledger receipts (Labs 38) | Counts as empty (as above) | Same class and the same documented rule. |
 | Key document (any class) | **Unavailable** | There is no meaningful "no key document". |
 
@@ -123,7 +123,4 @@ These read the same lists but are not wallet code and were left alone:
   accepted when it does not name the credential and refused wherever it does; 28 ways a revocation list can
   fail to be read, each unavailable; both limits at and one past their edges; the key document's own
   limit; definite findings that outrank an unreadable list; a domain that goes quiet; the callers above
-  (import, re-verify, restore, transfer file, interrupted export); and ledger-account references including the
-  documented 404 exception.
-- `test/manual-ledger-labs38-wallet.js` and `test/manual-ledger-labs38-adapter.js` still cover the
-  signed-receipt check, which now reads the documents through the same reader.
+  (import, re-verify, restore, transfer file, interrupted export).

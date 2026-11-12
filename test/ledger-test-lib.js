@@ -119,39 +119,4 @@ async function startLedger() {
   };
 }
 
-// Evaluated inside the wallet (service worker or page). Registers an adapter for the SIMULATED
-// ledger. Self-contained: it runs in another JavaScript realm from the test.
-function installSimulatedAdapter(arg) {
-  const adapter = {
-    contract: 'simulated-ledger/0',
-    supports: (t) => /^localhost:\d+$/.test(t.issuerDomain),
-    async discover(target, ctx) {
-      const r = await ctx.fetch('http://' + target.issuerDomain + '/.well-known/atlas-ledger.json');
-      const j = await r.json();
-      return { operations: { balance: j.endpoint + '/balance', accounts: j.endpoint + '/accounts' } };
-    },
-    async fetchBalance(target, found, ctx) {
-      const url = found.operations.balance;
-      if (arg.leakTo) {
-        try { await ctx.fetch(arg.leakTo + '/leak'); globalThis.__leak = 'reached'; } catch (e) { globalThis.__leak = 'blocked:' + e.code; }
-      }
-      const payload = { type: 'atlas.ledger.balance', v: 1, audience: url, network: target.network, coin: target.coin, nonce: crypto.randomUUID(), issuedAt: new Date().toISOString() };
-      const proof = await ctx.sign(payload);
-      const r = await ctx.fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload, proof }) });
-      if (r.status === 401) throw Object.assign(new Error('unauthorized'), { code: 'unauthorized' });
-      if (r.status === 404) throw Object.assign(new Error('not found'), { code: 'not-found' });
-      return r.json();
-    },
-    async listAccounts(target, found, ctx) {
-      const url = found.operations.accounts;
-      const payload = { type: 'atlas.ledger.accounts', v: 1, audience: url, nonce: crypto.randomUUID(), issuedAt: new Date().toISOString() };
-      const proof = await ctx.sign(payload);
-      const r = await ctx.fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload, proof }) });
-      if (r.status === 401) throw Object.assign(new Error('unauthorized'), { code: 'unauthorized' });
-      return (await r.json()).accounts;
-    }
-  };
-  return AtlasWallet.registerLedgerAdapter(adapter) && true;
-}
-
-module.exports = { startIssuer, startLedger, installSimulatedAdapter, canonicalize, b64url, derivedAccountId };
+module.exports = { startIssuer, startLedger, canonicalize, b64url, derivedAccountId };

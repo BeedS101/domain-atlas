@@ -476,38 +476,16 @@
 
   .subhead { font-size: 11px; color: #a9b8bf; text-transform: uppercase; letter-spacing: 0.04em; margin: 14px 0 6px; }
 
-  /* Ledger tab. A capability's level is carried by its glyph and its words as well as its
-     border, so it reads without colour: unavailable = crossed dashed, available = hollow,
-     enabled = solid, connecting = half-filled and animated (still, with reduced motion). */
-  #ledgerSubscreen .ledger-balance { font-size: 15px; font-weight: 600; margin: 6px 0 2px; }
-  #ledgerSubscreen .ledger-balance .meta { font-weight: 400; }
+  /* Ledger tab (chain labs coins) */
   #ledgerSubscreen .ledger-problem { font-size: 11px; color: #e08a4c; margin-top: 4px; }
-  #ledgerSubscreen .ledger-inds { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  #ledgerSubscreen .ledger-ind { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid #2c3c44; color: #cfdadf; }
-  #ledgerSubscreen .ledger-ind.lvl-unavailable { border-style: dashed; color: #8fa1a9; }
-  #ledgerSubscreen .ledger-ind.lvl-available { border-color: #6f838c; }
-  #ledgerSubscreen .ledger-ind.lvl-enabled { border-color: #57a593; border-width: 2px; color: #e6eef1; }
-  #ledgerSubscreen .ledger-ind.lvl-connecting { border-color: #6fa8dc; border-width: 2px; color: #e6eef1; }
-  #ledgerSubscreen .ledger-ind.lvl-connecting .ledger-glyph { display: inline-block; animation: ledger-pulse 1s ease-in-out infinite; }
-  @keyframes ledger-pulse { 50% { opacity: 0.35; } }
-  @media (prefers-reduced-motion: reduce) { #ledgerSubscreen .ledger-ind.lvl-connecting .ledger-glyph { animation: none; } }
-  #ledgerSubscreen .ledger-detail { font-size: 11px; color: #a9b8bf; margin-top: 4px; }
   #ledgerSubscreen .chain-labs-balance { font-size: 14px; font-weight: 600; }
   #ledgerSubscreen .chain-labs-domain-name { font-size: 15px; font-weight: 600; }
   #ledgerSubscreen .chain-labs-coin { margin-top: 6px; }
   #ledgerSubscreen .chain-labs-pending { border-style: dashed; margin-top: 6px; }
   #ledgerSubscreen #chainLabsSection select, #ledgerSubscreen #chainLabsSection input[type="text"] { width: 100%; box-sizing: border-box; }
   #ledgerSubscreen .ledger-confirm { border-color: #e0b84c; margin: 8px 0; }
-  #ledgerSubscreen button:focus-visible, #ledgerSubscreen input:focus-visible, #ledgerSubscreen textarea:focus-visible { outline: 2px solid #8fbfe8; outline-offset: 2px; }
-  #ledgerSubscreen label.check-row { color: #cfdadf; }
-  #ledgerSubscreen .ledger-verify { display: inline-block; font-size: 11px; margin: 2px 0; padding: 1px 8px; border-radius: 10px; border: 1px dashed #e0b84c; color: #f0d58a; }
-  #ledgerSubscreen .ledger-open-fieldset { border: 1px solid #2c3c44; border-radius: 6px; margin: 8px 0; padding: 6px 10px; }
-  #ledgerSubscreen .ledger-open-fieldset legend { font-size: 12px; color: #a9b8bf; padding: 0 4px; }
+  #ledgerSubscreen button:focus-visible, #ledgerSubscreen input:focus-visible { outline: 2px solid #8fbfe8; outline-offset: 2px; }
   #ledgerSubscreen .ledger-open-label { display: block; font-size: 12px; color: #a9b8bf; margin-top: 6px; }
-  #ledgerSubscreen .ledger-pending { border-style: dashed; margin-top: 8px; }
-  #ledgerSubscreen .ledger-experimental { margin-top: 14px; }
-  #ledgerSubscreen .ledger-experimental summary { cursor: pointer; font-size: 12px; color: #a9b8bf; }
-  #ledgerSubscreen .ledger-experimental summary:focus-visible { outline: 2px solid #8fbfe8; outline-offset: 2px; }
 
   .settings-category { border-bottom: 1px solid #2c3c44; margin-top: 4px; }
   .settings-category:first-child { margin-top: 0; }
@@ -2203,46 +2181,9 @@
             <div id="selfDocumentsList" class="item-list"></div>
           </div>
 
-          <!-- Sub-screen: Ledger — references to accounts whose balances are kept by a
-               remote ledger, not by this wallet. Nothing here is an asset and nothing is
-               spendable from here. Cards are built in viewer.js (renderLedger). -->
+          <!-- Sub-screen: Ledger. The chain labs coins, drawn by chain-labs-tab.js. -->
           <div id="ledgerSubscreen" class="subscreen">
-            <div id="ledgerIdentityBanner" class="info-card"></div>
-            <!-- Chain labs coins: the list of domains and what each says this key holds. Drawn by chain-labs-tab.js. -->
             <div id="chainLabsSection" role="group" aria-labelledby="chainLabsHeading"></div>
-            <p class="meta" id="ledgerExplainer">A ledger account is kept by the ledger that issued it. This wallet holds only a reference to it and shows the balance the ledger last reported. Removing a reference here never changes the account.</p>
-            <div id="ledgerStatus" class="empty-note" role="status" aria-live="polite"></div>
-            <div id="ledgerConfirm" class="info-card ledger-confirm" role="group" aria-labelledby="ledgerConfirmText" hidden>
-              <div id="ledgerConfirmText"></div>
-              <div class="item-actions">
-                <button id="ledgerConfirmOk" type="button"></button>
-                <button id="ledgerConfirmCancel" type="button">Cancel</button>
-              </div>
-            </div>
-            <div class="subhead" id="ledgerAccountsHeading">Accounts</div>
-            <div id="ledgerAccountsList" class="item-list" aria-labelledby="ledgerAccountsHeading"></div>
-            <div class="subhead" id="ledgerOpenHeading">Open a ledger account (experimental)</div>
-            <div id="ledgerOpenPanel" class="info-card" role="group" aria-labelledby="ledgerOpenHeading">
-              <p class="meta">Opens an empty account at a test ledger and collects an issuer-signed reference to it, in two steps that you approve one at a time. This is an experimental test service: nothing is minted, deposited or spent, and no balance is looked up unless you separately allow it afterwards. Needs the experimental interface below to be on.</p>
-              <fieldset id="ledgerOpenIdentities" class="ledger-open-fieldset"><legend>Identity to open the account for</legend></fieldset>
-              <label class="ledger-open-label" for="ledgerOpenTarget">Coin</label>
-              <select id="ledgerOpenTarget" aria-describedby="ledgerOpenWhy"></select>
-              <div id="ledgerOpenWhy" class="meta" role="status" aria-live="polite"></div>
-              <div class="btn-row" style="margin-top:8px;"><button id="ledgerOpenBtn" type="button">Open account…</button></div>
-              <div id="ledgerOpenPending" class="item-list" aria-label="Opened accounts waiting for a reference"></div>
-            </div>
-            <div class="subhead">Add an account</div>
-            <textarea id="ledgerCredentialInput" aria-label="Ledger account credential" placeholder="Paste a ledger-account credential (JSON) from the issuing domain…"></textarea>
-            <div class="btn-row" style="margin-top:8px;"><button id="ledgerAddBtn" type="button">Check and add…</button></div>
-            <div class="subhead">Find my accounts</div>
-            <input type="text" id="ledgerFindDomainInput" aria-label="Issuing domain" placeholder="Issuing domain, e.g. example.com" autocomplete="off">
-            <div class="btn-row" style="margin-top:8px;"><button id="ledgerFindBtn" type="button">Find my accounts…</button></div>
-            <div id="ledgerFindNote" class="meta" style="margin-top:6px;"></div>
-            <details id="ledgerExperimental" class="ledger-experimental">
-              <summary>Experimental interfaces (testing only)</summary>
-              <p class="meta">These read balances from prototype ledger services. Their answers are not signed and are not final or spendable. They are off, and each account still needs its own permission.</p>
-              <div id="ledgerExperimentalList"></div>
-            </details>
           </div>
         </div>
       </div>
@@ -2984,10 +2925,6 @@
 
   <script src="chess.js"></script>
   <script src="call-protocol.js"></script>
-  <script src="ledger-core.js"></script>
-  <script src="ledger-labs29.js"></script>
-  <script src="ledger-labs38.js"></script>
-  <script src="ledger-open.js"></script>
   <script src="chain-labs-wallet.js"></script>
   <script src="item-standard.js"></script>
   <script src="item-effects.js"></script>

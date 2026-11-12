@@ -43,10 +43,6 @@ importScripts('item-standard.js', 'item-effects.js', 'wallet.js');
 // Calling is optional: if its module is missing or fails to load, the wallet worker still starts
 // and every other feature works (the call functions then report that calling is unavailable).
 try { importScripts('call-protocol.js'); } catch (err) { /* calling stays unavailable */ }
-try { importScripts('ledger-core.js'); } catch (err) { /* ledger accounts stay unavailable */ }
-try { importScripts('ledger-labs29.js'); } catch (err) { /* the experimental ledger interface stays unavailable */ }
-try { importScripts('ledger-labs38.js'); } catch (err) { /* the signed-report interface stays unavailable */ }
-try { importScripts('ledger-open.js'); } catch (err) { /* opening ledger accounts stays unavailable */ }
 
 const TOOLBAR_ICON_ACTIVE = {
   16: 'icons/icon-16.png', 32: 'icons/icon-32.png',

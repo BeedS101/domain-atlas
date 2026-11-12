@@ -2,8 +2,7 @@
 //
 // The wallet decides whether a credential is revoked from two documents its issuing domain
 // publishes. Not being able to read the revocation list is not the same as the credential not being
-// on it. This checks, for asset credentials (verifyCredential) and for ledger-account references
-// (verifyLedgerCredential):
+// on it. This checks, for asset credentials (verifyCredential):
 //   - the three outcomes are told apart: revoked, not revoked, and revocation status unavailable;
 //   - an unavailable check is never a success: not valid, not "verified", and nothing that depends on
 //     the verdict goes ahead or is thrown away on it;
@@ -18,8 +17,8 @@
 //   - a definite finding (bad signature, key not valid at issuedAt, expired) is still reported as
 //     such when the revocation list cannot be read.
 //
-// Everything is local: issuers on loopback, a real Chromium, no live site. The ledger issuer is
-// test/ledger-test-lib.js's; the asset issuer is defined below and signs with its own throwaway key.
+// Everything is local: an issuer on loopback, a real Chromium, no live site. The asset issuer is
+// defined below and signs with its own throwaway key (signing helpers from test/ledger-test-lib.js).
 //
 // Run: xvfb-run -a node test/manual-revocation-safety.js
 'use strict';
@@ -31,7 +30,6 @@ const T = require('./ledger-test-lib');
 const F = require('./revocation-fixture');
 const { check } = L;
 
-const NET = 'test-network-1';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Answers a request as a test describes: { json } / { text } / { bytes } with an optional status and
@@ -104,18 +102,12 @@ const KEYS = '/.well-known/atlas-key.json';
 
 (async () => {
   const assets = await startAssetIssuer();
-  const ledgerIssuer = await T.startIssuer();
-  // The ledger issuer lets a test answer any of its paths itself.
-  const lOverrides = new Map();
-  ledgerIssuer.state.handler = async (req, res) => { const f = lOverrides.get(req.url); if (!f) return false; f(req, res); return true; };
-  const lserve = (path, spec) => lOverrides.set(path, answer(spec));
   const w = await L.launchWallet('revocation');
   const W = w.wallet;
   const attempt = (fn, arg) => w.sw.evaluate('(async () => { try { return { ok: true, value: await (' + fn.toString() + ')(' + JSON.stringify(arg === undefined ? null : arg) + ') }; } catch (e) { return { ok: false, code: e && e.code, message: String((e && e.message) || e) }; } })()');
   try {
     w.pub = (await W((pw) => AtlasWallet.createIdentity(pw), 'revocation-test-password')).publicKey;
     const V = (c) => W((x) => AtlasWallet.verifyCredential(x), c);
-    const VL = (c) => W((x) => AtlasWallet.verifyLedgerCredential(x), c);
     const held = () => W((k) => AtlasWallet.getWallet(k), w.pub);
 
     // ---------------------------------------------------------------- the fixture
@@ -123,9 +115,6 @@ const KEYS = '/.well-known/atlas-key.json';
     console.log('--- the fixture: ' + F.REAL_COUNT + ' entries, ' + Math.round(REAL.length / 1024) + ' KiB ---');
     check('(set-up) the realistic list has 6,127 entries and is about the size of the live one', REAL.length > 1000000 && REAL.length < 1250000 && JSON.parse(REAL).revoked.length === 6127, REAL.length);
     check('(set-up) it is over the key document\'s limit and well under the revocation limit', REAL.length > F.KEY_BYTE_LIMIT && REAL.length < F.REVOCATION_BYTE_LIMIT);
-    check('(set-up) the wallet\'s entry limit is the one the adapter module publishes', await W(() => AtlasLedgerLabs38.MAX_REVOCATION_ENTRIES) === F.REVOCATION_ENTRY_LIMIT);
-
-    const gop0 = await ledgerIssuer.issue(w.pub, { network: NET, coin: 'GOP0' });
     // ---------------------------------------------------------------- asset credentials
     console.log('--- asset credentials: the three outcomes ---');
     const cred = await assets.issue(w.pub);
@@ -201,17 +190,20 @@ const KEYS = '/.well-known/atlas-key.json';
     }
     assets.reset();
 
-    console.log('--- asset credentials: a domain that goes quiet (about 20 s each, run side by side) ---');
+    console.log('--- asset credentials: a domain that goes quiet (about 20 s each, run one after the other) ---');
     assets.serve(REV, { hang: true });
-    lserve(REV, { stall: true });
     const t0 = Date.now();
-    const [hung, stalled] = await Promise.all([V(cred), VL(gop0)]);
-    const waited = Date.now() - t0;
+    const hung = await V(cred);
+    const waitedHung = Date.now() - t0;
+    assets.reset();
+    assets.serve(REV, { stall: true });
+    const t1 = Date.now();
+    const stalled = await V(cred);
+    const waited = Math.max(waitedHung, Date.now() - t1);
     check('a revocation list that is never answered: unavailable', isUnavailable(hung) && /did not answer in time/.test(hung.reason), hung);
     check('a revocation list that starts arriving and then stops: unavailable', isUnavailable(stalled) && /did not finish arriving in time/.test(stalled.reason), stalled);
     check('...each given up on after about 20 seconds, not left to hang', waited >= 19000 && waited < 40000, waited);
     assets.reset();
-    lOverrides.clear();
 
     console.log('--- asset credentials: lists at the edge of the limits are read ---');
     for (const [name, spec] of [
@@ -400,72 +392,12 @@ const KEYS = '/.well-known/atlas-key.json';
     assets.reset();
     await W(() => AtlasWallet.reverifyAll());
 
-    // ------------------------------------------------------------ ledger-account references
-    console.log('--- ledger-account references: the same outcomes ---');
-    const gop = await ledgerIssuer.issue(w.pub, { network: NET, coin: 'GOPH' });
-    let lv = await VL(gop);
-    check('a genuine reference the issuer has not revoked is verified and says so', isVerified(lv), lv);
-    ledgerIssuer.state.revoked.push(gop.id);
-    lv = await VL(gop);
-    check('a reference on the issuer\'s list is revoked and says so', isRevoked(lv), lv);
-    ledgerIssuer.state.revoked.length = 0;
-    lserve(REV, { text: REAL });
-    lv = await timed(() => VL(gop));
-    check('the realistic 6,127-entry list that does not name it: verified', isVerified(lv), lv);
-    lserve(REV, { text: F.pretty(F.entries(F.REAL_COUNT, [{ id: gop.id, revokedAt: '2026-10-05T00:00:00Z', reason: 'issuer-request' }])) });
-    lv = await timed(() => VL(gop));
-    check('...and the reference named last in it is revoked', isRevoked(lv), lv);
-    lOverrides.clear();
-
-    console.log('--- ledger-account references: what cannot be read is "unavailable" ---');
-    for (const [name, spec] of unavailableCases.filter(([n]) => !/no list published|empty 404/.test(n))) {
-      lserve(REV, spec);
-      lv = await VL(gop);
-      check(name + ': unavailable', isUnavailable(lv) && lv.code === 'revocation-unavailable', lv);
-    }
-    lOverrides.clear();
-
-    console.log('--- ledger-account references: the one documented exception to the 404 rule ---');
-    lserve(REV, { status: 404, text: '{}' });
-    lv = await VL(gop);
-    check('a domain that publishes no revocation list (404): verified, and the verdict says that is why', lv.valid === true && lv.status === 'verified' && lv.revocation === 'not-revoked' && /publishes no revocation list/.test(lv.reason), lv);
-    lserve(REV, { status: 404, text: '{}' });
-    r = await attempt((c) => AtlasWallet.addLedgerAccount(c, { allowNetwork: true }), gop);
-    check('...so the reference can still be added (the rule the Labs 38 documentation states)', r.ok, r);
-    await W((id) => AtlasWallet.removeLedgerAccount(id), gop.id);
-    lOverrides.clear();
-    lserve(KEYS, { status: 404, text: '{}' });
-    lv = await VL(gop);
-    check('the exception is only for the revocation list: a missing key document is unavailable', isUnavailable(lv), lv);
-    lOverrides.clear();
-    lserve(KEYS, { text: F.padTo(JSON.stringify({ keys: [{ publicKey: ledgerIssuer.publicKey, validFrom: '2026-01-01T00:00:00Z', validUntil: null }] }), KB + 1) });
-    lv = await VL(gop);
-    check('a key document over its own limit is unavailable for ledger references too', isUnavailable(lv), lv);
-    lOverrides.clear();
-
-    console.log('--- ledger-account references: adding one ---');
-    const count0 = (await W(() => AtlasWallet.getLedgerOverview())).accounts.length;
-    lserve(REV, { status: 500, text: 'oops' });
-    r = await attempt((c) => AtlasWallet.addLedgerAccount(c, { allowNetwork: true }), gop);
-    check('adding while revocation cannot be read fails with its own code and message, not "credential invalid"', !r.ok && r.code === 'revocation-unavailable' && /could not be read/.test(r.message) && /nothing was added/.test(r.message), r);
-    check('...and stored nothing', (await W(() => AtlasWallet.getLedgerOverview())).accounts.length === count0);
-    check('the new problem has plain-language text in the wallet\'s own table', await W(() => /try again later/.test(AtlasLedgerCore.problemText('revocation-unavailable'))));
-    lserve(REV, { text: F.pretty(F.entries(F.REAL_COUNT, [{ id: gop.id }])) });
-    r = await attempt((c) => AtlasWallet.addLedgerAccount(c, { allowNetwork: true }), gop);
-    check('adding a reference that is on the long list is refused as revoked (credential-invalid)', !r.ok && r.code === 'credential-invalid' && /revoked/.test(r.message), r);
-    check('...and stored nothing', (await W(() => AtlasWallet.getLedgerOverview())).accounts.length === count0);
-    lserve(REV, { text: REAL });
-    r = await attempt((c) => AtlasWallet.addLedgerAccount(c, { allowNetwork: true }), gop);
-    check('adding while the realistic long list is published and does not name it works', r.ok && (await W(() => AtlasWallet.getLedgerOverview())).accounts.length === count0 + 1, r);
-    lOverrides.clear();
-
     const worst = Math.max.apply(null, slow);
     console.log('     (slowest verification against a document of up to 4 MiB: ' + worst + ' ms)');
     check('every verification against a large list finished well inside a lookup\'s time budget', worst < 20000, worst);
   } finally {
     await w.close();
     await assets.close();
-    await ledgerIssuer.close();
   }
   process.exit(L.finish('manual-revocation-safety'));
 })().catch((err) => { console.log('FATAL', err && err.stack || err); process.exit(1); });
