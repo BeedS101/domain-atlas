@@ -483,7 +483,7 @@ The service is hardened for the open internet: https and public host names
 only, no redirects, size and rate limits, and a domain-anchored manifest
 must be served from `/.well-known/spatial.json` on the host it names.
 `directory-php/` is a PHP port of the same service for shared cPanel
-hosting (JSON file storage, crawl run from a cron job); see
+hosting (its own SQLite database outside the web root, crawl run from a cron job); see
 `docs/directory-deployment.md` for deploying it.
 
 A domain-anchored manifest that also carries a validly-signed §3.7 identity
@@ -2004,6 +2004,7 @@ node test/verify-directory-security.js # directory hardening: spoofing, SSRF ref
 #   both accept DIRECTORY_IMPL=php to test directory-php/ instead of the Node service
 node test/verify-directory-rebinding.js # directory DNS rebinding (Node; fake lookups, no network)
 php test/verify-directory-rebinding.php # the same for directory-php/ (needs only php with curl)
+php test/verify-directory-storage.php   # directory-php/'s SQLite storage: schema, rollback, hostile text, limits under load
 node test/verify-asset-cache.js        # gltf-mini's local GLB cache: fresh on first load, 304'd on repeat, re-fetched on real change
 node test/verify-identity-backup.js    # password identity lifecycle: onboarding, lock/unlock, export/import by password + seed phrase
 ```

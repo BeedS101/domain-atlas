@@ -29,7 +29,6 @@ if ($mode === 'public') {
 }
 // The settings are read once per process, so public mode and local mode are two runs of this script.
 putenv('DIRECTORY_ALLOW_LOCAL=' . ($mode === 'pin' ? '1' : '0'));
-putenv('DIRECTORY_DATA_DIR=' . sys_get_temp_dir());
 
 require_once __DIR__ . '/../directory-php/atlas/directory/lib/bootstrap.php';
 require_once __DIR__ . '/../directory-php/atlas/directory/lib/fetch.php';

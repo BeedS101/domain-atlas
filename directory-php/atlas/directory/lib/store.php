@@ -1,70 +1,142 @@
 <?php
-// The crawled index and the submit rate-limit state, each one JSON file under the data directory
-// (lib/ by default, web-denied by lib/.htaccess; a directory outside the web root is better).
-// Every write is a read-modify-write under an exclusive flock on a separate lock file, and the new
-// content is written to a temporary file and renamed, so a crash never leaves a half-written file.
+// The directory's storage: one SQLite database of its own (atlas-directory.sqlite), kept outside the web root and
+// separate from every issuer and Chain Labs database. Three tables:
+//   manifests     every submitted manifest URL and the state of its crawl
+//   worlds        the discoverable worlds indexed from those manifests
+//   submit_limits one row per accepted submission, keyed by a hash of the client, for the hourly limit
+// Every statement is prepared. Every change runs in one BEGIN IMMEDIATE transaction, so two requests (or a request and the
+// cron job) can never interleave half-written changes; a failure rolls the whole change back.
 
-function dir_data_file($name) {
+const DIRECTORY_SCHEMA_VERSION = 1;
+
+// The folder that holds the database. It is the configured dataDir (DIRECTORY_DATA_DIR or lib/atlas-directory-config.json) or,
+// failing that, an existing atlas-directory-private folder in the nearest parent folder of this code that has one; that is the
+// folder beside public_html on a cPanel account. It must not be inside the web root: if the web server's document root
+// contains it, the directory refuses to run rather than keep its database where it could be downloaded.
+function dir_data_dir() {
+  static $resolved = null;
+  if ($resolved !== null) return $resolved;
   $dir = dir_config()['dataDir'];
-  if (!is_dir($dir)) @mkdir($dir, 0700, true);
-  return $dir . '/atlas-directory-' . $name;
-}
-
-function dir_json_load($file, $default) {
-  if (!is_file($file)) return $default;
-  $decoded = json_decode((string) file_get_contents($file), true);
-  return is_array($decoded) ? $decoded : $default;
-}
-
-function dir_json_save($file, $data) {
-  $tmp = $file . '.tmp' . getmypid();
-  if (file_put_contents($tmp, json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) === false) throw new DirectoryException('the directory could not write its index');
-  @chmod($tmp, 0600);
-  if (!rename($tmp, $file)) { @unlink($tmp); throw new DirectoryException('the directory could not write its index'); }
-}
-
-function dir_locked($lockName, $fn) {
-  $lock = fopen(dir_data_file($lockName . '.lock'), 'c');
-  if (!$lock) throw new DirectoryException('the directory could not open its lock file');
-  flock($lock, LOCK_EX);
-  try { return $fn(); } finally { flock($lock, LOCK_UN); fclose($lock); }
-}
-
-function dir_store_read() {
-  $data = dir_json_load(dir_data_file('index.json'), []);
-  return ['manifests' => isset($data['manifests']) && is_array($data['manifests']) ? $data['manifests'] : [], 'worlds' => isset($data['worlds']) && is_array($data['worlds']) ? $data['worlds'] : []];
-}
-
-// $fn receives the whole store by reference and may change it; it is saved afterwards.
-function dir_store_update($fn) {
-  return dir_locked('index', function () use ($fn) {
-    $data = dir_store_read();
-    $result = $fn($data);
-    dir_json_save(dir_data_file('index.json'), $data);
-    return $result;
-  });
-}
-
-// Submissions per client in the last hour. Clients are kept as a keyed hash, not as addresses.
-function dir_submit_allowed($ip) {
-  $limit = dir_config()['submitsPerHour'];
-  return dir_locked('ratelimit', function () use ($ip, $limit) {
-    $file = dir_data_file('ratelimit.json');
-    $state = dir_json_load($file, []);
-    if (empty($state['secret'])) $state['secret'] = bin2hex(random_bytes(16));
-    $clients = isset($state['clients']) && is_array($state['clients']) ? $state['clients'] : [];
-    $now = time();
-    foreach ($clients as $key => $times) {
-      $kept = array_values(array_filter((array) $times, function ($t) use ($now) { return $now - $t < 3600; }));
-      if ($kept) $clients[$key] = $kept; else unset($clients[$key]);
+  if ($dir === null) {
+    for ($up = __DIR__; ; $up = dirname($up)) {
+      if (is_dir($up . DIRECTORY_SEPARATOR . 'atlas-directory-private')) { $dir = $up . DIRECTORY_SEPARATOR . 'atlas-directory-private'; break; }
+      if (dirname($up) === $up) break;
     }
-    $id = hash_hmac('sha256', (string) $ip, $state['secret']);
-    $recent = isset($clients[$id]) ? $clients[$id] : [];
-    $allowed = count($recent) < $limit;
-    if ($allowed) $recent[] = $now;
-    $clients[$id] = $recent;
-    $state['clients'] = $clients;
-    dir_json_save($file, $state);
-    return $allowed;
+    if ($dir === null) throw new DirectoryException('no data directory: create atlas-directory-private beside the web root, or set dataDir');
+  }
+  if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) throw new DirectoryException('the data directory could not be created');
+  $real = realpath($dir);
+  if ($real === false) throw new DirectoryException('the data directory could not be used');
+  $root = isset($_SERVER['DOCUMENT_ROOT']) && $_SERVER['DOCUMENT_ROOT'] !== '' ? realpath($_SERVER['DOCUMENT_ROOT']) : false;
+  if ($root !== false && ($real === $root || strpos($real . DIRECTORY_SEPARATOR, rtrim($root, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR) === 0)) {
+    throw new DirectoryException('the data directory is inside the web root');
+  }
+  return $resolved = $real;
+}
+
+function dir_db() {
+  static $db = null;
+  if ($db !== null) return $db;
+  if (!extension_loaded('pdo_sqlite')) throw new DirectoryException('this host has no pdo_sqlite extension');
+  $path = dir_data_dir() . DIRECTORY_SEPARATOR . 'atlas-directory.sqlite';
+  $db = new PDO('sqlite:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_EMULATE_PREPARES => false, PDO::ATTR_TIMEOUT => 5]);
+  @chmod($path, 0600);
+  $db->exec('PRAGMA busy_timeout=5000');
+  $db->exec('PRAGMA foreign_keys=ON');
+  if ((int) $db->query('PRAGMA user_version')->fetchColumn() < DIRECTORY_SCHEMA_VERSION) {
+    dir_tx(function ($db) {
+      $db->exec('CREATE TABLE IF NOT EXISTS manifests (
+        url TEXT PRIMARY KEY,
+        anchor_type TEXT,
+        anchor_key TEXT,
+        status TEXT NOT NULL,
+        submitted_at INTEGER NOT NULL,
+        last_crawled_at INTEGER,
+        next_crawl_at INTEGER NOT NULL,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        manifest_updated TEXT
+      )');
+      $db->exec('CREATE INDEX IF NOT EXISTS manifests_due ON manifests(next_crawl_at)');
+      $db->exec('CREATE TABLE IF NOT EXISTS worlds (
+        world_key TEXT PRIMARY KEY,
+        manifest_url TEXT NOT NULL REFERENCES manifests(url) ON DELETE CASCADE,
+        anchor_type TEXT NOT NULL,
+        anchor_key TEXT NOT NULL,
+        domain TEXT,
+        identity_key TEXT,
+        world_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        owner_name TEXT,
+        genre TEXT,
+        scale TEXT,
+        guest_access TEXT,
+        identity_required INTEGER NOT NULL,
+        item_drops_allowed INTEGER NOT NULL,
+        capabilities TEXT,
+        accepted_item_classes TEXT NOT NULL,
+        trusted_issuers TEXT,
+        portals TEXT NOT NULL,
+        indexed_at INTEGER NOT NULL
+      )');
+      $db->exec('CREATE INDEX IF NOT EXISTS worlds_manifest ON worlds(manifest_url)');
+      $db->exec('CREATE INDEX IF NOT EXISTS worlds_anchor ON worlds(anchor_type, anchor_key)');
+      $db->exec('CREATE TABLE IF NOT EXISTS submit_limits (client TEXT NOT NULL, at INTEGER NOT NULL)');
+      $db->exec('CREATE INDEX IF NOT EXISTS submit_limits_client ON submit_limits(client, at)');
+      $db->exec('PRAGMA user_version=' . DIRECTORY_SCHEMA_VERSION);
+    }, $db);
+  }
+  return $db;
+}
+
+// Runs $fn($db) in one write transaction and returns what it returns. Any exception rolls everything back and is rethrown.
+// (A raw BEGIN is invisible to PDO::inTransaction(), so the rollback is attempted and a "no transaction" error ignored.)
+function dir_tx($fn, $db = null) {
+  if ($db === null) $db = dir_db();
+  $db->exec('BEGIN IMMEDIATE');
+  try {
+    $result = $fn($db);
+    $db->exec('COMMIT');
+    return $result;
+  } catch (Throwable $e) {
+    try { $db->exec('ROLLBACK'); } catch (Throwable $ignored) { /* nothing was open */ }
+    throw $e;
+  }
+}
+
+function dir_manifest_count() {
+  return (int) dir_db()->query('SELECT COUNT(*) FROM manifests')->fetchColumn();
+}
+
+function dir_world_count() {
+  return (int) dir_db()->query('SELECT COUNT(*) FROM worlds')->fetchColumn();
+}
+
+// The secret that turns a client address into the stored hash, so the table never holds an address (and the hash cannot be
+// worked back to one by trying every IPv4 address). Created on first use, in the data directory, readable by this account only.
+function dir_client_secret() {
+  $file = dir_data_dir() . DIRECTORY_SEPARATOR . 'atlas-directory-secret';
+  if (!is_file($file)) {
+    $handle = @fopen($file, 'x');
+    if ($handle) { fwrite($handle, bin2hex(random_bytes(32))); fclose($handle); @chmod($file, 0600); }
+  }
+  $secret = is_file($file) ? trim((string) file_get_contents($file)) : '';
+  if ($secret === '') throw new DirectoryException('the directory could not read its client secret');
+  return $secret;
+}
+
+// Submissions per client in the last hour. A refused attempt is not recorded.
+function dir_submit_allowed($ip, $now = null) {
+  $limit = dir_config()['submitsPerHour'];
+  $now = $now === null ? time() : (int) $now;
+  $client = hash_hmac('sha256', (string) $ip, dir_client_secret());
+  return dir_tx(function ($db) use ($client, $limit, $now) {
+    $db->prepare('DELETE FROM submit_limits WHERE at <= ?')->execute([$now - 3600]);
+    $count = $db->prepare('SELECT COUNT(*) FROM submit_limits WHERE client = ?');
+    $count->execute([$client]);
+    if ((int) $count->fetchColumn() >= $limit) return false;
+    $db->prepare('INSERT INTO submit_limits(client, at) VALUES(?, ?)')->execute([$client, $now]);
+    return true;
   });
 }

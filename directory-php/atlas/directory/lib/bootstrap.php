@@ -34,8 +34,9 @@ function dir_config() {
   if ($envInterval !== false && is_numeric($envInterval) && (float) $envInterval > 0) $interval = max(1, (int) ceil((float) $envInterval / 1000));
   elseif (isset($file['crawlIntervalSeconds']) && is_numeric($file['crawlIntervalSeconds']) && (float) $file['crawlIntervalSeconds'] > 0) $interval = (int) $file['crawlIntervalSeconds'];
   else $interval = 21600;
+  // Where the SQLite database lives (see dir_data_dir() in store.php). Null means: find atlas-directory-private beside the web root.
   $dataDir = getenv('DIRECTORY_DATA_DIR');
-  if ($dataDir === false || $dataDir === '') $dataDir = isset($file['dataDir']) && is_string($file['dataDir']) && $file['dataDir'] !== '' ? $file['dataDir'] : __DIR__;
+  if ($dataDir === false || $dataDir === '') $dataDir = isset($file['dataDir']) && is_string($file['dataDir']) && $file['dataDir'] !== '' ? $file['dataDir'] : null;
   $blockedText = getenv('DIRECTORY_BLOCKED');
   $blockedList = $blockedText !== false ? explode(',', $blockedText) : (isset($file['blocked']) && is_array($file['blocked']) ? $file['blocked'] : []);
   $blocked = array_values(array_filter(array_map(function ($v) { return is_string($v) ? strtolower(trim($v)) : ''; }, $blockedList)));
@@ -46,7 +47,7 @@ function dir_config() {
     'trustProxy' => $flag('DIRECTORY_TRUST_PROXY', 'trustProxy'),
     // Lifts the public-host rules so a demo or test can crawl localhost. Never for a live site.
     'allowLocal' => $flag('DIRECTORY_ALLOW_LOCAL', 'allowLocal'),
-    'dataDir' => rtrim($dataDir, '/\\'),
+    'dataDir' => $dataDir === null ? null : rtrim($dataDir, '/\\'),
     // Domains (or identity keys) this directory will not list. A listed site is dropped on its next crawl.
     'blocked' => $blocked,
     'fetchTimeoutSeconds' => 5,

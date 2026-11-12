@@ -13,7 +13,11 @@ Upload only the contents of atlas/directory/ (not test-router.php).
 Full instructions, settings, the cron line and verification steps:
 docs/directory-deployment.md
 
-Needs PHP 7.4+ with curl and openssl. Data is stored as JSON files with
-flock (default: lib/, which .htaccess denies to the web).
+Needs PHP 7.4+ with curl, openssl and pdo_sqlite. Data is kept in a SQLite
+database of its own (atlas-directory.sqlite) in a folder OUTSIDE the web root:
+create atlas-directory-private beside public_html, or set dataDir. The
+directory refuses to run if that folder is inside the web root.
 Tests: DIRECTORY_IMPL=php node test/verify-directory.js
        DIRECTORY_IMPL=php node test/verify-directory-security.js
+       php test/verify-directory-rebinding.php
+       php test/verify-directory-storage.php

@@ -34,7 +34,7 @@ async function startDirectory({ impl = process.env.DIRECTORY_IMPL || 'node', por
   let base;
   let cron = null;
   if (impl === 'php') {
-    fullEnv.DIRECTORY_DATA_DIR = dataDir;
+    if (!env.DIRECTORY_DATA_DIR) fullEnv.DIRECTORY_DATA_DIR = dataDir;
     base = 'http://127.0.0.1:' + port + '/atlas/directory';
     child = spawn('php', ['-S', '127.0.0.1:' + port, path.join(repo, 'directory-php', 'test-router.php')], { cwd: path.join(repo, 'directory-php'), env: fullEnv, stdio: 'pipe' });
     // Asynchronous on purpose: the manifests being crawled are served by the test process itself.

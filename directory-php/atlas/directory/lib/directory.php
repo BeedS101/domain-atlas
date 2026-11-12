@@ -107,7 +107,7 @@ function dir_crawl_one($url) {
     $anchorKey = $anchorType === 'domain' ? dir_normalize_host($manifest['domain']) : $manifest['identityKey'];
 
     if (in_array(strtolower((string) $anchorKey), $cfg['blocked'], true)) {
-      dir_store_update(function (&$data) use ($url) { dir_drop_manifest($data, $url); });
+      dir_drop_manifest($url);
       throw new DirectoryException('this directory does not list that site');
     }
 
@@ -135,18 +135,26 @@ function dir_crawl_one($url) {
     }
 
     $updated = dir_str(isset($manifest['updated']) ? $manifest['updated'] : null, 40);
-    dir_store_update(function (&$data) use ($url, $anchorType, $anchorKey, $entries, $updated, $cfg) {
-      // A world that was discoverable last crawl and is not now must not linger.
-      foreach ($data['worlds'] as $key => $w) {
-        if ($w['anchorType'] === $anchorType && dir_anchor_of($w) === $anchorKey) unset($data['worlds'][$key]);
+    dir_tx(function ($db) use ($url, $anchorType, $anchorKey, $entries, $updated, $cfg) {
+      $now = time();
+      // Update, or insert when the row is not there (an UPDATE then INSERT keeps this working on older SQLite versions).
+      $update = $db->prepare('UPDATE manifests SET anchor_type = ?, anchor_key = ?, status = \'ok\', last_crawled_at = ?, next_crawl_at = ?, consecutive_failures = 0, last_error = NULL, manifest_updated = ? WHERE url = ?');
+      $update->execute([$anchorType, $anchorKey, $now, $now + $cfg['crawlIntervalSeconds'], $updated, $url]);
+      if ($update->rowCount() === 0) {
+        $db->prepare('INSERT INTO manifests(url, anchor_type, anchor_key, status, submitted_at, last_crawled_at, next_crawl_at, consecutive_failures, last_error, manifest_updated) VALUES(?, ?, ?, \'ok\', ?, ?, ?, 0, NULL, ?)')
+          ->execute([$url, $anchorType, $anchorKey, $now, $now, $now + $cfg['crawlIntervalSeconds'], $updated]);
       }
-      foreach ($entries as $key => $entry) $data['worlds'][$key] = $entry;
-      $record = isset($data['manifests'][$url]) ? $data['manifests'][$url] : ['url' => $url, 'submittedAt' => gmdate('c')];
-      $data['manifests'][$url] = array_merge($record, [
-        'url' => $url, 'anchorType' => $anchorType, 'anchorKey' => $anchorKey,
-        'lastCrawledAt' => gmdate('c'), 'nextCrawlAt' => time() + $cfg['crawlIntervalSeconds'],
-        'status' => 'ok', 'lastError' => null, 'consecutiveFailures' => 0, 'manifestUpdatedAt' => $updated,
-      ]);
+      // A world that was discoverable last crawl and is not now must not linger.
+      $db->prepare('DELETE FROM worlds WHERE anchor_type = ? AND anchor_key = ?')->execute([$anchorType, $anchorKey]);
+      $insert = $db->prepare('INSERT OR REPLACE INTO worlds(world_key, manifest_url, anchor_type, anchor_key, domain, identity_key, world_id, name, description, owner_name, genre, scale,
+          guest_access, identity_required, item_drops_allowed, capabilities, accepted_item_classes, trusted_issuers, portals, indexed_at)
+          VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      foreach ($entries as $e) {
+        $insert->execute([
+          $e['worldKey'], $url, $e['anchorType'], $anchorKey, $e['domain'], $e['identityKey'], $e['worldId'], $e['name'], $e['description'], $e['ownerName'], $e['genre'], $e['scale'],
+          $e['guestAccess'], $e['identityRequired'] ? 1 : 0, $e['itemDropsAllowed'] ? 1 : 0, dir_json($e['capabilities']), dir_json($e['acceptedItemClasses']), dir_json($e['trustedIssuers']), dir_json($e['portalsRaw']), $now,
+        ]);
+      }
     });
     return ['ok' => true, 'worldsIndexed' => count($entries)];
   } catch (Throwable $e) {
@@ -156,48 +164,70 @@ function dir_crawl_one($url) {
   }
 }
 
-function dir_drop_manifest(&$data, $url) {
-  unset($data['manifests'][$url]);
-  foreach ($data['worlds'] as $key => $w) if ($w['manifestUrl'] === $url) unset($data['worlds'][$key]);
+// Removes a manifest; its worlds go with it (ON DELETE CASCADE).
+function dir_drop_manifest($url) {
+  dir_tx(function ($db) use ($url) { $db->prepare('DELETE FROM manifests WHERE url = ?')->execute([$url]); });
+}
+
+function dir_json($value) {
+  return $value === null ? null : json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 }
 
 function dir_record_failure($url, $message) {
   $cfg = dir_config();
-  dir_store_update(function (&$data) use ($url, $message, $cfg) {
-    $record = isset($data['manifests'][$url]) ? $data['manifests'][$url] : null;
-    $failures = ($record ? (int) ($record['consecutiveFailures'] ?? 0) : 0) + 1;
-    $firstTime = !$record || empty($record['lastCrawledAt']) || ($record['status'] ?? '') === 'pending';
+  dir_tx(function ($db) use ($url, $message, $cfg) {
+    $get = $db->prepare('SELECT consecutive_failures, last_crawled_at, status FROM manifests WHERE url = ?');
+    $get->execute([$url]);
+    $row = $get->fetch();
+    $failures = ($row ? (int) $row['consecutive_failures'] : 0) + 1;
+    $firstTime = !$row || $row['last_crawled_at'] === null || $row['status'] === 'pending';
     // A submission that never worked leaves nothing behind, so junk URLs do not pile up.
-    if ($firstTime || $failures >= $cfg['dropAfterFailures']) { dir_drop_manifest($data, $url); return; }
+    if ($firstTime || $failures >= $cfg['dropAfterFailures']) {
+      $db->prepare('DELETE FROM manifests WHERE url = ?')->execute([$url]);
+      return;
+    }
     $interval = $cfg['crawlIntervalSeconds'];
     $backoff = min($interval * (2 ** $failures), $interval * 10);
-    $data['manifests'][$url] = array_merge($record, [
-      'lastCrawledAt' => gmdate('c'), 'nextCrawlAt' => time() + $backoff,
-      'status' => 'error', 'lastError' => dir_str($message, 200), 'consecutiveFailures' => $failures,
-    ]);
+    $now = time();
+    $db->prepare('UPDATE manifests SET last_crawled_at = ?, next_crawl_at = ?, status = \'error\', last_error = ?, consecutive_failures = ? WHERE url = ?')
+      ->execute([$now, $now + $backoff, dir_str($message, 200), $failures, $url]);
+  });
+}
+
+// Adds a submitted URL to the tracked manifests, unless it is there already (true) or the directory is full (false).
+// The count and the insert happen in one transaction, so many requests at once cannot overshoot the limit.
+function dir_register_manifest($url) {
+  $cfg = dir_config();
+  return dir_tx(function ($db) use ($url, $cfg) {
+    $have = $db->prepare('SELECT 1 FROM manifests WHERE url = ?');
+    $have->execute([$url]);
+    if ($have->fetchColumn()) return true;
+    if ((int) $db->query('SELECT COUNT(*) FROM manifests')->fetchColumn() >= $cfg['maxManifests']) return false;
+    $now = time();
+    $db->prepare('INSERT INTO manifests(url, status, submitted_at, next_crawl_at, consecutive_failures) VALUES(?, \'pending\', ?, ?, 0)')
+      ->execute([$url, $now, $now + $cfg['crawlIntervalSeconds']]);
+    return true;
   });
 }
 
 // Registers a submitted URL (or reports why not) and crawls it right away.
 function dir_submit($url) {
-  $cfg = dir_config();
-  $accepted = dir_store_update(function (&$data) use ($url, $cfg) {
-    if (isset($data['manifests'][$url])) return true;
-    if (count($data['manifests']) >= $cfg['maxManifests']) return false;
-    $data['manifests'][$url] = ['url' => $url, 'submittedAt' => gmdate('c'), 'nextCrawlAt' => time() + $cfg['crawlIntervalSeconds'], 'consecutiveFailures' => 0, 'status' => 'pending'];
-    return true;
-  });
-  if (!$accepted) return ['full' => true];
+  if (!dir_register_manifest($url)) return ['full' => true];
   return dir_crawl_one($url);
 }
 
 // Crawls every manifest that is due. Used by cron.php.
 function dir_crawl_due($maxToCrawl) {
-  $data = dir_store_read();
-  $due = [];
-  foreach ($data['manifests'] as $url => $m) if (($m['nextCrawlAt'] ?? 0) <= time()) $due[] = $url;
-  $report = ['due' => count($due), 'ok' => 0, 'failed' => 0];
-  foreach (array_slice($due, 0, $maxToCrawl) as $url) {
+  $db = dir_db();
+  $now = time();
+  $count = $db->prepare('SELECT COUNT(*) FROM manifests WHERE next_crawl_at <= ?');
+  $count->execute([$now]);
+  $list = $db->prepare('SELECT url FROM manifests WHERE next_crawl_at <= ? ORDER BY next_crawl_at, url LIMIT ?');
+  $list->bindValue(1, $now, PDO::PARAM_INT);
+  $list->bindValue(2, (int) $maxToCrawl, PDO::PARAM_INT);
+  $list->execute();
+  $report = ['due' => (int) $count->fetchColumn(), 'ok' => 0, 'failed' => 0];
+  foreach ($list->fetchAll(PDO::FETCH_COLUMN) as $url) {
     $r = dir_crawl_one($url);
     if ($r['ok']) $report['ok']++; else $report['failed']++;
   }
@@ -227,23 +257,48 @@ function dir_inbound_counts($worlds) {
   return array_map('count', $sources);
 }
 
+// A stored world as the rest of the code sees it.
+function dir_world_from_row($r) {
+  $json = function ($v) { return $v === null ? null : json_decode($v, true); };
+  return [
+    'worldKey' => $r['world_key'], 'anchorType' => $r['anchor_type'], 'domain' => $r['domain'], 'identityKey' => $r['identity_key'],
+    'worldId' => $r['world_id'], 'name' => $r['name'], 'description' => $r['description'], 'ownerName' => $r['owner_name'],
+    'genre' => $r['genre'], 'scale' => $r['scale'], 'capabilities' => $json($r['capabilities']), 'guestAccess' => $r['guest_access'],
+    'identityRequired' => (int) $r['identity_required'] === 1, 'itemDropsAllowed' => (int) $r['item_drops_allowed'] === 1,
+    'acceptedItemClasses' => $json($r['accepted_item_classes']) ?: [], 'trustedIssuers' => $json($r['trusted_issuers']),
+    'portalsRaw' => $json($r['portals']) ?: [], 'manifestUrl' => $r['manifest_url'],
+  ];
+}
+
 function dir_search($params) {
   $cfg = dir_config();
-  $data = dir_store_read();
-  $inbound = dir_inbound_counts($data['worlds']);
+  $db = dir_db();
+  // Ranking counts every indexed site's links, so it reads the portals of all worlds, but nothing else of them.
+  $links = [];
+  foreach ($db->query("SELECT anchor_type, domain, identity_key, portals FROM worlds WHERE portals <> '[]'") as $r) {
+    $links[] = ['anchorType' => $r['anchor_type'], 'domain' => $r['domain'], 'identityKey' => $r['identity_key'], 'portalsRaw' => json_decode($r['portals'], true) ?: []];
+  }
+  $inbound = dir_inbound_counts($links);
   $inboundFor = function ($w) use ($inbound) { return $inbound[dir_anchor_of($w)] ?? 0; };
   $q = isset($params['q']) ? trim((string) $params['q']) : '';
   $qTokens = $q !== '' ? dir_tokenize($q) : [];
 
+  // The exact-match filters are done by the database; the rest (substring and word matching) below.
+  $where = [];
+  $bind = [];
+  if (!empty($params['scale'])) { $where[] = 'scale = ?'; $bind[] = $params['scale']; }
+  if (!empty($params['domain'])) { $where[] = 'domain = ?'; $bind[] = dir_normalize_host($params['domain']); }
+  if (!empty($params['anchorType'])) { $where[] = 'anchor_type = ?'; $bind[] = $params['anchorType']; }
+  if (($params['identityRequired'] ?? null) === 'true') $where[] = 'identity_required = 1';
+  if (($params['identityRequired'] ?? null) === 'false') $where[] = 'identity_required = 0';
+  $select = $db->prepare('SELECT * FROM worlds' . ($where ? ' WHERE ' . implode(' AND ', $where) : ''));
+  $select->execute($bind);
+
   $scored = [];
-  foreach ($data['worlds'] as $w) {
+  foreach ($select->fetchAll() as $row) {
+    $w = dir_world_from_row($row);
     if (!empty($params['genre']) && stripos((string) ($w['genre'] ?? ''), $params['genre']) === false) continue;
-    if (!empty($params['scale']) && ($w['scale'] ?? null) !== $params['scale']) continue;
     if (!empty($params['combat']) && (!is_array($w['capabilities']) || ($w['capabilities']['combat'] ?? null) !== $params['combat'])) continue;
-    if (!empty($params['domain']) && ($w['domain'] ?? null) !== dir_normalize_host($params['domain'])) continue;
-    if (!empty($params['anchorType']) && $w['anchorType'] !== $params['anchorType']) continue;
-    if (($params['identityRequired'] ?? null) === 'true' && empty($w['identityRequired'])) continue;
-    if (($params['identityRequired'] ?? null) === 'false' && !empty($w['identityRequired'])) continue;
     $matched = null;
     if ($q !== '') {
       $tokens = array_flip(dir_world_tokens($w));
@@ -264,10 +319,17 @@ function dir_search($params) {
 
   $limit = min(max((int) ($params['limit'] ?? 0) ?: $cfg['defaultLimit'], 1), $cfg['maxLimit']);
   $offset = max((int) ($params['offset'] ?? 0), 0);
+  $page = array_slice($scored, $offset, $limit);
+  $failures = [];
+  if ($page) {
+    $urls = array_values(array_unique(array_map(function ($row) { return $row['w']['manifestUrl']; }, $page)));
+    $get = $db->prepare('SELECT url, consecutive_failures FROM manifests WHERE url IN (' . implode(',', array_fill(0, count($urls), '?')) . ')');
+    $get->execute($urls);
+    foreach ($get->fetchAll() as $m) $failures[$m['url']] = (int) $m['consecutive_failures'];
+  }
   $results = [];
-  foreach (array_slice($scored, $offset, $limit) as $row) {
+  foreach ($page as $row) {
     $w = $row['w'];
-    $m = $data['manifests'][$w['manifestUrl']] ?? null;
     $results[] = [
       'anchorType' => $w['anchorType'], 'domain' => $w['domain'], 'identityKey' => $w['identityKey'],
       'worldId' => $w['worldId'], 'name' => $w['name'], 'description' => $w['description'] ?? null,
@@ -275,7 +337,7 @@ function dir_search($params) {
       'guestAccess' => $w['guestAccess'], 'identityRequired' => $w['identityRequired'],
       'acceptedItemClasses' => $w['acceptedItemClasses'], 'manifestUrl' => $w['manifestUrl'],
       'inboundPortalCount' => $inboundFor($w),
-      'stale' => $m !== null && (int) ($m['consecutiveFailures'] ?? 0) >= $cfg['staleAfterFailures'],
+      'stale' => ($failures[$w['manifestUrl']] ?? 0) >= $cfg['staleAfterFailures'],
     ];
   }
   return ['count' => count($scored), 'limit' => $limit, 'offset' => $offset, 'results' => $results];

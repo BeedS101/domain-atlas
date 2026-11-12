@@ -1,5 +1,5 @@
 # Runs the directory service tests (directory-server/ and its PHP port directory-php/) on the PHP versions shared hosting is likely
-# to run: the functional tests, the security tests and the DNS rebinding tests. It starts only throw-away local servers, makes no
+# to run: the functional tests, the security tests, the DNS rebinding tests and the SQLite storage tests. It starts only throw-away local servers, makes no
 # request to any real domain, deploys nothing and needs no secrets. It runs only when the directory, its tests or this file change.
 name: directory
 
@@ -12,6 +12,7 @@ on:
       - 'test/verify-directory-security.js'
       - 'test/verify-directory-rebinding.js'
       - 'test/verify-directory-rebinding.php'
+      - 'test/verify-directory-storage.php'
       - 'test/support/directory-harness.js'
       - 'test/support/directory-fake-dns.js'
       - '.github/workflows/directory.yml'
@@ -23,6 +24,7 @@ on:
       - 'test/verify-directory-security.js'
       - 'test/verify-directory-rebinding.js'
       - 'test/verify-directory-rebinding.php'
+      - 'test/verify-directory-storage.php'
       - 'test/support/directory-harness.js'
       - 'test/support/directory-fake-dns.js'
       - '.github/workflows/directory.yml'
@@ -57,13 +59,13 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: curl, openssl
+          extensions: curl, openssl, pdo_sqlite
           coverage: none
 
       - name: Confirm the PHP under test
         run: |
           php -r 'echo "PHP ", PHP_VERSION, "\n"; exit(strpos(PHP_VERSION, getenv("DIRECTORY_EXPECT_PHP") . ".") === 0 ? 0 : 1);'
-          php -r 'exit(extension_loaded("curl") && extension_loaded("openssl") ? 0 : 1);'
+          php -r 'exit(extension_loaded("curl") && extension_loaded("openssl") && extension_loaded("pdo_sqlite") ? 0 : 1);'
 
       - name: PHP directory, functional tests
         run: node test/verify-directory.js
@@ -73,6 +75,9 @@ jobs:
 
       - name: PHP directory, DNS rebinding tests
         run: php test/verify-directory-rebinding.php
+
+      - name: PHP directory, SQLite storage tests
+        run: php test/verify-directory-storage.php
 
       # The Node service does not depend on the PHP version, so it runs once.
       - name: Node directory, functional, security and rebinding tests

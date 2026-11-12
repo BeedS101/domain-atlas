@@ -113,7 +113,6 @@ issuer-php/lib/holds/
 issuer-server/mint-allowance/
 # Directory service runtime state (never commit)
 directory-server/directory-index.json
-directory-php/atlas/directory/lib/atlas-directory-*.json
-directory-php/atlas/directory/lib/*.lock
-directory-php/atlas/directory/lib/*.tmp*
+directory-php/**/atlas-directory.sqlite*
+directory-php/**/atlas-directory-secret
 directory-php/atlas/directory/lib/atlas-directory-config.json
