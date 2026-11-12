@@ -110,21 +110,54 @@
 
   function cancel() { return button('Cancel', () => { panel = null; render(); }); }
 
+  // Saved contacts the person can send to: the contact's key has to be one the coin domains can credit (a wallet key).
+  async function sendContacts() {
+    try {
+      const friends = await AtlasWallet.getFriends();
+      return (Array.isArray(friends) ? friends : [])
+        .filter((f) => f && typeof f.publicKey === 'string' && typeof f.name === 'string')
+        .sort((x, y) => x.name.localeCompare(y.name));
+    } catch (err) { return []; }
+  }
+
+  function contactPicker(contacts, input) {
+    const wrap = el('div');
+    wrap.appendChild(el('label', { className: 'ledger-open-label', for: 'chainLabsSendContact', textContent: 'Send to a saved contact' }));
+    const select = el('select', { id: 'chainLabsSendContact' });
+    select.appendChild(el('option', { value: '', textContent: 'Choose a contact\u2026' }));
+    contacts.forEach((f) => {
+      const usable = AtlasChainLabs.isOwnerKey(f.publicKey);
+      const option = el('option', { value: f.publicKey, textContent: f.name + ' (' + f.publicKey.slice(0, 8) + '\u2026' + f.publicKey.slice(-4) + ')' + (usable ? '' : ' \u2014 key cannot receive these coins') });
+      if (!usable) option.disabled = true;
+      select.appendChild(option);
+    });
+    select.addEventListener('change', () => { if (select.value) { input.value = select.value; input.dispatchEvent(new Event('input', { bubbles: true })); } });
+    input.addEventListener('input', () => { if (select.value && select.value !== input.value.trim()) select.value = ''; });
+    wrap.appendChild(select);
+    return wrap;
+  }
+
   async function sendPanel() {
     const p = panel;
     const box = el('div', { className: 'info-card ledger-confirm', role: 'group', 'aria-label': 'Send ' + p.coin.symbol });
     box.appendChild(el('div', { textContent: 'Send ' + p.coin.symbol + ' held at ' + p.domain }));
     if (p.step === 'form') {
-      box.appendChild(field('Recipient\'s wallet key', 'chainLabsSendTo', 'Paste the key the recipient shows in their wallet'));
+      const keyField = field('Recipient\'s wallet key', 'chainLabsSendTo', 'Paste the key the recipient shows in their wallet, or choose a contact');
+      const contacts = await sendContacts();
+      if (contacts.length) box.appendChild(contactPicker(contacts, keyField.querySelector('input')));
+      box.appendChild(keyField);
       box.appendChild(field('Amount (' + p.coin.symbol + ')', 'chainLabsSendAmount', 'e.g. 12.5'));
       const actions = el('div', { className: 'item-actions' });
       actions.appendChild(button('Check…', () => act(async () => {
-        const prepared = await chain().prepareSend(p.domain, p.coin.coinId, document.getElementById('chainLabsSendTo').value.trim(), document.getElementById('chainLabsSendAmount').value);
-        panel = { kind: 'send', domain: p.domain, coin: p.coin, step: 'confirm', prepared };
+        const to = document.getElementById('chainLabsSendTo').value.trim();
+        const prepared = await chain().prepareSend(p.domain, p.coin.coinId, to, document.getElementById('chainLabsSendAmount').value);
+        const contact = (await sendContacts()).find((f) => f.publicKey === to);
+        panel = { kind: 'send', domain: p.domain, coin: p.coin, step: 'confirm', prepared, contactName: contact ? contact.name : '' };
       })));
       actions.appendChild(cancel());
       box.appendChild(actions);
     } else {
+      if (p.contactName) box.appendChild(el('div', { className: 'meta', textContent: 'Saved contact: ' + p.contactName }));
       box.appendChild(el('div', { textContent: p.prepared.text }));
       box.appendChild(el('div', { className: 'meta', textContent: 'Approving signs this one transfer with your key. The domain cannot reuse it for anything else.' }));
       const actions = el('div', { className: 'item-actions' });
