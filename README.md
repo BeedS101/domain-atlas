@@ -69,7 +69,8 @@ domain-atlas/
 ├── issuer-server/                a real credential issuer for demo-domain-a
 │                                    (also plays the "trading station" role — see §4 below)
 ├── issuer-php/                    plain-PHP port of the issuer, for shared cPanel hosting
-├── directory-server/              crawler/index/search over other domains' manifests (§3.3)
+├── directory-server/              crawler/index/search over other domains' manifests (§3.3), Node reference
+├── directory-php/                 the same directory as a PHP port for shared hosting (docs/directory-deployment.md)
 ├── presence-server/                hand-rolled WebSocket server for multiplayer presence + chat
 ├── presence-php/                  plain-PHP polling port of presence + chat, same hosting reason
 ├── demo-domain-a/                 "Example Plaza" — FIVE worlds: plaza, museum, arena, market, lobby
@@ -446,10 +447,12 @@ item, and there is no delivery path for it yet.
 A reference implementation of SPEC.md §3.3 — a crawler/index/search
 service, separate from either issuer on purpose (a directory indexes OTHER
 domains; it doesn't issue credentials for its own). Zero dependencies,
-same as the issuer:
+same as the issuer. The demo manifests live on `localhost`, which a real
+directory refuses to fetch, so a local demo needs `DIRECTORY_ALLOW_LOCAL=1`
+(never set it on a live site):
 
 ```bash
-node directory-server/server.js
+DIRECTORY_ALLOW_LOCAL=1 node directory-server/server.js
 ```
 
 With both demo domains already running, submit them and search:
@@ -464,15 +467,24 @@ curl "http://localhost:8003/search?scale=district"
 curl "http://localhost:8003/search?q=workshop"
 ```
 
-Or open `http://localhost:8003` for a small search UI. Results are ranked
-by inbound `"kind": "domain"` portal count — the same insight PageRank
-started from, applied to this much smaller graph — and domain-anchored vs.
-key-anchored listings are always labeled, never presented as equivalent
-(§3.6.1). A background scheduler re-crawls every submitted manifest on an
-interval (60s by default; override with `DIRECTORY_CRAWL_INTERVAL_MS`), so
-a world that changes its name, genre, or `discoverable` flag is picked up
-on its next scheduled pass, not instantly — the same eventual consistency
-a real search index has with the live web.
+Or open `http://localhost:8003` for a small search UI, which also has a
+form for listing your own domain. Results are ranked by the number of
+distinct other sites that link in with a `"kind": "domain"` portal (the
+same insight PageRank started from, applied to this much smaller graph),
+and domain-anchored vs. key-anchored listings are always labeled, never
+presented as equivalent (§3.6.1). A background scheduler re-crawls every
+submitted manifest on an interval (60s by default; override with
+`DIRECTORY_CRAWL_INTERVAL_MS`), so a world that changes its name, genre,
+or `discoverable` flag is picked up on its next scheduled pass, not
+instantly — the same eventual consistency a real search index has with the
+live web.
+
+The service is hardened for the open internet: https and public host names
+only, no redirects, size and rate limits, and a domain-anchored manifest
+must be served from `/.well-known/spatial.json` on the host it names.
+`directory-php/` is a PHP port of the same service for shared cPanel
+hosting (JSON file storage, crawl run from a cron job); see
+`docs/directory-deployment.md` for deploying it.
 
 A domain-anchored manifest that also carries a validly-signed §3.7 identity
 pin gets that `identityKey` copied straight onto its indexed worlds' own
@@ -1988,6 +2000,8 @@ node test/verify.js                    # manifest + portal mechanism
 node test/verify-wallet.js             # identity, issuance, cross-domain verification, revocation, export
 node test/verify-loadout-trading.js    # loadouts and resource mining
 node test/verify-directory.js          # directory service: crawl/index/rank, filters, free-text, key-anchored verification
+node test/verify-directory-security.js # directory hardening: spoofing, SSRF refusals, limits, rate limit, blocklist
+#   both accept DIRECTORY_IMPL=php to test directory-php/ instead of the Node service
 node test/verify-asset-cache.js        # gltf-mini's local GLB cache: fresh on first load, 304'd on repeat, re-fetched on real change
 node test/verify-identity-backup.js    # password identity lifecycle: onboarding, lock/unlock, export/import by password + seed phrase
 ```
@@ -2037,13 +2051,14 @@ including the security property the whole design rests on, that a wrong
 password alone and a wrong seed phrase alone fail import with the exact
 same generic message.
 
-`verify-directory.js` is different — it's testing a JSON API, not a
-browser UI, so it needs no display and drives the directory service (with
-both demo domains already running) directly over `fetch`. It also spawns
-its own short-lived, isolated instance of the directory server on a
-throwaway port to prove the background re-crawl scheduler actually picks
-up a manifest change on its own, without waiting out or polluting the
-main instance's 60-second interval.
+`verify-directory.js` and `verify-directory-security.js` are different —
+they test a JSON API, not a browser UI, so they need no display. They are
+self-contained: each starts its own throw-away directory (Node, or the PHP
+port with `DIRECTORY_IMPL=php`, which needs `php` with curl and openssl on
+the PATH) and its own local manifest servers on spare ports, so no demo
+domain needs to be running. Because a real directory refuses localhost,
+the test directories run with `DIRECTORY_ALLOW_LOCAL=1`; the security test
+also starts one without it to prove the public-host rules.
 
 ## What this does and doesn't prove
 

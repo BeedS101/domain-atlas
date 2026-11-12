@@ -1,0 +1,10 @@
+# Deny all direct web access to this folder: it holds the crawled index and the
+# rate-limit state (atlas-directory-*.json) unless a data directory elsewhere is
+# configured. Defense in depth; nothing here is meant to be web-reachable.
+<IfModule mod_authz_core.c>
+  Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+  Order deny,allow
+  Deny from all
+</IfModule>

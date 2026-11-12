@@ -1,0 +1,6 @@
+# Clean URLs: /atlas/directory/search -> search.php, /atlas/directory/submit -> submit.php.
+# Same rule as issuer-php's atlas/.htaccess, scoped to this folder.
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.+)$ $1.php [L]

@@ -1,8 +1,11 @@
 // Verifies the directory service (directory-server/server.js, SPEC.md
-// §3.3) against real HTTP traffic — no mocking. Assumes the issuer
-// (localhost:8001), the plain static server for demo-domain-b
-// (localhost:8002), and the directory service itself (localhost:8003) are
-// already running, same convention as the other verify-*.js scripts.
+// §3.3) against real HTTP traffic — no mocking. Starts its own isolated
+// directory on port 8099 (Node by default; DIRECTORY_IMPL=php runs the PHP port; local hosts allowed, short crawl interval) and its
+// own small manifest servers on 127.0.0.1, so nothing else needs to be
+// running. The demo manifests are served from copies of
+// demo-domain-a/b's .well-known/spatial.json with the domain rewritten to
+// the test server's own host, because the directory only lists a domain from
+// the host that serves it. Security rules: test/verify-directory-security.js.
 //
 // Covers:
 //   1. Submitting both demo manifests indexes exactly the discoverable
@@ -23,13 +26,14 @@
 //      left untouched — "stale but cached", not wiped) when tampered.
 
 const http = require('http');
-const { spawn } = require('child_process');
 const { webcrypto } = require('crypto');
 const { subtle } = webcrypto;
 const path = require('path');
 const fs = require('fs');
 
-const DIRECTORY = 'http://localhost:8003';
+let DIRECTORY;
+const DIRECTORY_PATH = '/.well-known/spatial.json';
+const { startDirectory } = require('./support/directory-harness');
 
 function assert(cond, msg) {
   if (!cond) throw new Error('FAILED: ' + msg);
@@ -77,30 +81,37 @@ function worldFixture(overrides = {}) {
 }
 
 async function main() {
-  console.log('STEP 1: submitting both demo manifests');
-  const plazaRes = await fetch(DIRECTORY + '/submit', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ manifest: 'http://localhost:8001/.well-known/spatial.json' })
-  }).then((r) => r.json());
-  assert(plazaRes.indexed === 5, 'expected 5 discoverable worlds indexed from demo-domain-a, got ' + plazaRes.indexed);
+  const dir = await startDirectory({ port: 8099, env: { DIRECTORY_ALLOW_LOCAL: '1' } });
+  DIRECTORY = dir.base;
+  const servers = [];
+  try {
+  const submit = (url) => fetch(DIRECTORY + '/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: url }) }).then((r) => r.json());
 
-  const workshopRes = await fetch(DIRECTORY + '/submit', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ manifest: 'http://localhost:8002/.well-known/spatial.json' })
-  }).then((r) => r.json());
-  assert(workshopRes.indexed === 1, 'expected 1 discoverable world indexed from demo-domain-b, got ' + workshopRes.indexed);
-  console.log('PASS: 5 + 1 worlds indexed');
+  console.log('STEP 1: submitting both demo manifests (served from copies, domain rewritten to the test host)');
+  const demoCopy = async (dir) => {
+    const copy = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', dir, '.well-known', 'spatial.json'), 'utf8'));
+    const srv = await startMutableManifestServer(copy);
+    servers.push(srv.server);
+    copy.domain = '127.0.0.1:' + srv.port;
+    return 'http://127.0.0.1:' + srv.port + DIRECTORY_PATH;
+  };
+  const discoverableIn = (dir) => JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', dir, '.well-known', 'spatial.json'), 'utf8')).worlds.filter((w) => w.policy && w.policy.discoverable === true).length;
+  const plazaRes = await submit(await demoCopy('demo-domain-a'));
+  assert(plazaRes.indexed === discoverableIn('demo-domain-a'), 'expected every discoverable world of demo-domain-a to be indexed, got ' + JSON.stringify(plazaRes));
+  const workshopRes = await submit(await demoCopy('demo-domain-b'));
+  assert(workshopRes.indexed === discoverableIn('demo-domain-b'), 'expected every discoverable world of demo-domain-b to be indexed, got ' + JSON.stringify(workshopRes));
+  console.log('PASS: ' + plazaRes.indexed + ' + ' + workshopRes.indexed + ' worlds indexed');
 
   console.log('STEP 2: ranking reflects the real inbound "kind":"domain" portal graph');
   const y = await startMutableManifestServer(null);
   const x = await startMutableManifestServer(null);
   const z = await startMutableManifestServer(null);
-  const domY = 'localhost:' + y.port, domX = 'localhost:' + x.port, domZ = 'localhost:' + z.port;
+  const domY = '127.0.0.1:' + y.port, domX = '127.0.0.1:' + x.port, domZ = '127.0.0.1:' + z.port;
   y.state.manifest = { spec: 'domain-atlas/1.0', domain: domY, owner: { name: 'Y' }, defaultWorld: 'room', worlds: [worldFixture({ profile: { genre: 'ranktest', scale: 'room', capabilities: { building: 'none', vehicles: false, combat: 'none', landOwnership: false } } })], updated: new Date().toISOString() };
   x.state.manifest = { spec: 'domain-atlas/1.0', domain: domX, owner: { name: 'X' }, defaultWorld: 'room', worlds: [worldFixture({ portals: [{ kind: 'domain', to: domY, label: 'to Y' }] })], updated: new Date().toISOString() };
   z.state.manifest = { spec: 'domain-atlas/1.0', domain: domZ, owner: { name: 'Z' }, defaultWorld: 'room', worlds: [worldFixture({ portals: [{ kind: 'domain', to: domY, label: 'to Y' }] })], updated: new Date().toISOString() };
 
-  for (const url of [`http://127.0.0.1:${y.port}/`, `http://127.0.0.1:${x.port}/`, `http://127.0.0.1:${z.port}/`]) {
+  for (const url of [`http://127.0.0.1:${y.port}${DIRECTORY_PATH}`, `http://127.0.0.1:${x.port}${DIRECTORY_PATH}`, `http://127.0.0.1:${z.port}${DIRECTORY_PATH}`]) {
     const r = await fetch(DIRECTORY + '/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: url }) }).then((res) => res.json());
     assert(r.indexed === 1, 'expected 1 world indexed from ' + url + ', got ' + JSON.stringify(r));
   }
@@ -127,24 +138,15 @@ async function main() {
   console.log('STEP 4: background scheduler re-crawls on a schedule and picks up changes');
   const mutable = await startMutableManifestServer(null);
   mutable.state.manifest = {
-    spec: 'domain-atlas/1.0', domain: 'localhost:' + mutable.port, owner: { name: 'Mutable' },
+    spec: 'domain-atlas/1.0', domain: '127.0.0.1:' + mutable.port, owner: { name: 'Mutable' },
     defaultWorld: 'room', worlds: [worldFixture({ profile: { genre: 'genre-alpha', scale: 'room', capabilities: { building: 'none', vehicles: false, combat: 'none', landOwnership: false } } })],
     updated: new Date().toISOString()
   };
-  const snapshotPath = path.join('/tmp', 'test-directory-index-' + Date.now() + '.json');
-  const child = spawn('node', [path.resolve(__dirname, '..', 'directory-server', 'server.js')], {
-    env: { ...process.env, PORT: '8099', DIRECTORY_CRAWL_INTERVAL_MS: '2000', DIRECTORY_SNAPSHOT_FILE: snapshotPath },
-    stdio: 'pipe'
-  });
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('isolated directory-server did not start in time')), 8000);
-    child.stdout.on('data', (d) => { if (d.toString().includes('listening')) { clearTimeout(timer); resolve(); } });
-  });
   try {
-    const manifestUrl = `http://127.0.0.1:${mutable.port}/`;
-    const submitRes = await fetch('http://localhost:8099/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: manifestUrl }) }).then((r) => r.json());
+    const manifestUrl = `http://127.0.0.1:${mutable.port}${DIRECTORY_PATH}`;
+    const submitRes = await fetch(DIRECTORY + '/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: manifestUrl }) }).then((r) => r.json());
     assert(submitRes.indexed === 1, 'expected the mutable manifest to index 1 world initially');
-    const before = await fetch('http://localhost:8099/search?domain=' + encodeURIComponent('localhost:' + mutable.port)).then((r) => r.json());
+    const before = await fetch(DIRECTORY + '/search?domain=' + encodeURIComponent('127.0.0.1:' + mutable.port)).then((r) => r.json());
     assert(before.results[0].genre === 'genre-alpha', 'expected initial genre to be genre-alpha, got ' + before.results[0].genre);
 
     // Change the served manifest's genre without resubmitting — only the
@@ -152,7 +154,7 @@ async function main() {
     mutable.state.manifest.worlds[0].profile.genre = 'genre-beta';
     mutable.state.manifest.updated = new Date().toISOString();
     await new Promise((r) => setTimeout(r, 4000)); // > CRAWL_INTERVAL_MS(2000) + a scheduler tick
-    const after = await fetch('http://localhost:8099/search?domain=' + encodeURIComponent('localhost:' + mutable.port)).then((r) => r.json());
+    const after = await fetch(DIRECTORY + '/search?domain=' + encodeURIComponent('127.0.0.1:' + mutable.port)).then((r) => r.json());
     assert(after.results[0].genre === 'genre-beta', 'expected the scheduler to have picked up the genre change to genre-beta, got ' + after.results[0].genre);
     console.log('PASS: scheduler re-crawled unattended and picked up the genre change');
 
@@ -160,13 +162,11 @@ async function main() {
     // index entirely on the next crawl, not just show stale data.
     mutable.state.manifest.worlds[0].policy.discoverable = false;
     await new Promise((r) => setTimeout(r, 4000));
-    const afterHidden = await fetch('http://localhost:8099/search?domain=' + encodeURIComponent('localhost:' + mutable.port)).then((r) => r.json());
+    const afterHidden = await fetch(DIRECTORY + '/search?domain=' + encodeURIComponent('127.0.0.1:' + mutable.port)).then((r) => r.json());
     assert(afterHidden.results.length === 0, 'expected the world to be removed from the index once discoverable:false, got ' + afterHidden.results.length);
     console.log('PASS: a world that turns discoverable:false is removed from the index on its next crawl');
   } finally {
-    child.kill();
     mutable.server.close();
-    try { fs.unlinkSync(snapshotPath); } catch {}
   }
 
   console.log('STEP 5: key-anchored manifest — accepted when validly signed, rejected when tampered');
@@ -187,7 +187,7 @@ async function main() {
   }
 
   keyServer.state.manifest = await buildSignedManifest('Key World');
-  const keyUrl = `http://127.0.0.1:${keyServer.port}/`;
+  const keyUrl = `http://127.0.0.1:${keyServer.port}${DIRECTORY_PATH}`;
   const keySubmit = await fetch(DIRECTORY + '/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: keyUrl }) }).then((r) => r.json());
   assert(keySubmit.indexed === 1, 'expected the validly-signed key-anchored manifest to index 1 world, got ' + JSON.stringify(keySubmit));
   const keyResult = await fetch(DIRECTORY + `/search?q=${encodeURIComponent(identityKey.slice(0, 8))}`).then((r) => r.json());
@@ -210,6 +210,10 @@ async function main() {
   assert(!tamperedNotIndexed, 'expected the tampered content to never make it into the index at all');
   console.log('PASS: tampered key-anchored manifest rejected; prior good entry left untouched (cached, not wiped)');
   keyServer.server.close();
+  } finally {
+    dir.stop();
+    servers.forEach((srv) => srv.close());
+  }
 
   console.log('\nALL DIRECTORY SERVICE CHECKS PASSED');
 }

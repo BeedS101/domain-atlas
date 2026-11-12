@@ -33,6 +33,12 @@
     cursor: pointer; font-weight: 600;
   }
   button:hover { background: #338576; }
+  details.submit { margin-top: 26px; color: #8fa2ab; font-size: 13px; }
+  details.submit summary { cursor: pointer; }
+  .submit-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 6px; }
+  #submitUrl { flex: 1 1 320px; min-width: 200px; }
+  #submitMsg { min-height: 1.4em; }
+  #submitMsg.err { color: #ff9f9f; }
   #status { color: #8fa2ab; font-size: 13px; margin: 0 0 14px; }
   .card {
     border: 1px solid #223038; border-radius: 8px; padding: 14px 16px;
@@ -74,6 +80,15 @@
   </div>
   <p id="status">Loading…</p>
   <div id="results"></div>
+  <details class="submit">
+    <summary>List your own domain</summary>
+    <p>Enter the address of your manifest. It must be served over https from <code>/.well-known/spatial.json</code> on the domain it names (or be a key-anchored manifest). The directory fetches it itself and keeps it up to date; nothing you type here is stored except that address.</p>
+    <div class="submit-row">
+      <input id="submitUrl" type="url" placeholder="https://example.com/.well-known/spatial.json">
+      <button id="submitBtn">Submit</button>
+    </div>
+    <div id="submitMsg" role="status"></div>
+  </details>
 </main>
 
 <script>
@@ -84,7 +99,7 @@ const scaleEl = document.getElementById('scale');
 const combatEl = document.getElementById('combat');
 
 function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function renderCard(w) {
@@ -116,16 +131,42 @@ async function runSearch() {
   if (qEl.value.trim()) params.set('q', qEl.value.trim());
   if (scaleEl.value) params.set('scale', scaleEl.value);
   if (combatEl.value) params.set('combat', combatEl.value);
-  const res = await fetch('/search?' + params.toString());
+  const res = await fetch('search?' + params.toString());
   const data = await res.json();
   if (data.results.length === 0) {
-    resultsEl.innerHTML = '<p class="empty">No worlds found. Submit a manifest via POST /submit to add one.</p>';
+    resultsEl.innerHTML = '<p class="empty">No worlds found. Use "List your own domain" below to add one.</p>';
   } else {
     resultsEl.innerHTML = data.results.map(renderCard).join('');
   }
   statusEl.textContent = `${data.count} world${data.count === 1 ? '' : 's'} found`;
 }
 
+async function submitManifest() {
+  const msg = document.getElementById('submitMsg');
+  const url = document.getElementById('submitUrl').value.trim();
+  msg.className = '';
+  if (!url) { msg.textContent = 'Enter a manifest address first.'; return; }
+  msg.textContent = 'Checking…';
+  try {
+    const res = await fetch('submit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ manifest: url }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      msg.textContent = 'Added. ' + (data.indexed != null ? data.indexed + ' discoverable world(s) indexed.' : '');
+      runSearch();
+    } else {
+      msg.className = 'err';
+      msg.textContent = data.error || ('The directory refused that address (' + res.status + ').');
+    }
+  } catch (e) {
+    msg.className = 'err';
+    msg.textContent = 'Could not reach the directory.';
+  }
+}
+
+document.getElementById('submitBtn').addEventListener('click', submitManifest);
 document.getElementById('searchBtn').addEventListener('click', runSearch);
 qEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
 scaleEl.addEventListener('change', runSearch);

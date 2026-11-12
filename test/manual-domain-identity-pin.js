@@ -201,7 +201,7 @@ async function waitSettle(ms = 1500) { await new Promise((r) => setTimeout(r, ms
     const dirPort = 8146;
     const snapshotPath = path.join('/tmp', 'test-directory-index-pin-' + Date.now() + '.json');
     directoryProc = spawn('node', [path.resolve(__dirname, '..', 'directory-server', 'server.js')], {
-      env: { ...process.env, PORT: String(dirPort), DIRECTORY_SNAPSHOT_FILE: snapshotPath },
+      env: { ...process.env, PORT: String(dirPort), DIRECTORY_ALLOW_LOCAL: '1', DIRECTORY_SNAPSHOT_FILE: snapshotPath },
       stdio: 'pipe'
     });
     await new Promise((resolve, reject) => {
@@ -217,9 +217,9 @@ async function waitSettle(ms = 1500) { await new Promise((r) => setTimeout(r, ms
     console.log('PASS: a valid domain+identityKey pin is accepted and populated on every indexed world');
 
     const brokenPinServer = await startMutableManifestServer(null);
-    const brokenDomain = 'localhost:' + brokenPinServer.port;
+    const brokenDomain = '127.0.0.1:' + brokenPinServer.port;
     brokenPinServer.state.manifest = { spec: 'domain-atlas/1.0', domain: brokenDomain, identityKey: keyA, signature: 'not-a-real-signature', owner: { name: 'Broken Pin' }, defaultWorld: 'room', worlds: [worldFixture()], updated: new Date().toISOString() };
-    const brokenSubmit = await fetch(DIRECTORY + '/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: `http://127.0.0.1:${brokenPinServer.port}/` }) }).then((r) => r.json());
+    const brokenSubmit = await fetch(DIRECTORY + '/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: `http://127.0.0.1:${brokenPinServer.port}/.well-known/spatial.json` }) }).then((r) => r.json());
     assert(brokenSubmit.indexed === 1, 'expected a manifest with a BROKEN pin to still index normally on its domain anchor, got: ' + JSON.stringify(brokenSubmit));
     const brokenSearch = await fetch(DIRECTORY + '/search?domain=' + encodeURIComponent(brokenDomain)).then((r) => r.json());
     assert(brokenSearch.results.length === 1 && brokenSearch.results[0].identityKey === null, 'expected a broken pin to leave identityKey null rather than rejecting the manifest, got: ' + JSON.stringify(brokenSearch.results));
@@ -227,7 +227,7 @@ async function waitSettle(ms = 1500) { await new Promise((r) => setTimeout(r, ms
     console.log('PASS: a broken pin never blocks indexing — dropped silently, identityKey left null');
 
     const neitherServer = await startMutableManifestServer({ spec: 'domain-atlas/1.0', owner: { name: 'Neither' }, defaultWorld: 'room', worlds: [worldFixture()], updated: new Date().toISOString() });
-    const neitherSubmit = await fetch(DIRECTORY + '/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: `http://127.0.0.1:${neitherServer.port}/` }) }).then((r) => r.json());
+    const neitherSubmit = await fetch(DIRECTORY + '/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: `http://127.0.0.1:${neitherServer.port}/.well-known/spatial.json` }) }).then((r) => r.json());
     assert(neitherSubmit.error && /domain.*identityKey|identityKey.*domain/i.test(neitherSubmit.error), 'expected a manifest with NEITHER domain nor identityKey to be rejected, got: ' + JSON.stringify(neitherSubmit));
     neitherServer.server.close();
     console.log('PASS: a manifest anchored by nothing at all (neither domain nor identityKey) is still rejected');
