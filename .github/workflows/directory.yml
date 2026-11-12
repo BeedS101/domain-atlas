@@ -1,0 +1,85 @@
+# Runs the directory service tests (directory-server/ and its PHP port directory-php/) on the PHP versions shared hosting is likely
+# to run: the functional tests, the security tests and the DNS rebinding tests. It starts only throw-away local servers, makes no
+# request to any real domain, deploys nothing and needs no secrets. It runs only when the directory, its tests or this file change.
+name: directory
+
+on:
+  push:
+    paths:
+      - 'directory-server/**'
+      - 'directory-php/**'
+      - 'test/verify-directory.js'
+      - 'test/verify-directory-security.js'
+      - 'test/verify-directory-rebinding.js'
+      - 'test/verify-directory-rebinding.php'
+      - 'test/support/directory-harness.js'
+      - 'test/support/directory-fake-dns.js'
+      - '.github/workflows/directory.yml'
+  pull_request:
+    paths:
+      - 'directory-server/**'
+      - 'directory-php/**'
+      - 'test/verify-directory.js'
+      - 'test/verify-directory-security.js'
+      - 'test/verify-directory-rebinding.js'
+      - 'test/verify-directory-rebinding.php'
+      - 'test/support/directory-harness.js'
+      - 'test/support/directory-fake-dns.js'
+      - '.github/workflows/directory.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: directory-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4', '8.1', '8.3']
+    env:
+      # The tests refuse to run unless the PHP that serves the directory starts with this version.
+      DIRECTORY_EXPECT_PHP: ${{ matrix.php }}
+      DIRECTORY_IMPL: php
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, openssl
+          coverage: none
+
+      - name: Confirm the PHP under test
+        run: |
+          php -r 'echo "PHP ", PHP_VERSION, "\n"; exit(strpos(PHP_VERSION, getenv("DIRECTORY_EXPECT_PHP") . ".") === 0 ? 0 : 1);'
+          php -r 'exit(extension_loaded("curl") && extension_loaded("openssl") ? 0 : 1);'
+
+      - name: PHP directory, functional tests
+        run: node test/verify-directory.js
+
+      - name: PHP directory, security tests
+        run: node test/verify-directory-security.js
+
+      - name: PHP directory, DNS rebinding tests
+        run: php test/verify-directory-rebinding.php
+
+      # The Node service does not depend on the PHP version, so it runs once.
+      - name: Node directory, functional, security and rebinding tests
+        if: matrix.php == '8.3'
+        env:
+          DIRECTORY_IMPL: node
+        run: |
+          node test/verify-directory.js
+          node test/verify-directory-security.js
+          node test/verify-directory-rebinding.js
