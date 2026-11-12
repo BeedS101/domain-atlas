@@ -1,5 +1,5 @@
 # Runs the directory service tests (directory-server/ and its PHP port directory-php/) on the PHP versions shared hosting is likely
-# to run: the functional tests, the security tests, the DNS rebinding tests and the SQLite storage tests. It starts only throw-away local servers, makes no
+# to run: the functional tests, the service-listing tests, the security tests, the DNS rebinding tests and the SQLite storage tests. It starts only throw-away local servers, makes no
 # request to any real domain, deploys nothing and needs no secrets. It runs only when the directory, its tests or this file change.
 name: directory
 
@@ -13,6 +13,9 @@ on:
       - 'test/verify-directory-rebinding.js'
       - 'test/verify-directory-rebinding.php'
       - 'test/verify-directory-storage.php'
+      - 'test/verify-directory-services.js'
+      - 'test/verify-directory-services.php'
+      - 'test/support/directory-service-vectors.json'
       - 'test/support/directory-harness.js'
       - 'test/support/directory-fake-dns.js'
       - '.github/workflows/directory.yml'
@@ -25,6 +28,9 @@ on:
       - 'test/verify-directory-rebinding.js'
       - 'test/verify-directory-rebinding.php'
       - 'test/verify-directory-storage.php'
+      - 'test/verify-directory-services.js'
+      - 'test/verify-directory-services.php'
+      - 'test/support/directory-service-vectors.json'
       - 'test/support/directory-harness.js'
       - 'test/support/directory-fake-dns.js'
       - '.github/workflows/directory.yml'
@@ -70,6 +76,11 @@ jobs:
       - name: PHP directory, functional tests
         run: node test/verify-directory.js
 
+      - name: PHP directory, service listing tests
+        run: |
+          php test/verify-directory-services.php
+          node test/verify-directory-services.js
+
       - name: PHP directory, security tests
         run: node test/verify-directory-security.js
 
@@ -80,11 +91,12 @@ jobs:
         run: php test/verify-directory-storage.php
 
       # The Node service does not depend on the PHP version, so it runs once.
-      - name: Node directory, functional, security and rebinding tests
+      - name: Node directory, functional, service listing, security and rebinding tests
         if: matrix.php == '8.3'
         env:
           DIRECTORY_IMPL: node
         run: |
           node test/verify-directory.js
+          node test/verify-directory-services.js
           node test/verify-directory-security.js
           node test/verify-directory-rebinding.js
