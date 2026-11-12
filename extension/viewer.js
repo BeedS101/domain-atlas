@@ -3785,6 +3785,33 @@ function refreshWorldGates() {
   refreshInventoryDisplay();
 }
 
+const copyIdentityKeyBtn = document.getElementById('copyIdentityKeyBtn');
+const copyIdentityKeyStatusEl = document.getElementById('copyIdentityKeyStatus');
+copyIdentityKeyBtn && copyIdentityKeyBtn.addEventListener('click', async () => {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  const say = (text) => {
+    if (copyIdentityKeyStatusEl) copyIdentityKeyStatusEl.textContent = text;
+    setTimeout(() => { if (copyIdentityKeyStatusEl) copyIdentityKeyStatusEl.textContent = ''; }, 3000);
+  };
+  try {
+    await navigator.clipboard.writeText(identity.publicKey);
+    say('Public key copied.');
+  } catch (err) {
+    // The clipboard API can be denied in this frame: select the key in a scratch field and try the legacy copy.
+    const box = document.createElement('textarea');
+    box.value = identity.publicKey;
+    box.setAttribute('readonly', '');
+    box.style.cssText = 'position:fixed;left:-9999px;top:0;';
+    document.body.appendChild(box);
+    box.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e2) { /* fall through */ }
+    box.remove();
+    say(ok ? 'Public key copied.' : 'Could not copy automatically.');
+  }
+});
+
 async function refreshIdentityDisplay() {
   const identity = await AtlasWallet.getIdentity();
   const alias = identity ? await AtlasWallet.getAlias(identity.publicKey) : null;
@@ -5593,6 +5620,7 @@ function renderAssetCard(entry, container, opts) {
     asset.name + ' ' + asset.class + ' ' + entry.credential.issuer.domain + ' ' + propsText
   ).toLowerCase();
   if (opts.groupKey) el.dataset.group = opts.groupKey;
+  el.dataset.id = entry.credential.id;
   // opts.checkCompat is the CURRENT world — see refreshInventoryDisplay() below.
   // opts.checkCompatManifest (task #152) is that world's owning manifest,
   // needed only for the domain-level acceptedItemClasses default.
@@ -6530,18 +6558,76 @@ recentWorldsListEl && recentWorldsListEl.addEventListener('click', async (e) => 
 
 // ---------- activity log (Wallet -> "Activity log") ----------
 //
-// A read-only, most-recent-first feed — see wallet.js's own "wallet
-// activity log" section for what is and isn't logged and why. Same
-// info-card look as Recent worlds just above, minus any action button
-// (there's nothing to click through to — this is a narration, not a link
-// to a place).
+// A read-only, most-recent-first feed; see wallet.js's own "wallet
+// activity log" section for what is and isn't logged and why. A mint or
+// pick-up entry can be clicked to jump to that item in the Inventory.
+function activityAssetRef(entry) {
+  if (entry.type !== 'asset') return null;
+  const meta = entry.meta || {};
+  if (meta.assetId || meta.assetClass) return { id: meta.assetId || null, assetClass: meta.assetClass || null, domain: meta.domain || null };
+  // Entries written before the item was recorded: the class is in the text.
+  const m = /^Minted (?:[\d.]+ )?(\S+) from \S+$/.exec(entry.text) || /^Picked up (\S+) in \S+$/.exec(entry.text);
+  return m ? { id: null, assetClass: m[1], domain: null } : null;
+}
+
 function renderActivityLogEntry(entry, container) {
   const el = document.createElement('div');
   el.className = 'info-card';
   el.innerHTML =
     '<div class="name">' + escapeHtml(entry.text) + '</div>' +
     '<div class="meta">' + new Date(entry.at).toLocaleString() + '</div>';
+  const ref = activityAssetRef(entry);
+  if (ref) {
+    el.classList.add('activity-link');
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+    el.title = 'Show this item in your inventory';
+    const go = document.createElement('div');
+    go.className = 'activity-go';
+    go.textContent = 'Show in inventory \u2192';
+    go.dataset.hint = go.textContent;
+    el.appendChild(go);
+    const open = () => showAssetInInventory(ref, go);
+    el.addEventListener('click', open);
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+  }
   container.appendChild(el);
+}
+
+// Opens the Inventory on the sub-tab that holds the item and flashes its
+// card. The credential id is tried first; a mint or pick-up may since have
+// been merged into a larger balance (consolidation) or the item moved on,
+// so the next best match is the same class, preferring the same issuer.
+async function showAssetInInventory(ref, noteEl) {
+  const idleText = noteEl ? noteEl.dataset.hint || '' : '';
+  const say = (text) => { if (noteEl) noteEl.textContent = text || idleText; };
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  const held = await AtlasWallet.getWallet(identity.publicKey);
+  let entry = ref.id ? held.find((e) => e.credential.id === ref.id) : null;
+  if (!entry && ref.assetClass) {
+    const sameClass = held.filter((e) => e.credential.asset.class === ref.assetClass);
+    entry = sameClass.find((e) => ref.domain && e.credential.issuer.domain === ref.domain) || sameClass[0] || null;
+  }
+  if (!entry) { say('No longer in your inventory.'); return; }
+  if (entry.hidden) { say('This item is hidden. Unhide it under Settings \u2192 Hidden assets.'); return; }
+  const documents = entry.credential.asset.presentation === 'document';
+  const inventory = document.querySelector('.settings-category[data-category="inventory"]');
+  if (inventory) inventory.classList.add('open');
+  showInventorySubtab(documents ? 'documentsSubscreen' : 'collectiblesSubscreen');
+  const search = documents ? documentsSearchInput : collectiblesSearchInput;
+  const list = documents ? selfDocumentsListEl : selfCollectiblesListEl;
+  if (search && search.value) {
+    search.value = '';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  const card = list && Array.from(list.querySelectorAll('.wallet-item')).find((c) => c.dataset.id === entry.credential.id);
+  if (!card) { say('Could not find the card in the list.'); return; }
+  say('');
+  card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  card.classList.remove('jump-flash');
+  void card.offsetWidth;
+  card.classList.add('jump-flash');
 }
 
 async function refreshActivityLogDisplay() {

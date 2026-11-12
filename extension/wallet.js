@@ -2085,7 +2085,7 @@ const AtlasWallet = (() => {
       }
     }
     const consolidation = await autoConsolidateAssetWallet(owner.publicKey);
-    await logActivity('asset', 'Minted ' + (quantity !== undefined ? quantity + ' ' : '') + assetClass + ' from ' + issuerDomain);
+    await logActivity('asset', 'Minted ' + (quantity !== undefined ? quantity + ' ' : '') + assetClass + ' from ' + issuerDomain, { assetId: credential.id, assetClass, domain: credential.issuer.domain });
     return { credential, verdict, consolidation };
   }
 
@@ -3502,7 +3502,7 @@ const AtlasWallet = (() => {
     const lastVerdict = await verifyCredential(credential);
     await commitOperation(identity.publicKey, null, [{ owner: identity.publicKey, add: [{ credential, lastVerdict }] }]);
     await autoConsolidateAssetWallet(identity.publicKey);
-    await logActivity('asset', 'Picked up ' + credential.asset.class + ' in ' + worldDomain);
+    await logActivity('asset', 'Picked up ' + credential.asset.class + ' in ' + worldDomain, { assetId: credential.id, assetClass: credential.asset.class, domain: credential.issuer.domain });
     return credential;
   }
 

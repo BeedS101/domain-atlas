@@ -443,6 +443,12 @@
   .pending-ops-list li[data-state="needs-attention"] { border-style: dashed; border-width: 2px; }
   .pending-ops-list .op-status { font-weight: 600; }
   .wallet-item.held-back { border-style: dashed; }
+  .wallet-item.jump-flash { animation: jump-flash 1.8s ease-out; }
+  @keyframes jump-flash { 0%, 40% { box-shadow: 0 0 0 2px #8fbfe8; background: #1d2f38; } 100% { box-shadow: 0 0 0 0 transparent; } }
+  @media (prefers-reduced-motion: reduce) { .wallet-item.jump-flash { animation: none; box-shadow: 0 0 0 2px #8fbfe8; } }
+  .info-card.activity-link { cursor: pointer; }
+  .info-card.activity-link:hover, .info-card.activity-link:focus-visible { border-color: #6fa8dc; outline: none; }
+  .info-card .activity-go { font-size: 11px; color: #8fbfe8; margin-top: 4px; }
   .held-note { font-size: 11px; margin-top: 6px; font-weight: 600; }
   .wallet-item .item-actions, .info-card .item-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
   .wallet-item .item-actions button, .info-card .item-actions button { flex: 1; font-size: 11px; padding: 6px 8px; min-width: 70px; }
@@ -2041,6 +2047,10 @@
         <button type="button" class="settings-category-toggle"><span>Identity</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
           <div id="walletIdentity" class="mono">—</div>
+          <div class="btn-col" style="margin-top:8px;">
+            <button id="copyIdentityKeyBtn" type="button" class="btn-secondary">Copy public key</button>
+          </div>
+          <div id="copyIdentityKeyStatus" class="mono" role="status" aria-live="polite"></div>
 
           <!-- Local-only nickname — see wallet.js's setAlias. Never signed,
                never shown to anyone else; just replaces the raw key in
