@@ -13,6 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const net = require('net');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 
@@ -58,7 +59,7 @@ for (const n of Object.values(nodes)) {
   fs.writeFileSync(path.join(n.dir, 'prepend.php'), "<?php $_SERVER['HTTPS'] = 'on';\n");
 }
 function start(n) {
-  n.proc = spawn('php', ['-S', '127.0.0.1:' + n.port, '-t', n.root, '-d', 'auto_prepend_file=' + path.join(n.dir, 'prepend.php')], { stdio: 'ignore', env: { ...process.env, PHP_CLI_SERVER_WORKERS: '6' } });
+  n.proc = spawn('php', ['-S', '127.0.0.1:' + n.port, '-t', n.root, '-d', 'auto_prepend_file=' + path.join(n.dir, 'prepend.php')], { stdio: 'ignore', detached: true, env: { ...process.env, PHP_CLI_SERVER_WORKERS: '6' } });
   return waitUp(n);
 }
 // Waits until the server answers, up to ten seconds.
@@ -73,11 +74,27 @@ async function waitUp(n) {
     await sleep(100);
   }
 }
+// php -S with PHP_CLI_SERVER_WORKERS forks worker processes. Killing only the parent can leave workers running on some PHP
+// versions (8.1), so a "stopped" domain would keep answering. The whole process group is killed, and the test fails at once
+// if the port still answers, rather than carrying on with a domain that is not down.
+function killGroup(n) {
+  if (!n.proc) return;
+  try { process.kill(-n.proc.pid, 'SIGKILL'); } catch (e) { n.proc.kill('SIGKILL'); }
+  n.proc = null;
+}
 async function stop(n) {
   if (!n.proc) return;
-  n.proc.kill('SIGKILL');
-  n.proc = null;
-  await sleep(300);
+  killGroup(n);
+  for (let i = 0; i < 50; i++) {
+    const up = await new Promise((resolve) => {
+      const probe = net.connect({ host: '127.0.0.1', port: n.port });
+      probe.on('connect', () => { probe.destroy(); resolve(true); });
+      probe.on('error', () => resolve(false));
+    });
+    if (!up) return;
+    await sleep(100);
+  }
+  throw new Error(n.domain + ' is still answering after it was stopped');
 }
 
 function call(n, file, method, query, body) {
@@ -304,7 +321,7 @@ const levelOk = (v) => typeof v === 'string' && v !== 'none';
     const frozenRun = await op(b, 'compare', { coinId: mir.id });
     line(frozenRun.status === 200 && Object.keys(frozenRun.json.results).length === 0 && frozenRun.json.state === 'frozen', 'a frozen copy compares nothing more', frozenRun.json);
   } finally {
-    for (const n of Object.values(nodes)) if (n.proc) n.proc.kill('SIGKILL');
+    for (const n of Object.values(nodes)) killGroup(n);
     fs.rmSync(work, { recursive: true, force: true });
   }
   console.log('\n' + (failures === 0 ? 'ALL ' + total + ' CHAIN-LABS MULTI ENDPOINT CHECKS PASSED' : failures + ' of ' + total + ' checks FAILED'));
