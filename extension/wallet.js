@@ -762,15 +762,6 @@ const AtlasWallet = (() => {
       throw new Error('Incorrect current password.');
     }
     if (newPassword === currentPassword) throw new Error('New password must be different from the current one.');
-    // Re-keying the automatic backup builds a backup of the main identity, which needs the wallet to be
-    // acting as it.
-    const actingAs = await getIdentity();
-    const account = await getAccountIdentity();
-    if (actingAs && account && actingAs.publicKey !== account.publicKey) {
-      const backupSettings = await getAutoBackupSettings();
-      if (backupSettings && backupSettings.enabled) throw new Error('Switch to your main identity to change the password while automatic backup is on.');
-    }
-
     const newSalt = crypto.getRandomValues(new Uint8Array(16));
     const newIv = crypto.getRandomValues(new Uint8Array(12));
     const newKey = await deriveAesKey([newPassword], newSalt);
@@ -1249,8 +1240,8 @@ const AtlasWallet = (() => {
   const WALLET_LOCKED_MESSAGE = 'The wallet is locked. Unlock it to make changes; nothing was changed.';
   const WALLET_UNREADABLE_MESSAGE = 'The stored wallet data could not be read or decrypted, so nothing was changed and the stored data was left as it is.';
 
-  async function readStoredListForWrite(storeName, stored) {
-    const identity = await getIdentity();
+  async function readStoredListForWrite(storeName, stored, identityArg) {
+    const identity = identityArg || await getIdentity();
     if (!identity && (await getIdentityMode()) !== null) throw storageError('wallet-locked', WALLET_LOCKED_MESSAGE);
     if (stored === undefined || stored === null) return { identity, list: [] };
     if (Array.isArray(stored)) return { identity, list: stored };
@@ -1301,13 +1292,13 @@ const AtlasWallet = (() => {
     // A stored value that is neither a list nor an encrypted envelope is shown as empty and left exactly as it is.
     if (stored !== undefined && stored !== null && !Array.isArray(stored) && !(typeof stored === 'object' && stored.__atlasEncrypted)) return [];
     const entries = await decryptAtRestAndMigrate(identity, 'wallet', wallets[ownerPublicKey], [], async (v) => {
-      wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', v);
+      wallets[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'wallet', v);
       await chrome.storage.local.set({ atlasWallets: wallets });
     });
     if (!Array.isArray(entries)) return [];
     const cleaned = entries.filter(isPostMergeAssetCredential);
     if (cleaned.length !== entries.length) {
-      wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', cleaned);
+      wallets[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'wallet', cleaned);
       await chrome.storage.local.set({ atlasWallets: wallets });
     }
     if (atlasResourceWallets) await chrome.storage.local.remove('atlasResourceWallets'); // fully orphaned since the merge — nothing valid to salvage, nothing else reads it
@@ -1348,22 +1339,23 @@ const AtlasWallet = (() => {
 
   // Replaces the stored list. Refuses when what is stored now cannot be read (locked, corrupted,
   // undecryptable). `replaceUnreadable` is for restoring a backup only: the unreadable value is
-  // first copied to atlasWalletQuarantine so it is not destroyed.
+  // first copied to atlasWalletQuarantine so it is not destroyed. `opts.identity` writes for an identity
+  // other than the active one (a restore of a sub-identity); it must be the owner's own identity.
   async function saveWallet(ownerPublicKey, entries, opts) {
     const { atlasWallets } = await chrome.storage.local.get('atlasWallets');
     const wallets = atlasWallets || {};
     let identity;
     try {
-      ({ identity } = await readStoredListForWrite('wallet', wallets[ownerPublicKey]));
+      ({ identity } = await readStoredListForWrite('wallet', wallets[ownerPublicKey], opts && opts.identity));
     } catch (err) {
       if (!(opts && opts.replaceUnreadable) || err.code !== 'wallet-unreadable') throw err;
-      identity = await getIdentity();
+      identity = (opts && opts.identity) || await getIdentity();
       const { atlasWalletQuarantine } = await chrome.storage.local.get('atlasWalletQuarantine');
       const quarantine = atlasWalletQuarantine || {};
       quarantine[ownerPublicKey] = (quarantine[ownerPublicKey] || []).concat([{ savedAt: new Date().toISOString(), store: 'wallet', blob: wallets[ownerPublicKey] }]).slice(-3);
       await chrome.storage.local.set({ atlasWalletQuarantine: quarantine });
     }
-    wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', Array.isArray(entries) ? entries.map(withoutUnresolvedMark) : entries);
+    wallets[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'wallet', Array.isArray(entries) ? entries.map(withoutUnresolvedMark) : entries);
     // `opts.extraWrites(identity)` returns more storage keys to write in the SAME storage write.
     const extra = opts && opts.extraWrites ? await opts.extraWrites(identity) : {};
     await chrome.storage.local.set(Object.assign({}, extra, { atlasWallets: wallets }));
@@ -1555,7 +1547,7 @@ const AtlasWallet = (() => {
       const all = atlasPendingOps || {};
       const { identity, list } = await readStoredListForWrite('pendingOps', all[ownerPublicKey]);
       list.push(entry);
-      all[ownerPublicKey] = await encryptAtRest(identity, 'pendingOps', list);
+      all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'pendingOps', list);
       await chrome.storage.local.set({ atlasPendingOps: all });
     });
   }
@@ -1569,7 +1561,7 @@ const AtlasWallet = (() => {
       if (!entry) return false;
       if (patch === null) list.splice(list.indexOf(entry), 1);
       else Object.assign(entry, patch);
-      all[ownerPublicKey] = await encryptAtRest(identity, 'pendingOps', list);
+      all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'pendingOps', list);
       await chrome.storage.local.set({ atlasPendingOps: all });
       return true;
     });
@@ -1608,7 +1600,7 @@ const AtlasWallet = (() => {
         if (index < 0) return false;
         if (patch) Object.assign(pending[index], patch);
         else pending.splice(index, 1);
-        pendingAll[journalOwner] = await encryptAtRest(identity, 'pendingOps', pending);
+        pendingAll[journalOwner] = await encryptAtRestFor(identity, journalOwner, 'pendingOps', pending);
       }
       for (const [owner, list] of next) wallets[owner] = await encryptAtRest(identity, 'wallet', list);
       await chrome.storage.local.set(requestId ? { atlasWallets: wallets, atlasPendingOps: pendingAll } : { atlasWallets: wallets });
@@ -2108,10 +2100,10 @@ const AtlasWallet = (() => {
   // The wallet list and the journal for one owner, from ONE storage read, so they describe the same
   // instant: every write that changes both (applying an answer) is a single storage write. Reads
   // strictly: a locked, unreadable or corrupted store throws instead of being captured as empty.
-  async function snapshotWalletAndJournal(ownerPublicKey) {
+  async function snapshotWalletAndJournal(ownerPublicKey, identityArg) {
     const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
-    const wallet = (await readStoredListForWrite('wallet', (stored.atlasWallets || {})[ownerPublicKey])).list.filter(isPostMergeAssetCredential);
-    const journal = (await readStoredListForWrite('pendingOps', (stored.atlasPendingOps || {})[ownerPublicKey])).list;
+    const wallet = (await readStoredListForWrite('wallet', (stored.atlasWallets || {})[ownerPublicKey], identityArg)).list.filter(isPostMergeAssetCredential);
+    const journal = (await readStoredListForWrite('pendingOps', (stored.atlasPendingOps || {})[ownerPublicKey], identityArg)).list;
     return { wallet, journal };
   }
 
@@ -2221,7 +2213,7 @@ const AtlasWallet = (() => {
     let local = [];
     let localUnreadable = false;
     try {
-      local = (await readStoredListForWrite('pendingOps', journalAll[owner])).list;
+      local = (await readStoredListForWrite('pendingOps', journalAll[owner], identity)).list;
     } catch (err) {
       if (!err || err.code !== 'wallet-unreadable') throw err;
       localUnreadable = true;
@@ -2235,16 +2227,16 @@ const AtlasWallet = (() => {
     const summary = Object.assign({}, merged.summary, localUnreadable ? { localJournalUnreadable: true } : {});
     const writes = {};
     if (localUnreadable || canonicalize(merged.list) !== canonicalize(local)) {
-      journalAll[owner] = await encryptAtRest(identity, 'pendingOps', merged.list);
+      journalAll[owner] = await encryptAtRestFor(identity, owner, 'pendingOps', merged.list);
       writes.atlasPendingOps = journalAll;
     }
     if (aside.length) {
-      const existing = (await readStoredListForWrite('pendingOpsQuarantine', quarantineAll[owner])).list;
+      const existing = (await readStoredListForWrite('pendingOpsQuarantine', quarantineAll[owner], identity)).list;
       const known = new Set(existing.map((q) => canonicalize({ reason: q.reason, source: q.source, value: q.value })));
       const fresh = aside.filter((q) => !known.has(canonicalize({ reason: q.reason, source: q.source, value: q.value })))
         .map((q) => Object.assign({ at: new Date().toISOString() }, q));
       if (fresh.length) {
-        quarantineAll[owner] = await encryptAtRest(identity, 'pendingOpsQuarantine', existing.concat(fresh));
+        quarantineAll[owner] = await encryptAtRestFor(identity, owner, 'pendingOpsQuarantine', existing.concat(fresh));
         writes.atlasPendingOpsQuarantine = quarantineAll;
       }
     }
@@ -2979,7 +2971,7 @@ const AtlasWallet = (() => {
     const { atlasAvatarLook } = await chrome.storage.local.get('atlasAvatarLook');
     const all = atlasAvatarLook || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarLook', assetId);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'avatarLook', assetId);
     await chrome.storage.local.set({ atlasAvatarLook: all });
   }
 
@@ -3038,7 +3030,7 @@ const AtlasWallet = (() => {
     const { atlasAvatarHat } = await chrome.storage.local.get('atlasAvatarHat');
     const all = atlasAvatarHat || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarHat', assetId);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'avatarHat', assetId);
     await chrome.storage.local.set({ atlasAvatarHat: all });
   }
 
@@ -3095,7 +3087,7 @@ const AtlasWallet = (() => {
     const { atlasAvatarShoes } = await chrome.storage.local.get('atlasAvatarShoes');
     const all = atlasAvatarShoes || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarShoes', assetId);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'avatarShoes', assetId);
     await chrome.storage.local.set({ atlasAvatarShoes: all });
   }
 
@@ -3185,7 +3177,7 @@ const AtlasWallet = (() => {
     const { atlasAvatarHand } = await chrome.storage.local.get('atlasAvatarHand');
     const all = atlasAvatarHand || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarHand', assetId);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'avatarHand', assetId);
     await chrome.storage.local.set({ atlasAvatarHand: all });
   }
 
@@ -3391,7 +3383,7 @@ const AtlasWallet = (() => {
     const { atlasAvatarSlots } = await chrome.storage.local.get('atlasAvatarSlots');
     const all = atlasAvatarSlots || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarSlots', map);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'avatarSlots', map);
     await chrome.storage.local.set({ atlasAvatarSlots: all });
   }
 
@@ -4008,7 +4000,7 @@ const AtlasWallet = (() => {
     const { atlasSubmittedTrades } = await chrome.storage.local.get('atlasSubmittedTrades');
     const all = atlasSubmittedTrades || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'submittedTrades', records);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'submittedTrades', records);
     await chrome.storage.local.set({ atlasSubmittedTrades: all });
   }
 
@@ -4133,7 +4125,7 @@ const AtlasWallet = (() => {
     const { atlasAliases } = await chrome.storage.local.get('atlasAliases');
     const all = isLegacyFlatAliases(atlasAliases) ? {} : (atlasAliases || {});
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'aliases', aliasesForOwner);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'aliases', aliasesForOwner);
     await chrome.storage.local.set({ atlasAliases: all });
   }
 
@@ -4183,7 +4175,7 @@ const AtlasWallet = (() => {
     const { atlasRecentWorlds } = await chrome.storage.local.get('atlasRecentWorlds');
     const all = (atlasRecentWorlds && !Array.isArray(atlasRecentWorlds)) ? atlasRecentWorlds : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'recentWorlds', list);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'recentWorlds', list);
     await chrome.storage.local.set({ atlasRecentWorlds: all });
   }
 
@@ -4263,7 +4255,7 @@ const AtlasWallet = (() => {
     const { atlasFriends } = await chrome.storage.local.get('atlasFriends');
     const all = (atlasFriends && !Array.isArray(atlasFriends)) ? atlasFriends : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'friends', friends);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'friends', friends);
     await chrome.storage.local.set({ atlasFriends: all });
     scheduleFriendsSync();
   }
@@ -4393,7 +4385,7 @@ const AtlasWallet = (() => {
     const { atlasContactGroups } = await chrome.storage.local.get('atlasContactGroups');
     const all = (atlasContactGroups && !Array.isArray(atlasContactGroups)) ? atlasContactGroups : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'contactGroups', groups);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'contactGroups', groups);
     await chrome.storage.local.set({ atlasContactGroups: all });
   }
 
@@ -4512,7 +4504,7 @@ const AtlasWallet = (() => {
     const { atlasMutedChatUsers } = await chrome.storage.local.get('atlasMutedChatUsers');
     const all = (atlasMutedChatUsers && !Array.isArray(atlasMutedChatUsers)) ? atlasMutedChatUsers : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'mutedChatUsers', muted);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'mutedChatUsers', muted);
     await chrome.storage.local.set({ atlasMutedChatUsers: all });
   }
 
@@ -4550,7 +4542,7 @@ const AtlasWallet = (() => {
     const { atlasBlockedChatUsers } = await chrome.storage.local.get('atlasBlockedChatUsers');
     const all = (atlasBlockedChatUsers && !Array.isArray(atlasBlockedChatUsers)) ? atlasBlockedChatUsers : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'blockedChatUsers', blocked);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'blockedChatUsers', blocked);
     await chrome.storage.local.set({ atlasBlockedChatUsers: all });
   }
 
@@ -4605,7 +4597,7 @@ const AtlasWallet = (() => {
     const { atlasFavoriteDomains } = await chrome.storage.local.get('atlasFavoriteDomains');
     const all = (atlasFavoriteDomains && !Array.isArray(atlasFavoriteDomains)) ? atlasFavoriteDomains : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'favoriteDomains', favorites);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'favoriteDomains', favorites);
     await chrome.storage.local.set({ atlasFavoriteDomains: all });
   }
 
@@ -4695,7 +4687,7 @@ const AtlasWallet = (() => {
     const { atlasCalendarEvents } = await chrome.storage.local.get('atlasCalendarEvents');
     const all = (atlasCalendarEvents && !Array.isArray(atlasCalendarEvents)) ? atlasCalendarEvents : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'calendarEvents', events);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'calendarEvents', events);
     await chrome.storage.local.set({ atlasCalendarEvents: all });
   }
 
@@ -5199,7 +5191,7 @@ const AtlasWallet = (() => {
     const { atlasAssetFiles } = await chrome.storage.local.get('atlasAssetFiles');
     const all = atlasAssetFiles || {};
     const { identity } = await readStoredListForWrite('assetFiles', all[ownerPublicKey]);
-    all[ownerPublicKey] = await encryptAtRest(identity, 'assetFiles', records.slice(0, ASSET_FILE_LEDGER_MAX));
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'assetFiles', records.slice(0, ASSET_FILE_LEDGER_MAX));
     await chrome.storage.local.set({ atlasAssetFiles: all });
   }
 
@@ -5961,11 +5953,11 @@ const AtlasWallet = (() => {
   // the SAME getX() getters the UI already uses (see this section's
   // original comment above for why), except the wallet and its pending
   // journal, which are read together and strictly (snapshotWalletAndJournal).
-  async function buildBackupPayload(identity) {
-    // Every store below is read through the active identity. A backup of any other identity would carry the
-    // active one's data under the wrong key, so it is refused until the wallet is acting as that identity.
+  async function buildActiveBackupPayload(identity) {
+    // Every store below is read through the active identity, so this is only for the identity the wallet is
+    // acting as. Any other identity goes through buildInactiveBackupPayload().
     const active = await getIdentity();
-    if (!active || active.publicKey !== identity.publicKey) throw new Error('Switch to your main identity to make a backup.');
+    if (!active || active.publicKey !== identity.publicKey) throw new Error('Switch to this identity to read its data this way.');
     const owner = identity.publicKey;
     // The wallet and its pending journal are captured from one storage read and strictly: a backup is
     // never made from a store that cannot be read, and never from two different moments.
@@ -6016,11 +6008,7 @@ const AtlasWallet = (() => {
     // Device-level UI preferences — not identity-scoped at all, but
     // carried along so restoring onto a fresh device feels like picking
     // this one back up rather than starting cold on settings too.
-    const settingsRaw = await chrome.storage.local.get([
-      'atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings',
-      'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasCameraDistance', 'atlasAutoLockMinutes',
-      'atlasInventoryFilterSettings'
-    ]);
+    const settingsRaw = await chrome.storage.local.get(BACKUP_SETTING_KEYS);
 
     return {
       identity: { publicKey: identity.publicKey, privateKeyJwk: identity.privateKeyJwk },
@@ -6039,6 +6027,212 @@ const AtlasWallet = (() => {
       },
       settings: settingsRaw
     };
+  }
+
+  // ---------- backing up and restoring an identity that is not the active one ----------
+  //
+  // The getters above read through the active identity. A backup also has to carry the sub-identities (keys,
+  // names, data), and the main identity's own data while a sub-identity is active, so the per-identity stores
+  // are also read and written here with the identity passed in explicitly. Nothing in this path touches the
+  // active identity, so a backup never changes who the wallet is acting as. BACKUP_FAMILIES mirrors the
+  // `data` fields buildActiveBackupPayload() assembles; the sub-identity test checks the two paths agree.
+  const BACKUP_SETTING_KEYS = [
+    'atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings',
+    'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasCameraDistance', 'atlasAutoLockMinutes',
+    'atlasInventoryFilterSettings'
+  ];
+  // store: the at-rest store name (null = kept as is under the owner key); fallback: the value when none is stored.
+  const BACKUP_FAMILIES = [
+    { field: 'mail', key: 'atlasMail', store: 'mail', fallback: () => [] },
+    { field: 'sentMail', key: 'atlasSentMail', store: 'sentMail', fallback: () => [] },
+    { field: 'submittedTrades', key: 'atlasSubmittedTrades', store: 'submittedTrades', fallback: () => [] },
+    { field: 'assetUpdateNotices', key: 'atlasAssetUpdateNotices', store: 'assetUpdateNotices', fallback: () => [] },
+    { field: 'friends', key: 'atlasFriends', store: 'friends', fallback: () => [] },
+    { field: 'contactGroups', key: 'atlasContactGroups', store: 'contactGroups', fallback: () => [] },
+    { field: 'aliases', key: 'atlasAliases', store: 'aliases', fallback: () => ({}) },
+    { field: 'recentWorlds', key: 'atlasRecentWorlds', store: 'recentWorlds', fallback: () => [] },
+    { field: 'favoriteDomains', key: 'atlasFavoriteDomains', store: 'favoriteDomains', fallback: () => [] },
+    { field: 'calendarEvents', key: 'atlasCalendarEvents', store: 'calendarEvents', fallback: () => [] },
+    { field: 'mutedChatUsers', key: 'atlasMutedChatUsers', store: 'mutedChatUsers', fallback: () => [] },
+    { field: 'blockedChatUsers', key: 'atlasBlockedChatUsers', store: 'blockedChatUsers', fallback: () => [] },
+    { field: 'loadout', key: 'atlasLoadout', store: 'loadout', fallback: () => [] },
+    { field: 'chatMessages', key: 'atlasChatMessages', store: null, fallback: () => [] },
+    { field: 'chatE2eeKeyPair', key: 'atlasChatE2eeKeypairs', store: 'chatE2eeKeypair', fallback: () => null },
+    { field: 'chatE2eePeerKeys', key: 'atlasChatE2eePeerKeys', store: 'chatE2eePeerKeys', fallback: () => ({}) },
+    { field: 'activityLog', key: 'atlasActivityLog', store: 'activityLog', fallback: () => [] },
+    { field: 'assetFiles', key: 'atlasAssetFiles', store: 'assetFiles', fallback: () => [] },
+    { field: 'friendRequests', key: 'atlasFriendRequests', store: 'friendRequests', fallback: () => null, normalize: normalizeFriendRequestState },
+    { field: 'deletedMailIds', key: 'atlasDeletedMailIds', store: null, fallback: () => [] },
+    { field: 'deletedChatIds', key: 'atlasDeletedChatIds', store: null, fallback: () => [] },
+    { field: 'lastChatSendDomain', key: 'atlasLastChatSendDomain', store: null, fallback: () => null },
+    { field: 'lastPostOfficeSendDomain', key: 'atlasLastPostOfficeSendDomain', store: null, fallback: () => null },
+    { field: 'lastPostOfficeSettingsDomain', key: 'atlasLastPostOfficeSettingsDomain', store: null, fallback: () => null },
+    { field: 'chainLabsDomains', key: 'atlasChainLabsDomains', store: null, fallback: () => [] }
+  ];
+  const BACKUP_UNREADABLE = {};
+
+  function perOwnerMap(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  }
+
+  // Every family for `identity`. A stored value that exists but cannot be read is an error, never an empty
+  // family: a backup made from it would silently drop that data.
+  async function readBackupFamilies(identity) {
+    const owner = identity.publicKey;
+    const stored = await chrome.storage.local.get(BACKUP_FAMILIES.map((f) => f.key));
+    const out = {};
+    for (const f of BACKUP_FAMILIES) {
+      const raw = perOwnerMap(stored[f.key])[owner];
+      let value;
+      if (raw === undefined || raw === null) value = f.fallback();
+      else if (!f.store) value = raw;
+      else {
+        value = await decryptAtRest(identity, f.store, raw, BACKUP_UNREADABLE);
+        if (value === BACKUP_UNREADABLE) throw new Error('Part of this identity’s data could not be read, so it was not backed up (' + f.field + ').');
+      }
+      out[f.field] = f.normalize ? f.normalize(value) : value;
+    }
+    return out;
+  }
+
+  // Writes the families a backup carried for `identity`; a family the backup did not carry is left alone.
+  async function writeBackupFamilies(identity, d) {
+    const owner = identity.publicKey;
+    for (const f of BACKUP_FAMILIES) {
+      let value = d[f.field];
+      if (value === undefined || (value === null && f.field === 'chatE2eeKeyPair')) continue;
+      if (f.normalize) value = f.normalize(value);
+      const got = await chrome.storage.local.get(f.key);
+      const all = perOwnerMap(got[f.key]);
+      all[owner] = f.store ? await encryptAtRest(identity, f.store, value) : value;
+      await chrome.storage.local.set({ [f.key]: all });
+    }
+  }
+
+  async function buildBackupDataExplicit(identity) {
+    const owner = identity.publicKey;
+    const snapshot = await snapshotWalletAndJournal(owner, identity);
+    const families = await readBackupFamilies(identity);
+    return Object.assign({ wallet: snapshot.wallet }, families, {
+      pendingOps: { format: PENDING_OPS_BACKUP_FORMAT, owner, entries: snapshot.journal }
+    });
+  }
+
+  async function buildInactiveBackupPayload(identity) {
+    return {
+      identity: { publicKey: identity.publicKey, privateKeyJwk: identity.privateKeyJwk },
+      data: await buildBackupDataExplicit(identity),
+      settings: await chrome.storage.local.get(BACKUP_SETTING_KEYS)
+    };
+  }
+
+  // The sub-identities of `account` with their data, for the backup file.
+  async function buildSubIdentityBackup(account) {
+    const vault = await readSubIdentityVault(account);
+    const out = [];
+    for (const e of vault.identities) {
+      const holder = { mode: 'local', publicKey: e.publicKey, privateKeyJwk: e.privateKeyJwk };
+      out.push({ id: e.id, label: e.label, publicKey: e.publicKey, privateKeyJwk: e.privateKeyJwk, createdAt: e.createdAt, data: await buildBackupDataExplicit(holder) });
+    }
+    return out;
+  }
+
+  async function buildBackupPayload(identity) {
+    const active = await getIdentity();
+    const payload = active && active.publicKey === identity.publicKey
+      ? await buildActiveBackupPayload(identity)
+      : await buildInactiveBackupPayload(identity);
+    if (identity.mode === 'local' && identity.privateKeyJwk) {
+      const subIdentities = await buildSubIdentityBackup(identity);
+      if (subIdentities.length) payload.subIdentities = subIdentities;
+    }
+    return payload;
+  }
+
+  // Why a backed-up sub-identity key cannot be used, or null: malformed, a public key that is not the one
+  // the private key belongs to, or a key that does not sign.
+  async function subIdentityKeyProblem(entry) {
+    const jwk = entry && entry.privateKeyJwk;
+    if (!entry || typeof entry.publicKey !== 'string' || !jwk || jwk.kty !== 'EC' || jwk.crv !== 'P-256'
+        || typeof jwk.d !== 'string' || typeof jwk.x !== 'string' || typeof jwk.y !== 'string') return 'malformed';
+    try {
+      const x = new Uint8Array(b64urlDecode(jwk.x));
+      const y = new Uint8Array(b64urlDecode(jwk.y));
+      if (x.length !== 32 || y.length !== 32) return 'malformed';
+      const raw = new Uint8Array(65);
+      raw[0] = 4;
+      raw.set(x, 1);
+      raw.set(y, 33);
+      if (b64urlEncode(raw.buffer) !== entry.publicKey) return 'key-mismatch';
+      const priv = await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+      const pub = await crypto.subtle.importKey('raw', raw, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+      const probe = new TextEncoder().encode('atlas.sub-identity.restore-check');
+      const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, priv, probe);
+      return (await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, sig, probe)) ? null : 'key-mismatch';
+    } catch (err) {
+      return 'malformed';
+    }
+  }
+
+  function restoredSubIdentityLabel(vault, wanted) {
+    let base;
+    try { base = normalizeSubIdentityLabel(wanted); } catch (err) { base = 'Restored identity'; }
+    let label = base;
+    for (let n = 2; vault.identities.some((e) => e.label.toLowerCase() === label.toLowerCase()); n++) {
+      const suffix = ' (' + n + ')';
+      label = base.slice(0, SUB_IDENTITY_LABEL_MAX - suffix.length) + suffix;
+    }
+    return label;
+  }
+
+  // Adds the backup's sub-identities to the vault of the restored account and restores their data. The vault
+  // is merged, never replaced: a sub-identity made after the backup stays. An entry already in the vault
+  // (same public key) keeps its id and name and gets the backup's data, as the main identity does.
+  async function restoreSubIdentities(account, entries) {
+    const summary = { restored: 0, kept: 0, skipped: 0, problem: null };
+    return withSubIdentityLock(async () => {
+      let vault;
+      try {
+        vault = await readSubIdentityVault(account);
+      } catch (err) {
+        summary.problem = 'vault-unreadable';
+        summary.skipped = entries.length;
+        return summary;
+      }
+      for (const e of entries) {
+        if (!e || e.publicKey === account.publicKey || await subIdentityKeyProblem(e)) { summary.skipped++; continue; }
+        const existing = vault.identities.find((x) => x.publicKey === e.publicKey);
+        if (existing) {
+          summary.kept++;
+        } else {
+          if (vault.identities.length >= SUB_IDENTITY_LIMIT) { summary.skipped++; continue; }
+          const takenIds = new Set(vault.identities.map((x) => x.id));
+          vault.identities.push({
+            id: typeof e.id === 'string' && e.id && !takenIds.has(e.id) ? e.id : b64urlEncode(crypto.getRandomValues(new Uint8Array(16)).buffer),
+            label: restoredSubIdentityLabel(vault, e.label),
+            publicKey: e.publicKey,
+            privateKeyJwk: e.privateKeyJwk,
+            createdAt: typeof e.createdAt === 'string' ? e.createdAt : new Date().toISOString()
+          });
+          summary.restored++;
+          // The key is saved before its data, so a failure while restoring data never loses a key.
+          await writeSubIdentityVault(account, vault);
+        }
+        const holder = { mode: 'local', publicKey: e.publicKey, privateKeyJwk: e.privateKeyJwk };
+        const d = e.data || {};
+        try {
+          await withWalletLock(() => saveWallet(holder.publicKey, d.wallet || [], {
+            identity: holder,
+            replaceUnreadable: true,
+            extraWrites: async (restoredIdentity) => (await planJournalRestore(restoredIdentity, holder.publicKey, d.pendingOps)).writes
+          }));
+          await withMessageLock(() => writeBackupFamilies(holder, d));
+        } catch (err) {
+          summary.problem = 'data-incomplete';
+        }
+      }
+      return summary;
+    });
   }
 
   // The counterpart to buildBackupPayload() above — restores every family
@@ -6176,18 +6370,24 @@ const AtlasWallet = (() => {
     // about.
     const s = payload.settings || {};
     const settingsToSet = {};
-    ['atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings', 'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasCameraDistance', 'atlasAutoLockMinutes', 'atlasInventoryFilterSettings']
+    BACKUP_SETTING_KEYS
       .forEach((k) => { if (s[k] !== undefined) settingsToSet[k] = s[k]; });
     if (Object.keys(settingsToSet).length) await chrome.storage.local.set(settingsToSet);
 
     // Logged AFTER the activity log itself was just overwritten by the
     // restore above (d.activityLog), so this becomes the newest entry on
     // top of the restored history rather than being wiped by it.
+    // The sub-identities come last: the main identity and its data are already restored, and a problem here
+    // is reported rather than undoing that.
+    let subIdentitySummary = null;
+    if (Array.isArray(payload.subIdentities) && payload.subIdentities.length) {
+      subIdentitySummary = await restoreSubIdentities(identity, payload.subIdentities);
+    }
     const journalNote = journalSummary && journalSummary.status !== 'absent'
       ? ' (pending operations: ' + journalSummary.added + ' added, ' + journalSummary.merged + ' merged, ' + journalSummary.quarantined + ' set aside)'
       : '';
     await logActivity('backup', 'Restored full wallet backup from ' + (restoreSourceLabel || 'a backup file') + journalNote);
-    return { publicKey, pendingOps: journalSummary };
+    return { publicKey, pendingOps: journalSummary, subIdentities: subIdentitySummary };
   }
 
   async function exportFullBackup(password, seedPhrase) {
@@ -6572,9 +6772,9 @@ const AtlasWallet = (() => {
       const settings = await getAutoBackupSettings();
       if (!settings || !settings.enabled) return { skipped: true, reason: 'not enabled' };
 
-      const identity = await getIdentity();
+      const identity = await getAccountIdentity();
       if (!identity || identity.mode !== 'local' || identity.publicKey !== settings.ownerPublicKey) {
-        // Locked, or a different identity is active than the one this
+        // Locked, or a different account is unlocked than the one this
         // device's auto-backup was set up for — nothing safe to write.
         return { skipped: true, reason: 'wallet locked or a different identity is active' };
       }
@@ -6939,7 +7139,7 @@ const AtlasWallet = (() => {
     const { atlasActivityLog } = await chrome.storage.local.get('atlasActivityLog');
     const all = (atlasActivityLog && typeof atlasActivityLog === 'object' && !Array.isArray(atlasActivityLog)) ? atlasActivityLog : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'activityLog', list);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'activityLog', list);
     await chrome.storage.local.set({ atlasActivityLog: all });
   }
 
@@ -7053,7 +7253,7 @@ const AtlasWallet = (() => {
     const { atlasMail } = await chrome.storage.local.get('atlasMail');
     const all = atlasMail || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'mail', entries);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'mail', entries);
     await chrome.storage.local.set({ atlasMail: all });
   }
 
@@ -7376,6 +7576,17 @@ const AtlasWallet = (() => {
     return { __atlasEncrypted: true, iv: b64urlEncode(iv), ciphertext: b64urlEncode(new Uint8Array(ciphertext)) };
   }
 
+  // Encrypts for one owner and refuses when the identity doing it is someone else. A save is built for one
+  // owner but reads the active identity when it runs; if the wallet switched identity in between, writing
+  // would encrypt the owner's data under the other identity's key and make it unreadable. Failing leaves the
+  // stored data as it was.
+  async function encryptAtRestFor(identity, ownerPublicKey, storeName, value) {
+    if (identity && identity.mode === 'local' && identity.privateKeyJwk && identity.publicKey !== ownerPublicKey) {
+      throw storageError('identity-changed', 'The active identity changed while this was saving, so nothing was saved. Try again.');
+    }
+    return encryptAtRest(identity, storeName, value);
+  }
+
   async function decryptAtRest(identity, storeName, stored, fallback) {
     if (stored === undefined || stored === null) return fallback;
     if (!stored || typeof stored !== 'object' || !stored.__atlasEncrypted) return stored; // legacy plaintext (pre-encryption data), or a shape encryptAtRest never produced
@@ -7564,7 +7775,7 @@ const AtlasWallet = (() => {
     const { atlasChatE2eeKeypairs } = await chrome.storage.local.get('atlasChatE2eeKeypairs');
     const all = atlasChatE2eeKeypairs || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'chatE2eeKeypair', pair);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'chatE2eeKeypair', pair);
     await chrome.storage.local.set({ atlasChatE2eeKeypairs: all });
   }
 
@@ -7603,7 +7814,7 @@ const AtlasWallet = (() => {
     const { atlasChatE2eePeerKeys } = await chrome.storage.local.get('atlasChatE2eePeerKeys');
     const all = atlasChatE2eePeerKeys || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'chatE2eePeerKeys', peerKeys);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'chatE2eePeerKeys', peerKeys);
     await chrome.storage.local.set({ atlasChatE2eePeerKeys: all });
   }
 
@@ -8100,7 +8311,7 @@ const AtlasWallet = (() => {
     const { atlasSentMail } = await chrome.storage.local.get('atlasSentMail');
     const all = atlasSentMail || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'sentMail', entries);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'sentMail', entries);
     await chrome.storage.local.set({ atlasSentMail: all });
   }
 
@@ -8543,7 +8754,7 @@ const AtlasWallet = (() => {
     const { atlasBridgeOffers } = await chrome.storage.local.get('atlasBridgeOffers');
     const all = atlasBridgeOffers || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'bridgeOffers', entries);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'bridgeOffers', entries);
     await chrome.storage.local.set({ atlasBridgeOffers: all });
   }
 
@@ -8646,7 +8857,7 @@ const AtlasWallet = (() => {
     const { atlasTrustedBridgeDomains } = await chrome.storage.local.get('atlasTrustedBridgeDomains');
     const all = atlasTrustedBridgeDomains || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'trustedBridgeDomains', entries);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'trustedBridgeDomains', entries);
     await chrome.storage.local.set({ atlasTrustedBridgeDomains: all });
   }
 
@@ -8780,7 +8991,7 @@ const AtlasWallet = (() => {
     const { atlasFriendRequests } = await chrome.storage.local.get('atlasFriendRequests');
     const all = atlasFriendRequests || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'friendRequests', normalizeFriendRequestState(state));
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'friendRequests', normalizeFriendRequestState(state));
     await chrome.storage.local.set({ atlasFriendRequests: all });
     scheduleFriendsSync();
   }
@@ -9089,7 +9300,7 @@ const AtlasWallet = (() => {
     const { atlasAssetUpdateNotices } = await chrome.storage.local.get('atlasAssetUpdateNotices');
     const all = atlasAssetUpdateNotices || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'assetUpdateNotices', notices);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'assetUpdateNotices', notices);
     await chrome.storage.local.set({ atlasAssetUpdateNotices: all });
   }
 
@@ -9731,7 +9942,7 @@ const AtlasWallet = (() => {
     const { atlasCallState } = await chrome.storage.local.get('atlasCallState');
     const all = atlasCallState || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'callState', normalizeCallState(state));
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'callState', normalizeCallState(state));
     await chrome.storage.local.set({ atlasCallState: all });
   }
 

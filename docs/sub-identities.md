@@ -1,6 +1,6 @@
 # Sub-identities
 
-Status: design. The storage layer (section 9, step 1) is the first part built; everything else below is
+Status: design. Steps 1 and 2 of section 9 (storage layer, backups) are built; everything else below is
 planned and not yet implemented.
 
 A wallet today has one identity per login mechanism: a local password identity (`atlasIdentity`) and,
@@ -57,16 +57,27 @@ logged in as one key) and notifies wallet-change observers. Mail sessions are al
 public key.
 
 Operations that act on the account rather than on one identity use `getAccountIdentity()`, the main
-identity, and never the active one: the account password change, setting up automatic backup, and the full
-backup export. Without that rule a backup written while a sub-identity is active would contain the wrong
-identity's data under the main identity's password.
+identity, and never the active one: the account password change, setting up automatic backup, the automatic
+backup writer and the full backup export.
+
+A save is built for one owner but reads the active identity when it runs. If the wallet switched identity in
+between, the data would be encrypted under the other identity's key and become unreadable. Every per-owner
+save therefore goes through `encryptAtRestFor()`, which refuses when the identity doing the write is not the
+owner. The operation fails and the stored data is left as it was.
 
 ## 5. Backup and export are different things
 
 - **Backup** copies everything, sub-identities and their data included, into an encrypted file protected by
-  the account's secrets. Nothing leaves the wallet. Restoring reproduces the wallet. This is planned as the
-  second step; until then a backup covers the main identity only and the settings screen must say so once
-  sub-identities exist.
+  the account's secrets. Nothing leaves the wallet. Restoring reproduces the wallet. The payload gains an
+  additive `subIdentities` array (id, name, keys, creation time and the identity's data); the file format
+  name is unchanged, so older builds still open new files and ignore the field, and new builds open older
+  files. The full backup and the automatic backup both carry it, and both work whichever identity is active.
+  Restore merges: a sub-identity made after the backup is kept, one already present keeps its id and name and
+  takes the backup's data (as the main identity does), and a name that clashes gets a number. Entries are
+  checked before they are used: a malformed key, a public key that is not the private key's, a key that does
+  not sign, the account's own key, or anything past the limit is skipped and counted in the restore result.
+  The identity sync backup (browser sync storage) carries the main identity key only and does not include
+  sub-identities.
 - **Export** takes one identity, with its data by default or key only as an option, into a file protected by
   a passphrase chosen at export time, and then removes it from the wallet. The wallet checks the file reads
   back before removing anything, clears that identity's per-site bindings, and says the identity now exists
@@ -111,9 +122,9 @@ unlinkable.
 ## 9. Phasing
 
 1. Storage layer, password accounts only: vault, active identity, create, rename, switch, remove (empty
-   identities only), account-level operations pinned to the main identity, tests. No screens.
-2. Backup: sub-identities and bindings in the full, automatic and sync backups, with a format version bump
-   and tests that old backups still restore.
+   identities only), account-level operations pinned to the main identity, tests. No screens. Built.
+2. Backup: sub-identities in the full and automatic backups, restored by merge. Built. The identity sync
+   backup and per-site bindings (which do not exist yet) are not part of it.
 3. Switcher and management screens, naming, the active-identity badge.
 4. Export, import, and the delete flow.
 5. Transfers between identities.
@@ -143,3 +154,15 @@ passphrase chosen at setup that also protects the backup.
   passphrase-protected.
 - All testing uses throw-away identities in a scratch browser profile; nothing here touches an issuer,
   ledger or live site.
+
+## 12. Reading and writing another identity's data
+
+The per-identity getters and setters act for the active identity. Backing up or restoring any other identity
+(a sub-identity, or the main identity while a sub-identity is active) uses a separate reader and writer that
+take the identity explicitly: `BACKUP_FAMILIES`, `readBackupFamilies()`, `writeBackupFamilies()`. The table
+mirrors the data fields of the active-identity backup, and the sub-identity test builds the main identity's
+backup both ways and requires every field to be equal, so a family added to one path and not the other fails
+the test. A store that exists but cannot be read stops the backup with an error instead of being left out.
+
+Families not in any backup today, for the main identity or a sub-identity: avatar choices, pending wallet-bridge
+offers and trusted bridge domains.
