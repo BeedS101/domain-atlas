@@ -127,6 +127,10 @@ function serve(build) {
     await open(echo.host).locator('.toggle').click();
 
     console.log('--- search and filters keep working ---');
+    check('the scale and combat filters are not beside the search box, and are hidden until Worlds is chosen', (await page.locator('.search-row select').count()) === 0 && (await page.locator('#worldFilters').isHidden()) && (await page.locator('#scale').isHidden()));
+    await page.locator('.cat', { hasText: /^Worlds$/ }).click();
+    await page.waitForFunction(() => document.querySelector('.cat[aria-pressed="true"]').textContent === 'Worlds' && document.getElementById('status').textContent.includes('found'));
+    check('choosing Worlds shows them', (await page.locator('#scale').isVisible()) && (await page.locator('#combat').isVisible()) && (await text('#status')) === '6 sites · 10 worlds found', await text('#status'));
     await page.selectOption('#combat', 'pvp');
     await page.waitForFunction(() => document.getElementById('status').textContent.startsWith('1 site'));
     check('a filter narrows the sites and counts only the matching worlds', (await text('#status')) === '1 site · 1 world found' && /1 world/.test(await open(alpha.host).innerText()) && (await rows()) === 1, await text('#status'));
@@ -144,6 +148,9 @@ function serve(build) {
     await page.waitForFunction(() => document.getElementById('status').textContent.includes('found'));
     check('the scale filter works', (await text('#status')) === '2 sites · 2 worlds found', await text('#status'));
     await page.selectOption('#scale', '');
+    await page.locator('.cat', { hasText: /^All$/ }).click();
+    await page.waitForFunction(() => document.querySelector('.cat[aria-pressed="true"]').textContent === 'All');
+    check('going back to All hides them again', await page.locator('#worldFilters').isHidden());
 
     console.log('--- more sites than one page ---');
     await page.goto(url + '?groups=2');

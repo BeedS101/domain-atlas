@@ -165,9 +165,9 @@ advertised services is listed with `0 worlds`. A site with nothing discoverable
 and nothing advertised does not appear.
 
 The buttons above the list browse by functionality: All, Worlds, Communication,
-Assets, Ledger / Chain Labs, Trading, Directories and Other services. While one
-of the service categories is chosen, the scale and combat filters (which describe
-worlds) are switched off.
+Assets, Ledger / Chain Labs, Trading, Directories and Other services. The scale
+and combat filters describe worlds, so they appear only under Worlds (a choice
+made there is kept if you leave and come back).
 
 The page asks `search?groupBy=site[&category=...]`, which pages by site and
 reports `count` (sites), `worldCount` and `serviceCount` (matches in all pages), so

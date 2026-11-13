@@ -54,7 +54,8 @@
   .cat:hover { background: #22323b; }
   .cat[aria-pressed="true"] { background: #21453f; border-color: #2c7568; color: #eafff9; font-weight: 600; }
   .cat:focus-visible { outline: 2px solid #7fc3ff; outline-offset: 2px; }
-  select:disabled { opacity: .5; }
+  .world-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+  .world-filters[hidden] { display: none; }
   .summary-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; }
   .summary-row #status { margin: 0; }
   .link-btn { background: none; border: 0; padding: 4px 2px; color: #7fc3ff; font-weight: 500; font-size: 13px; }
@@ -129,18 +130,20 @@
 <main>
   <div class="search-row">
     <input id="q" type="text" placeholder="Search name, genre, domain, service…">
-    <select id="scale">
+    <button id="searchBtn">Search</button>
+  </div>
+  <div id="cats" class="cats" role="group" aria-label="Browse by functionality"></div>
+  <div id="worldFilters" class="world-filters" role="group" aria-label="Filter worlds" hidden>
+    <select id="scale" aria-label="Scale">
       <option value="">Any scale</option>
       <option>room</option><option>building</option><option>district</option>
       <option>planet</option><option>system</option><option>galaxy</option>
     </select>
-    <select id="combat">
+    <select id="combat" aria-label="Combat">
       <option value="">Any combat</option>
       <option value="none">none</option><option value="pve">pve</option><option value="pvp">pvp</option>
     </select>
-    <button id="searchBtn">Search</button>
   </div>
-  <div id="cats" class="cats" role="group" aria-label="Browse by functionality"></div>
   <div class="summary-row">
     <p id="status" role="status">Loading…</p>
     <button id="toggleAll" class="link-btn" type="button" hidden>Expand all</button>
@@ -166,6 +169,7 @@ const toggleAllEl = document.getElementById('toggleAll');
 const qEl = document.getElementById('q');
 const scaleEl = document.getElementById('scale');
 const combatEl = document.getElementById('combat');
+const worldFiltersEl = document.getElementById('worldFilters');
 
 // How many sites one page holds (?groups=5 in the address changes it, for testing).
 const PAGE = Math.min(Math.max(parseInt(new URLSearchParams(location.search).get('groups'), 10) || 20, 1), 50);
@@ -355,9 +359,11 @@ async function fetchPage(offset) {
   const params = new URLSearchParams({ groupBy: 'site', limit: String(PAGE), offset: String(offset) });
   if (qEl.value.trim()) params.set('q', qEl.value.trim());
   if (category !== 'all') params.set('category', category);
-  // Scale and combat describe worlds, so they are not sent while a kind of service is being browsed.
-  if (scaleEl.value && !browsingServices()) params.set('scale', scaleEl.value);
-  if (combatEl.value && !browsingServices()) params.set('combat', combatEl.value);
+  // Scale and combat describe worlds, so they are offered, and sent, only on the Worlds tab.
+  if (category === 'worlds') {
+    if (scaleEl.value) params.set('scale', scaleEl.value);
+    if (combatEl.value) params.set('combat', combatEl.value);
+  }
   const res = await fetch('search?' + params.toString());
   if (!res.ok) throw new Error('The directory answered ' + res.status);
   const data = await res.json();
@@ -432,7 +438,7 @@ catsEl.addEventListener('click', (e) => {
   if (!button || button.dataset.cat === category) return;
   category = button.dataset.cat;
   catsEl.querySelectorAll('.cat').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.cat === category)));
-  scaleEl.disabled = combatEl.disabled = browsingServices();
+  worldFiltersEl.hidden = category !== 'worlds';
   runSearch();
 });
 
