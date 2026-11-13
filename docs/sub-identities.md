@@ -1,7 +1,7 @@
 # Sub-identities
 
-Status: steps 1 to 4 of section 9 (storage layer, backups, screens, export and import) are built; the rest
-is planned and not yet implemented.
+Status: steps 1 to 4 of section 9 (storage layer, backups, screens, export and import) and the single-asset
+part of step 5 (moving one item between identities) are built; the rest is planned and not yet implemented.
 
 A wallet today has one identity per login mechanism: a local password identity (`atlasIdentity`) and,
 independently, a passkey identity (`atlasWebAuthnIdentity`), with `atlasIdentityMode` choosing which one
@@ -110,12 +110,41 @@ The wallet remembers which identity was chosen for a site and switches to it on 
 
 ## 8. Transfers between identities
 
-Moving an asset between two identities in the same wallet goes through the same issuer-authorized transfer
-path as any other transfer, so non-transferable items, Gold holds and partner approvals still apply and a
-sub-identity is never a way around them. Some items therefore cannot be moved, and the transfer dialog says
-so. A transfer between two identities is recorded by the issuer like any other transfer, so it links the two
-keys on that ledger. The sandbox limits the damage a hostile site can do; it does not make the identities
-unlinkable.
+An asset credential names its owner's public key and carries the issuer's signature, so an asset cannot change
+identity by being filed under another one in the wallet: the copy would still name the old key, fail the
+ownership check and be refused when spent. Only the issuer can change the owner, so a move goes through the
+issuer's direct transfer (SPEC.md §5.6).
+
+**Built (single asset).** `moveAssetToIdentity(credentialId, targetPublicKey)` moves one unique, unbound item
+from the identity the wallet is acting as to another identity of the same account. Item menu -> "Move to
+another identity...", with a dialog that says the issuer does the move and that its records will link the two
+identities.
+
+- The acting identity signs the intent `{action: 'transfer', credentialId, recipientPublicKey, requestId}` and
+  the wallet posts it to the issuing domain. The issuer revokes the credential (reason `transferred`) and signs
+  a new one for the target key. The wallet verifies the new credential and writes it into the target
+  identity's wallet, encrypted under the target's own keys (`localIdentityFor()` finds the key for any
+  identity of the account), and removes the old one, in one storage write together with the journal entry.
+- It runs as a journalled operation (`kind: 'transfer'`), the same path splits and purchases use. The request
+  is written to the pending-operations journal before it is sent. If the answer never arrives the entry stays,
+  the original is shown as held back (not verified), and recovery sends the same request id again. The issuer
+  answers a repeat with the stored result, so the item is never made twice and never lost.
+- Issuers: the Node and PHP issuers accept a `requestId` on `/atlas/asset/transfer` and list `transfer` in
+  `/atlas/capabilities`. Without a `requestId` the endpoint behaves as before. A wallet only repeats a transfer
+  to an issuer that lists it; otherwise a lost answer is held for attention, never re-sent.
+- If the receiving identity is removed or exported while a move to it is unfinished, that is refused (an
+  unfinished move into an identity counts as unfinished work for it). If it disappears some other way, the
+  issuer's result stays in the journal until it is applied.
+- Refused before anything is sent: items bound to an identity (memberships and other `tradeScope: bound`
+  items), fungible balances, anything not in the acting identity's wallet, a target that is not in this
+  wallet. The issuer still applies its own rules (class policy, Gold holds, partner approvals), so a
+  sub-identity is never a way around them.
+- The transfer is recorded by the issuer like any other, so it links the two keys on that ledger. The sandbox
+  limits the damage a hostile site can do; it does not make the identities unlinkable.
+
+**Not built.** Moving fungible balances (they move by the split-then-hand-off route of SPEC.md §5.4), "move
+everything", and the delete flow that offers to move items out first. Bound items can only leave an identity
+by exporting it with its data (section 13) or by redeeming them (SPEC.md §5.7).
 
 ## 9. Phasing
 
@@ -129,7 +158,8 @@ unlinkable.
 4. Export and import of one identity. Built: Wallet -> Identity -> Identities has an Export panel per
    identity and an "Import an identity" section. The delete flow that offers to move items first belongs
    with transfers (step 5).
-5. Transfers between identities.
+5. Transfers between identities. Built for a single unique asset (section 8); balances and move-everything
+   are not.
 6. Per-site binding and the untrusted-site prompt.
 7. Passkey accounts (section 10).
 

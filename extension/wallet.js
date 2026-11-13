@@ -701,6 +701,22 @@ const AtlasWallet = (() => {
     });
   }
 
+  // Whether any identity of this account has a move to `publicKey` that the issuer has not confirmed yet. A
+  // journal that cannot be read counts as pending: the move might be in it.
+  async function incomingMovePending(account, vault, publicKey) {
+    const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
+    const all = atlasPendingOps || {};
+    const unreadable = {};
+    const holders = [account].concat(vault.identities.map((e) => ({ mode: 'local', publicKey: e.publicKey, privateKeyJwk: e.privateKeyJwk })));
+    for (const holder of holders) {
+      if (all[holder.publicKey] === undefined || all[holder.publicKey] === null) continue;
+      const list = await decryptAtRest(holder, 'pendingOps', all[holder.publicKey], unreadable);
+      if (list === unreadable) return true;
+      if (Array.isArray(list) && list.some((e) => e && e.kind === 'transfer' && e.toOwner === publicKey)) return true;
+    }
+    return false;
+  }
+
   // 'empty', 'held' or 'unreadable' for a per-identity list stored under `storeName`. A value that cannot
   // be read counts as something held: deleting the key would lose it for good.
   async function storedListState(sub, storeName, stored) {
@@ -727,6 +743,7 @@ const AtlasWallet = (() => {
       const pendingState = await storedListState(entry, 'pendingOps', (stored.atlasPendingOps || {})[entry.publicKey]);
       if (walletState !== 'empty') throw new Error('This identity still holds items. Move them to another identity first.');
       if (pendingState !== 'empty') throw new Error('This identity has unfinished operations. Let them finish first.');
+      if (await incomingMovePending(account, vault, entry.publicKey)) throw new Error('A move to this identity is unfinished. Let it finish first.');
       if (await activeSubIdentityId(account) === id) {
         await endAllAdminSessions();
         await chrome.storage.session.remove('atlasActiveSubIdentity');
@@ -1266,8 +1283,23 @@ const AtlasWallet = (() => {
   // The wallet list for a change that will be written back (see above); throws instead of returning [].
   async function getWalletStrict(ownerPublicKey) {
     const { atlasWallets } = await chrome.storage.local.get('atlasWallets');
-    const { list } = await readStoredListForWrite('wallet', (atlasWallets || {})[ownerPublicKey]);
+    const { list } = await readStoredListForWrite('wallet', (atlasWallets || {})[ownerPublicKey], (await localIdentityFor(ownerPublicKey)) || undefined);
     return list.filter(isPostMergeAssetCredential);
+  }
+
+  // The unlocked identity that holds `ownerPublicKey` in this wallet: the active one, the account's main
+  // identity, or one of its sub-identities. Its keys are what that owner's stores are encrypted under. Null
+  // for a key this wallet does not hold.
+  async function localIdentityFor(ownerPublicKey) {
+    const active = await getIdentity();
+    if (active && active.publicKey === ownerPublicKey) return active;
+    const account = await getAccountIdentity();
+    if (!account || account.mode !== 'local' || !account.privateKeyJwk) return null;
+    if (account.publicKey === ownerPublicKey) return account;
+    let vault;
+    try { vault = await readSubIdentityVault(account); } catch (err) { return null; }
+    const entry = vault.identities.find((e) => e.publicKey === ownerPublicKey);
+    return entry ? { mode: 'local', publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk } : null;
   }
 
   // Checked before anything is sent to an issuer that would have to be stored afterwards.
@@ -1460,6 +1492,7 @@ const AtlasWallet = (() => {
     if (entry.kind === 'purchase') return 'purchase';
     if (entry.kind === 'claim') return 'trade-claim';
     if (entry.kind === 'open-chest') return 'open-chest';
+    if (entry.kind === 'transfer') return 'transfer';
     if (entry.kind === 'mint' && entry.body && entry.body.quantity === undefined) return 'issue-unique';
     return null;
   }
@@ -1580,13 +1613,18 @@ const AtlasWallet = (() => {
     return withWalletLock(async () => {
       const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
       const wallets = stored.atlasWallets || {};
-      let identity = null;
+      // Each owner's list is read and written under that owner's own keys, so a change for another identity
+      // of this wallet (a move between identities) lands readable by it.
+      const holders = new Map();
+      const holderOf = async (owner) => {
+        if (!holders.has(owner)) holders.set(owner, (await localIdentityFor(owner)) || (await getIdentity()));
+        return holders.get(owner);
+      };
       const next = new Map();
       for (const change of changes) {
         let base = next.get(change.owner);
         if (!base) {
-          const read = await readStoredListForWrite('wallet', wallets[change.owner]);
-          identity = read.identity;
+          const read = await readStoredListForWrite('wallet', wallets[change.owner], await holderOf(change.owner));
           base = read.list.filter(isPostMergeAssetCredential);
         }
         const drop = new Set(change.remove || []);
@@ -1598,14 +1636,15 @@ const AtlasWallet = (() => {
       }
       const pendingAll = stored.atlasPendingOps || {};
       if (requestId) {
-        const pending = (await readStoredListForWrite('pendingOps', pendingAll[journalOwner])).list;
+        const journalHolder = await holderOf(journalOwner);
+        const pending = (await readStoredListForWrite('pendingOps', pendingAll[journalOwner], journalHolder)).list;
         const index = pending.findIndex((e) => e && e.requestId === requestId);
         if (index < 0) return false;
         if (patch) Object.assign(pending[index], patch);
         else pending.splice(index, 1);
-        pendingAll[journalOwner] = await encryptAtRestFor(identity, journalOwner, 'pendingOps', pending);
+        pendingAll[journalOwner] = await encryptAtRestFor(journalHolder, journalOwner, 'pendingOps', pending);
       }
-      for (const [owner, list] of next) wallets[owner] = await encryptAtRest(identity, 'wallet', list);
+      for (const [owner, list] of next) wallets[owner] = await encryptAtRest(await holderOf(owner), 'wallet', list);
       await chrome.storage.local.set(requestId ? { atlasWallets: wallets, atlasPendingOps: pendingAll } : { atlasWallets: wallets });
       for (const owner of next.keys()) notifyWalletChanged(owner);
       return true;
@@ -1641,6 +1680,9 @@ const AtlasWallet = (() => {
     if (entry.kind === 'open-chest') {
       return [{ owner: entry.owner, remove: entry.predecessors, add: [entryOf(data.reward)] }];
     }
+    if (entry.kind === 'transfer') {
+      return [{ owner: entry.owner, remove: entry.predecessors }, { owner: entry.toOwner, add: [entryOf(data.credential)] }];
+    }
     throw new Error('unknown operation kind: ' + entry.kind);
   }
 
@@ -1663,6 +1705,12 @@ const AtlasWallet = (() => {
     if (entry.kind === 'convert') return good(data.received, entry.owner) && (!data.remainder || good(data.remainder, entry.owner));
     if (entry.kind === 'purchase') {
       return good(data.purchased, entry.owner) && data.purchased.asset.class === body.purchasedClass && (!data.balance || good(data.balance, entry.owner));
+    }
+    if (entry.kind === 'transfer') {
+      const sent = body.credential || {};
+      return data.status === 'transferred' && good(data.credential, entry.toOwner) && !!sent.asset
+        && data.credential.asset.class === sent.asset.class && data.credential.asset.fungible === false
+        && data.credential.issuer.domain === entry.domain && data.credential.supersedes === sent.id;
     }
     if (entry.kind === 'open-chest') {
       const spent = body.credential && body.credential.id;
@@ -1759,6 +1807,12 @@ const AtlasWallet = (() => {
       const changes = changesForAnswer(entry, data);
       for (const change of changes) {
         for (const add of change.add || []) add.lastVerdict = await verifyCredential(add.credential);
+      }
+      // A move is applied to two identities of this wallet. If the receiving one is gone the result is kept
+      // in the journal (the issuer keeps its answer) rather than written under the wrong keys.
+      if (entry.kind === 'transfer' && !(await localIdentityFor(entry.toOwner))) {
+        await retryLater('the receiving identity is not in this wallet');
+        throw operationError(entry.label, 0, 'the issuer completed this move but the receiving identity is not in this wallet; it is kept and will be applied once it is', null, { pending: true, requestId: entry.requestId });
       }
       let applied;
       try {
@@ -2097,7 +2151,8 @@ const AtlasWallet = (() => {
   const PENDING_OPS_BACKUP_FORMAT = 'atlas-pending-ops/1.0';
   const JOURNAL_PATHS = {
     mint: '/atlas/asset/issue', split: '/atlas/asset/split', consolidate: '/atlas/asset/consolidate', convert: '/atlas/convert',
-    purchase: '/atlas/asset/purchase', claim: '/atlas/trade/claim', 'open-chest': '/atlas/asset/open-chest'
+    purchase: '/atlas/asset/purchase', claim: '/atlas/trade/claim', 'open-chest': '/atlas/asset/open-chest',
+    transfer: '/atlas/asset/transfer'
   };
 
   // The wallet list and the journal for one owner, from ONE storage read, so they describe the same
@@ -2115,7 +2170,8 @@ const AtlasWallet = (() => {
   function journalEntryProblem(entry, owner) {
     if (!usablePendingEntry(entry)) return 'unusable';
     if (entry.owner !== owner) return 'wrong-owner';
-    if (entry.toOwner !== undefined && entry.toOwner !== null && entry.toOwner !== owner) return 'wrong-owner';
+    if (entry.toOwner !== undefined && entry.toOwner !== null && entry.toOwner !== owner
+        && !(entry.kind === 'transfer' && typeof entry.toOwner === 'string' && entry.toOwner !== '')) return 'wrong-owner';
     if (!Object.prototype.hasOwnProperty.call(JOURNAL_PATHS, entry.kind) || JOURNAL_PATHS[entry.kind] !== entry.path) return 'unknown-operation';
     if (!/^[A-Za-z0-9.\-:\[\]]{1,255}$/.test(entry.domain)) return 'malformed';
     if (entry.state !== undefined && entry.state !== 'pending' && entry.state !== 'needs-attention') return 'malformed';
@@ -2752,6 +2808,50 @@ const AtlasWallet = (() => {
     const splitLogText = 'Split ' + sendAmount + ' ' + credential.asset.class + ' within your own wallet';
     await logActivity('asset', splitLogText);
     return { sent, remainder };
+  }
+
+  // ---------- moving an asset between this wallet's identities ----------
+  //
+  // A credential names its owner's public key and carries the issuer's signature, so an asset cannot change
+  // identity by being filed under another one: only the issuer can. A move therefore goes through the
+  // issuer's direct transfer (SPEC.md §5.6): the acting identity signs a transfer intent for the other
+  // identity's public key, the issuer revokes the credential and signs a new one for that key, and the
+  // wallet writes the new credential into the other identity's wallet. It runs through the journalled
+  // operation path, so an answer that does not arrive is asked for again with the same request id.
+  // Items that are bound to their owner, and fungible balances, are not moved this way.
+
+  // The identities a move can go to: every identity of this account except the acting one.
+  async function listMoveTargets() {
+    const account = await requireSubIdentityAccount();
+    const active = await getIdentity();
+    const vault = await readSubIdentityVault(account);
+    return [{ id: null, label: 'Main identity', publicKey: account.publicKey }]
+      .concat(vault.identities.map((e) => ({ id: e.id, label: e.label, publicKey: e.publicKey })))
+      .filter((t) => !active || t.publicKey !== active.publicKey);
+  }
+
+  async function moveAssetToIdentity(credentialId, targetPublicKey) {
+    const sender = await getIdentity();
+    if (!sender) throw new Error('Unlock your wallet first.');
+    const target = (await listMoveTargets()).find((t) => t.publicKey === targetPublicKey);
+    if (!target) throw new Error('That identity is not in this wallet.');
+    const entry = (await getWalletStrict(sender.publicKey)).find((e) => e.credential.id === credentialId);
+    if (!entry) throw new Error('This item is not in the identity you are acting as.');
+    const credential = entry.credential;
+    if (credential.asset.tradeScope === 'bound') throw new Error('This item is bound to this identity and cannot be moved.');
+    if (credential.asset.fungible !== false) throw new Error('Balances cannot be moved between identities yet.');
+    const done = await runIssuerOperation({
+      owner: sender.publicKey, toOwner: target.publicKey, kind: 'transfer', label: 'Move',
+      domain: credential.issuer.domain, path: '/atlas/asset/transfer',
+      predecessors: [credential.id],
+      body: async (requestId) => {
+        const payload = { action: 'transfer', credentialId: credential.id, recipientPublicKey: target.publicKey, requestId };
+        return { credential, recipientPublicKey: target.publicKey, intent: { payload, proof: await signWithSelf(payload) } };
+      }
+    });
+    await unloadItem(credential.id);
+    await logActivity('asset', 'Moved ' + credential.asset.class + ' to another identity in this wallet');
+    return { credential: done.data.credential, to: target };
   }
 
   // Merges up to 20 balances of the same class AND issuer into one - the
@@ -6332,7 +6432,8 @@ const AtlasWallet = (() => {
     const holder = { mode: 'local', publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk };
     const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
     const walletState = await storedListState(entry, 'wallet', (stored.atlasWallets || {})[entry.publicKey]);
-    const pendingState = await storedListState(entry, 'pendingOps', (stored.atlasPendingOps || {})[entry.publicKey]);
+    let pendingState = await storedListState(entry, 'pendingOps', (stored.atlasPendingOps || {})[entry.publicKey]);
+    if (pendingState === 'empty' && await incomingMovePending(account, vault, entry.publicKey)) pendingState = 'held';
     return { entry, holder, walletState, pendingState };
   }
 
@@ -10617,7 +10718,7 @@ const AtlasWallet = (() => {
 
   return {
     getAccountIdentity, listSubIdentities, getActiveIdentityInfo, createSubIdentity, renameSubIdentity, switchIdentity, removeSubIdentity,
-    prepareSubIdentityExport, completeSubIdentityExport, importSubIdentity,
+    prepareSubIdentityExport, completeSubIdentityExport, importSubIdentity, listMoveTargets, moveAssetToIdentity,
     hasIdentity, isUnlocked, getIdentity, createIdentity, unlockIdentity, lockIdentity, changePassword,
     exportIdentity, importIdentity, presentIdentity, recordVisit,
     // SPEC.md §3.8.1 — exported so confirm-bridge.js (the wallet-bridge

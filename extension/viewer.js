@@ -6065,6 +6065,11 @@ function renderAssetCard(entry, container, opts) {
   if (!held && opts.fileExportEnabled && !fungible && asset.tradeScope !== 'bound') {
     actionsHtml += '<button data-action="save-file" data-id="' + entry.credential.id + '" class="btn-secondary">Save to a file…</button>';
   }
+  // Moves a unique, unbound item to another identity of this wallet through its issuer (opts.moveEnabled is
+  // set when this wallet has a second identity to move to).
+  if (!held && opts.moveEnabled && !fungible && asset.tradeScope !== 'bound') {
+    actionsHtml += '<button data-action="move-identity" data-id="' + entry.credential.id + '" class="btn-secondary">Move to another identity\u2026</button>';
+  }
   actionsHtml += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
   const menuHtml =
     '<div class="card-menu">' +
@@ -6389,6 +6394,8 @@ async function refreshInventoryDisplay() {
   const selfVisible = selfWalletAll.filter((e) => !e.hidden);
 
   const selfHasAny = (presentation) => selfWalletAll.some((e) => e.credential.asset.presentation === presentation);
+  let moveEnabled = false;
+  try { moveEnabled = (await AtlasWallet.listMoveTargets()).length > 0; } catch (err) { /* locked, or a passkey account: no other identities */ }
 
   // --- Collectibles ---
   const selfCollectibles = selfVisible.filter((e) => e.credential.asset.presentation === 'collectible');
@@ -6396,7 +6403,7 @@ async function refreshInventoryDisplay() {
   if (selfCollectibles.length === 0) {
     selfCollectiblesListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('collectible') ? 'Everything here is hidden or dropped somewhere — manage it below or in Settings.' : 'No collectibles yet.') + '</div>';
   } else {
-    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
+    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, moveEnabled, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
   }
 
   // --- Documents ---
@@ -6405,7 +6412,7 @@ async function refreshInventoryDisplay() {
   if (selfDocuments.length === 0) {
     selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'No documents yet.') + '</div>';
   } else {
-    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
+    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, moveEnabled, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
   }
 
   const totalHeld = selfVisible.length;
@@ -8647,6 +8654,24 @@ function openAssetFileDialog(options) {
   const noteHtml = (options.notes || []).map((n) => '<div class="meta" style="margin:4px 0;">' + escapeHtml(n) + '</div>').join('');
   bridgeOfferPreviewEntry = { credential: options.credential, originLabel: options.originLabel, noteHtml };
   renderBridgeOfferPreviewContent(bridgeOfferPreviewEntry);
+  if (options.choices && options.choices.length) {
+    const row = document.createElement('div');
+    row.style.marginTop = '8px';
+    const label = document.createElement('label');
+    label.htmlFor = 'assetFileDialogChoice';
+    label.textContent = options.choiceLabel || 'Choose';
+    const select = document.createElement('select');
+    select.id = 'assetFileDialogChoice';
+    options.choices.forEach((c) => {
+      const o = document.createElement('option');
+      o.value = c.value;
+      o.textContent = c.label;
+      select.appendChild(o);
+    });
+    row.appendChild(label);
+    row.appendChild(select);
+    bridgeOfferPreviewBodyEl.appendChild(row);
+  }
   bridgeOfferPreviewClaimBtn.textContent = options.primaryLabel || '';
   bridgeOfferPreviewClaimBtn.style.display = options.primaryLabel ? '' : 'none';
   bridgeOfferPreviewClaimBtn.disabled = false;
@@ -8662,7 +8687,8 @@ async function runAssetFileDialogPrimary() {
   bridgeOfferPreviewClaimBtn.disabled = true;
   bridgeOfferPreviewStatusEl.textContent = 'Working…';
   try {
-    await dialog.onPrimary();
+    const choice = document.getElementById('assetFileDialogChoice');
+    await dialog.onPrimary(choice ? choice.value : undefined);
   } catch (err) {
     if (assetFileDialog === dialog) {
       bridgeOfferPreviewStatusEl.textContent = err.message;
@@ -8732,6 +8758,53 @@ async function beginSaveAssetToFile(credentialId) {
       closeBridgeOfferPreview();
       await refreshInventoryDisplay();
       statusEl.textContent = 'Saved ' + credential.asset.name + ' as ' + filename + '. Keep the file safe: anyone who has it can claim the item.';
+    }
+  });
+}
+
+// Moves one item to another identity of this wallet. The issuer does the move (the item is re-signed for the
+// other identity's key), so the dialog says so and lists what it cannot do.
+async function beginMoveAssetToIdentity(credentialId) {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  const entry = (await AtlasWallet.getWallet(identity.publicKey)).find((e) => e.credential.id === credentialId);
+  if (!entry) return;
+  const credential = entry.credential;
+  let targets;
+  try { targets = await AtlasWallet.listMoveTargets(); } catch (err) { targets = []; }
+  if (!targets.length) {
+    openAssetFileDialog({ credential, originLabel: 'Move to another identity', notes: ['This wallet has no other identity to move it to.'], secondaryLabel: 'Close' });
+    return;
+  }
+  openAssetFileDialog({
+    credential,
+    originLabel: 'Move to another identity',
+    notes: [
+      'The issuer, ' + credential.issuer.domain + ', moves it: it cancels this copy and signs a new one for the identity you choose. This needs ' + credential.issuer.domain + ' to be reachable.',
+      'The issuer\u2019s records will show that the two identities are connected.',
+      'Items bound to an identity, and balances, cannot be moved this way.',
+      'If the connection drops, the wallet asks the issuer again afterwards, so the item is not lost.'
+    ],
+    choiceLabel: 'Move to ',
+    choices: targets.map((t) => ({ value: t.publicKey, label: t.label })),
+    primaryLabel: 'Move',
+    secondaryLabel: 'Cancel',
+    onPrimary: async (targetPublicKey) => {
+      let moved;
+      try {
+        moved = await AtlasWallet.moveAssetToIdentity(credentialId, targetPublicKey);
+      } catch (err) {
+        if (err.pending) {
+          closeBridgeOfferPreview();
+          await refreshInventoryDisplay();
+          statusEl.textContent = err.message;
+          return;
+        }
+        throw err;
+      }
+      closeBridgeOfferPreview();
+      await refreshInventoryDisplay();
+      statusEl.textContent = 'Moved ' + credential.asset.name + ' to ' + moved.to.label + '.';
     }
   });
 }
@@ -13214,6 +13287,8 @@ function assetActionHandler(listEl) {
       }
     } else if (btn.dataset.action === 'save-file') {
       await beginSaveAssetToFile(id);
+    } else if (btn.dataset.action === 'move-identity') {
+      await beginMoveAssetToIdentity(id);
     } else if (btn.dataset.action === 'hide') {
       await AtlasWallet.hideAsset(who.publicKey, id);
       await refreshInventoryDisplay();

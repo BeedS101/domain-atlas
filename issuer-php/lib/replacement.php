@@ -631,7 +631,8 @@ function atlas_txn_state($rec) {
 
 function atlas_txn_register($rec) {
   foreach ($rec['successors'] as $s) {
-    atlas_holdings_note_issued($s['owner'], ['fungible' => true, 'class' => $s['cls']], $s['id'], $s['q']);
+    // A record written before 'f' existed describes a fungible successor.
+    atlas_holdings_note_issued($s['owner'], ['fungible' => ($s['f'] ?? true) !== false, 'class' => $s['cls']], $s['id'], $s['q']);
   }
 }
 
@@ -717,7 +718,7 @@ function atlas_commit_replacement($requestId, $op, $predecessorIds, $reason, $pa
     'params' => $params,
     'predecessors' => $sorted,
     'successors' => array_map(function ($c) {
-      return ['owner' => $c['owner']['publicKey'], 'cls' => $c['asset']['class'], 'id' => $c['id'], 'q' => $c['quantity']];
+      return ['owner' => $c['owner']['publicKey'], 'cls' => $c['asset']['class'], 'id' => $c['id'], 'q' => $c['quantity'], 'f' => ($c['asset']['fungible'] ?? false) === true];
     }, $successors),
     'responseJson' => $responseJson,
     'createdAt' => gmdate('Y-m-d\TH:i:s\Z'),
