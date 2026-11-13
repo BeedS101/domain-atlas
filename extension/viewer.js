@@ -3938,6 +3938,7 @@ async function refreshSubIdentitiesDisplay() {
     subIdentityStatusEl.textContent = err.message;
     return;
   }
+  await refreshSiteIdentitiesDisplay(account, subs);
   const mainActive = !subs.some((e) => e.active);
   identityListEl.innerHTML = '';
   identityListEl.appendChild(identityRowElement({ id: '', label: 'Main identity', publicKey: account.publicKey, active: mainActive }));
@@ -3946,6 +3947,82 @@ async function refreshSubIdentitiesDisplay() {
     renaming: renamingSubIdentityId === e.id, confirmingRemove: confirmRemoveSubIdentityId === e.id
   })));
 }
+
+// ---------- site identities (Wallet -> Identity -> Site identities) ----------
+
+const siteIdentityListEl = document.getElementById('siteIdentityList');
+const siteIdentityStatusEl = document.getElementById('siteIdentityStatus');
+
+async function refreshSiteIdentitiesDisplay(account, subs) {
+  if (!siteIdentityListEl) return;
+  let sites = [];
+  try { sites = await AtlasWallet.listSiteIdentities(); } catch (err) { sites = []; }
+  siteIdentityListEl.innerHTML = '';
+  if (!sites.length) {
+    const none = document.createElement('div');
+    none.className = 'empty-note';
+    none.id = 'siteIdentityEmpty';
+    none.textContent = 'No sites are remembered yet.';
+    siteIdentityListEl.appendChild(none);
+    return;
+  }
+  const choices = [{ publicKey: account.publicKey, label: 'Main identity' }].concat(subs.map((e) => ({ publicKey: e.publicKey, label: e.label })));
+  sites.forEach((site) => {
+    const row = document.createElement('div');
+    row.className = 'identity-row';
+    row.dataset.origin = site.origin;
+    const name = document.createElement('div');
+    name.className = 'identity-row-name mono';
+    name.textContent = site.origin;
+    row.appendChild(name);
+    const select = document.createElement('select');
+    select.dataset.role = 'site-identity-select';
+    select.setAttribute('aria-label', 'Identity for ' + site.origin);
+    choices.forEach((c) => {
+      const o = document.createElement('option');
+      o.value = c.publicKey;
+      o.textContent = c.label;
+      if (c.publicKey === site.publicKey) o.selected = true;
+      select.appendChild(o);
+    });
+    row.appendChild(select);
+    const actions = document.createElement('div');
+    actions.className = 'identity-row-actions';
+    const forget = document.createElement('button');
+    forget.type = 'button';
+    forget.className = 'btn-secondary';
+    forget.dataset.action = 'forget-site';
+    forget.textContent = 'Forget this site';
+    actions.appendChild(forget);
+    row.appendChild(actions);
+    siteIdentityListEl.appendChild(row);
+  });
+}
+
+async function runSiteIdentityAction(fn, okMessage) {
+  siteIdentityStatusEl.textContent = '';
+  try {
+    await fn();
+    if (okMessage) siteIdentityStatusEl.textContent = okMessage;
+  } catch (err) {
+    siteIdentityStatusEl.textContent = err.message;
+  }
+  await refreshSubIdentitiesDisplay();
+}
+
+siteIdentityListEl && siteIdentityListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-action="forget-site"]');
+  if (!btn) return;
+  const origin = btn.closest('.identity-row').dataset.origin;
+  await runSiteIdentityAction(() => AtlasWallet.forgetSiteIdentity(origin), 'Forgot ' + origin + '. It will ask again next time.');
+});
+
+siteIdentityListEl && siteIdentityListEl.addEventListener('change', async (e) => {
+  const select = e.target.closest('select[data-role="site-identity-select"]');
+  if (!select) return;
+  const origin = select.closest('.identity-row').dataset.origin;
+  await runSiteIdentityAction(() => AtlasWallet.setSiteIdentity(origin, select.value, { remember: true }), 'Saved for ' + origin + '.');
+});
 
 async function runSubIdentityAction(fn, okMessage) {
   subIdentityStatusEl.textContent = '';

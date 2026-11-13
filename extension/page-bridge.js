@@ -35,9 +35,9 @@
   // still resolve rather than hang a caller's await forever — same
   // "fail to the closed/denied state, never to a silent stall" posture
   // the rest of this bridge already takes. timeoutMs/defaultResult are
-  // per-action: getIdentity is a quick, no-human-involved read (a short
-  // timeout is enough), while requestSignature can legitimately sit
-  // waiting on a visitor's own decision for a while — its timeout here is
+  // per-action: getIdentity is normally a quick read, but the first one
+  // from a site with no remembered identity waits on the visitor's choice
+  // like requestSignature does, so both get the long timeout — it is
   // deliberately longer than content.js's own confirmation-overlay
   // timeouts (see that file's requestBridgeConfirmation()/
   // openBridgeConfirmOverlay() comments), so under normal conditions the
@@ -64,7 +64,7 @@
     // currently active. Never throws — a page checking "is Domain Atlas
     // usable here" shouldn't need a try/catch to find out.
     async getIdentity() {
-      const result = await sendBridgeRequest('getIdentity', undefined, 4000, { allowed: false, publicKey: null });
+      const result = await sendBridgeRequest('getIdentity', undefined, 180000, { allowed: false, publicKey: null });
       return (result && typeof result === 'object') ? result : { allowed: false, publicKey: null };
     },
 

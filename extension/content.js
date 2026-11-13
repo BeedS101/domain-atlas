@@ -156,10 +156,40 @@
   // below), and only falls through to that same confirmation prompt when
   // background.js doesn't say this origin can skip it. Anything else gets
   // the same denied shape an unpermitted page would.
+  // Every wallet answer for this page comes from the identity bound to its exact origin. A site with no
+  // remembered identity (and an account that has more than one to choose from) is asked about once, in the
+  // wallet's own prompt, before any request is answered; declining answers nothing for a short while rather than
+  // asking again on every call.
+  const SITE_IDENTITY_DECLINE_MS = 30000;
+  let siteIdentityAsk = null;
+  let siteIdentityDeclinedAt = 0;
+
+  async function ensureSiteIdentity() {
+    if (Date.now() - siteIdentityDeclinedAt < SITE_IDENTITY_DECLINE_MS) return false;
+    let site;
+    try {
+      site = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-site-identity' });
+    } catch (err) {
+      return false;
+    }
+    if (!site || site.state === 'denied') return false;
+    if (site.state !== 'ask') return true; // bound, only one identity to use, or a locked wallet (the requests report that themselves)
+    if (!siteIdentityAsk) {
+      siteIdentityAsk = requestBridgeConfirmation('identity', '', {}).finally(() => { siteIdentityAsk = null; });
+    }
+    const result = await siteIdentityAsk;
+    if (!result || !result.chosen) {
+      siteIdentityDeclinedAt = Date.now();
+      return false;
+    }
+    return true;
+  }
+
   async function handleBridgeRequest(action, payload) {
     const permissions = await bridgePermissionsPromise;
     if (action === 'getIdentity') {
       if (!permissions.read) return { allowed: false, publicKey: null };
+      if (!(await ensureSiteIdentity())) return { allowed: true, publicKey: null };
       try {
         const response = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-read' });
         return { allowed: true, publicKey: (response && response.publicKey) || null };
@@ -186,6 +216,7 @@
       if (typeof purpose !== 'string' || !purpose || !permissions.signPurposes.includes(purpose)) {
         return { allowed: false, result: null };
       }
+      if (!(await ensureSiteIdentity())) return { allowed: false, result: null };
       const result = await requestBridgeConfirmation('sign', purpose, payload);
       return { allowed: true, result };
     }
@@ -201,9 +232,10 @@
       if (!assetClass || !permissions.offerClasses.includes(assetClass)) {
         return { allowed: false, result: null };
       }
+      if (!(await ensureSiteIdentity())) return { allowed: false, result: null };
       // SPEC.md §3.8.3 — before ever opening the confirmation overlay,
       // ask background.js (the only context here with AtlasWallet) whether
-      // this origin is on the ACTIVE identity's own trusted-offer-domains
+      // this origin is on the site's own identity's trusted-offer-domains
       // list. Only background.js's own {trusted:true} skips the prompt —
       // a missing response, a thrown error, or an ordinary {trusted:false}
       // all fall through to the exact §3.8.2 flow below unchanged; failing
@@ -231,6 +263,7 @@
       if (!/^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain) || !/^[0-9a-f]{32}$/.test(String(coinId))) {
         return { allowed: false, result: null };
       }
+      if (!(await ensureSiteIdentity())) return { allowed: false, result: null };
       const result = await requestBridgeConfirmation('buy', domain, { domain, coinId });
       return { allowed: true, result };
     }

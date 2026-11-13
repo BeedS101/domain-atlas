@@ -94,19 +94,35 @@ encrypted data that nothing can read until the same key is imported again.
 
 ## 7. Per-site identity
 
-The wallet remembers which identity was chosen for a site and switches to it on the next visit.
+Each site answers to one identity of the account. The wallet remembers the choice per site and answers that
+site's requests (read, sign, offer, buy) with it.
 
 - Key: the exact origin (scheme, host, port), not the registrable domain. Sibling subdomains can belong to
-  unrelated parties. Applying a choice to a whole domain is an explicit extra option. A look-alike domain
-  therefore never inherits a trusted identity and gets the normal prompt.
-- The bindings live in the encrypted vault and are included in the backup.
-- The prompt appears only when a site asks for wallet access or to present an identity, never on a plain
-  visit. For an origin with no binding the wallet offers its identities, a new one, or a shared sandbox.
-  The wallet draws the prompt; the page cannot.
-- The switch is shown ("Using Sandbox 2 on this site") and applies per tab and origin. The wallet window
-  keeps its own default selection and is not changed by a site.
-- A binding to an identity that was deleted or exported is dropped and the site prompts again.
+  unrelated parties. Applying a choice to a whole domain is an explicit extra option, not built. A look-alike
+  domain therefore never inherits a trusted identity and gets the normal prompt.
+- The bindings are `siteBindings` in the encrypted vault, `{ origin: { identity, boundAt } }`, where `identity`
+  is `'main'` or a sub-identity's public key (stable across restores and imports, unlike ids). They are included
+  in full and automatic backups as `siteIdentities` and merged on restore: a site that already has a binding
+  keeps it, and a binding to an identity that is not in the vault is skipped. Writing the vault drops any
+  binding whose identity is gone (removed, or exported with its key removed), so the site prompts again.
+- The prompt appears only when a site asks for wallet access (`getIdentity`, `requestSignature`, `offerAsset`,
+  `requestPurchase`) and has no binding, and only when the account has at least one sub-identity. With none,
+  every site simply gets the main identity and nothing is asked or stored. The wallet draws the prompt in the
+  confirmation window (`confirm-bridge.html`, kind `identity`); the page cannot. It suggests a new identity
+  named after the site, and offers the identity the wallet is showing, or any other. "Remember" is ticked by
+  default; unticked, the choice lasts until the wallet locks (session storage). Nothing is answered before a
+  choice is made, and declining answers nothing for 30 seconds on that page load rather than asking on every
+  call.
+- Answering per site never changes the wallet window's own selected identity, so two tabs on two sites can be
+  using two identities at once. The confirmation window pins the site's identity for its own page only
+  (`useIdentityInThisContext`) and shows "Acting as ..." when the site is bound. The background worker answers
+  reads and trusted offers with explicit owner keys; the per-owner stores (wallet, journal, bridge offers,
+  trusted domains) are read and written under that owner's own keys.
+- Wallet -> Identity -> Site identities lists the remembered sites with the identity each answers as; the
+  identity can be changed from the list, and a site can be forgotten (it asks again next time).
 - A site learns only the public key of the identity in use. It cannot list, choose or influence identities.
+- Not built: making the in-page world overlay follow the site's identity (the overlay still uses the wallet
+  window's selected identity), whole-domain bindings, and bindings for passkey accounts.
 
 ## 8. Transfers between identities
 
@@ -151,7 +167,7 @@ by exporting it with its data (section 13) or by redeeming them (SPEC.md §5.7).
 1. Storage layer, password accounts only: vault, active identity, create, rename, switch, remove (empty
    identities only), account-level operations pinned to the main identity, tests. No screens. Built.
 2. Backup: sub-identities in the full and automatic backups, restored by merge. Built. The identity sync
-   backup and per-site bindings (which do not exist yet) are not part of it.
+   backup is not part of it. Per-site bindings (step 6) are carried in the same backups.
 3. Switcher and management screens, naming, the active-identity badge. Built: Wallet -> Identity -> Identities
    (switch, rename, add, remove with a second confirming press) and an "acting as" badge under the wallet tabs
    with a "Back to main" button. Names are always rendered as text.
@@ -160,7 +176,7 @@ by exporting it with its data (section 13) or by redeeming them (SPEC.md §5.7).
    with transfers (step 5).
 5. Transfers between identities. Built for a single unique asset (section 8); balances and move-everything
    are not.
-6. Per-site binding and the untrusted-site prompt.
+6. Per-site binding and the untrusted-site prompt. Built (section 7).
 7. Passkey accounts (section 10).
 
 ## 10. Passkey accounts

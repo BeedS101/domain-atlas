@@ -57,6 +57,11 @@
   const offerApproveBtn = document.getElementById('offerApproveBtn');
   const offerDenyBtn = document.getElementById('offerDenyBtn');
   const dismissBtn = document.getElementById('dismissBtn');
+  const identityState = document.getElementById('identityState');
+  const identityOriginEl = document.getElementById('identityOrigin');
+  const identityBody = document.getElementById('identityBody');
+  const actingAs = document.getElementById('actingAs');
+  const actingAsName = document.getElementById('actingAsName');
   const buyState = document.getElementById('buyState');
   const buyOriginEl = document.getElementById('buyOrigin');
   const buyBody = document.getElementById('buyBody');
@@ -108,6 +113,7 @@
     readyState.style.display = (unlocked && kind === 'sign') ? 'block' : 'none';
     offerState.style.display = (unlocked && kind === 'offer') ? 'block' : 'none';
     buyState.style.display = (unlocked && kind === 'buy') ? 'block' : 'none';
+    identityState.style.display = (unlocked && kind === 'identity') ? 'block' : 'none';
     // Explicit 'block'/'none' on all three, not '' — '' only clears an
     // inline override and falls back to the stylesheet rule, which is
     // `display: none` for each of these (so every state starts hidden
@@ -134,6 +140,14 @@
     currentPayload = payload;
 
     try {
+      if (kind === 'identity') {
+        const unlockedNow = await AtlasWallet.isUnlocked().catch(() => false);
+        lockedDetailLine.textContent = 'This site asked for your wallet, but there\u2019s nothing unlocked to answer with.';
+        originLockedEl.textContent = origin;
+        if (unlockedNow) await startIdentityChoice(origin);
+        showState(kind, unlockedNow);
+        return;
+      }
       if (kind === 'sign') {
         originEl.textContent = origin;
         purposeText.textContent = detail;
@@ -159,6 +173,16 @@
         lockedDetailLine.textContent = 'This site asked to buy a coin with Gold, but there’s nothing unlocked to buy with. Unlock your wallet, then press Buy with Gold again.';
       }
       originLockedEl.textContent = origin;
+
+      // Every other request is answered by the identity this site is bound to, for this prompt only; the wallet
+      // window keeps acting as the identity it has selected.
+      const site = await AtlasWallet.getSiteIdentity(origin);
+      if (site.state === 'ask') { decide(false, null); return; }
+      if (site.publicKey) await AtlasWallet.useIdentityInThisContext(site.publicKey);
+      if (site.state === 'bound') {
+        actingAsName.textContent = site.label;
+        actingAs.style.display = 'block';
+      }
 
       const unlocked = await AtlasWallet.isUnlocked().catch(() => false);
       showState(kind, unlocked);
@@ -227,6 +251,73 @@
   offerDenyBtn.addEventListener('click', () => decide(false, null));
 
   dismissBtn.addEventListener('click', () => decide(false, null));
+
+  // ---------- 'identity': first contact, which identity this site sees ----------
+  //
+  // Drawn here, never by the page. The choice is stored for this exact origin unless "Remember" is unticked, in
+  // which case it holds until the wallet locks. Nothing is answered to the site before a choice is made.
+  async function startIdentityChoice(origin) {
+    identityOriginEl.textContent = origin;
+    restartInactivity(120000);
+    const account = await AtlasWallet.getAccountIdentity();
+    const subs = await AtlasWallet.listSubIdentities();
+    const selected = await AtlasWallet.getActiveIdentityInfo();
+    const choices = [{ publicKey: account.publicKey, label: 'Main identity' }].concat(subs.map((e) => ({ publicKey: e.publicKey, label: e.label })));
+    const current = choices.find((c) => selected && c.publicKey === selected.publicKey) || choices[0];
+    const problem = bel('div', { className: 'line problem', role: 'status' });
+    const remember = bel('input', { type: 'checkbox', id: 'identityRemember' });
+    remember.checked = true;
+    const rememberLabel = bel('label', { className: 'remember' });
+    rememberLabel.appendChild(remember);
+    rememberLabel.appendChild(document.createTextNode('Remember this choice for ' + origin + '. Other addresses of the same site ask separately.'));
+
+    async function choose(action) {
+      identityBody.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+      problem.textContent = '';
+      try {
+        const opts = { remember: remember.checked };
+        if (action.create) await AtlasWallet.createSiteIdentity(origin, opts);
+        else await AtlasWallet.setSiteIdentity(origin, action.publicKey, opts);
+        decide(true, { chosen: true });
+      } catch (err) {
+        problem.textContent = err && err.message ? err.message : 'That did not work.';
+        identityBody.querySelectorAll('button').forEach((x) => { x.disabled = false; });
+      }
+    }
+
+    const host = (() => { try { return new URL(origin).host; } catch (err) { return origin; } })();
+    const createBtn = bel('button', { type: 'button', className: 'primary', id: 'identityCreate' }, 'Create a new identity for ' + host);
+    const currentBtn = bel('button', { type: 'button', id: 'identityCurrent' }, 'Use ' + current.label);
+    const otherBtn = bel('button', { type: 'button', id: 'identityOther' }, 'Use another identity\u2026');
+    const cancelBtn = bel('button', { type: 'button', id: 'identityCancel' }, 'Not now');
+    createBtn.addEventListener('click', () => { restartInactivity(120000); choose({ create: true }); });
+    currentBtn.addEventListener('click', () => { restartInactivity(120000); choose({ publicKey: current.publicKey }); });
+    cancelBtn.addEventListener('click', () => decide(false, null));
+    const picker = bel('div', {});
+    otherBtn.addEventListener('click', () => {
+      restartInactivity(120000);
+      picker.textContent = '';
+      const select = bel('select', { id: 'identityPick', 'aria-label': 'Identity for this site' });
+      choices.forEach((c) => select.appendChild(bel('option', { value: c.publicKey }, c.label)));
+      const useBtn = bel('button', { type: 'button', className: 'primary', id: 'identityUsePick' }, 'Use this identity');
+      useBtn.addEventListener('click', () => choose({ publicKey: select.value }));
+      picker.appendChild(select);
+      picker.appendChild(useBtn);
+      otherBtn.style.display = 'none';
+    });
+
+    identityBody.textContent = '';
+    identityBody.appendChild(bel('div', { className: 'line' }, 'This site is asking your wallet for an identity. It sees only the public key of the identity you choose, and each site can have its own.'));
+    const choice = bel('div', { className: 'choice' });
+    [createBtn, currentBtn, otherBtn].forEach((b) => choice.appendChild(b));
+    choice.appendChild(picker);
+    identityBody.appendChild(choice);
+    identityBody.appendChild(rememberLabel);
+    identityBody.appendChild(problem);
+    const row = bel('div', { className: 'choice' });
+    row.appendChild(cancelBtn);
+    identityBody.appendChild(row);
+  }
 
   // ---------- 'buy': the wallet's Buy with Gold step for one coin ----------
 

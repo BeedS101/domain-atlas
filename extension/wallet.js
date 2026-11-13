@@ -364,7 +364,7 @@ const AtlasWallet = (() => {
     if (mode !== 'local' && mode !== 'webauthn') throw new Error('Unknown identity mode: ' + mode);
     const exists = mode === 'local' ? await hasLocalIdentity() : await hasWebAuthnIdentity();
     if (!exists) throw new Error('Set up that identity before switching to it.');
-    await chrome.storage.session.remove('atlasActiveSubIdentity');
+    await chrome.storage.session.remove(['atlasActiveSubIdentity', 'atlasSiteIdentitySession']);
     await chrome.storage.local.set({ atlasIdentityMode: mode });
   }
 
@@ -397,9 +397,17 @@ const AtlasWallet = (() => {
   // This is the ACTIVE identity: the main identity, or the sub-identity the person has switched to (see
   // the sub-identities section below). Operations on the account itself (password, backup of the
   // account) use getAccountIdentity() instead.
+  let contextIdentity = null;
+
   async function getIdentity() {
     const account = await getAccountIdentity();
     if (!account || account.mode !== 'local') return account;
+    // An extension page that acts for one site (the bridge confirmation) pins that site's identity for its own
+    // lifetime; the wallet window and every other page keep following the selected identity.
+    if (contextIdentity) {
+      if (contextIdentity.accountPublicKey !== account.publicKey) return null;
+      return contextIdentity.publicKey === account.publicKey ? account : { ...contextIdentity };
+    }
     const { atlasActiveSubIdentity } = await chrome.storage.session.get('atlasActiveSubIdentity');
     const sub = atlasActiveSubIdentity;
     // A cached sub-identity that does not belong to the unlocked main identity (the main identity was
@@ -532,7 +540,7 @@ const AtlasWallet = (() => {
 
   async function lockIdentity() {
     await endAllAdminSessions();
-    await chrome.storage.session.remove(['atlasActiveSubIdentity', 'atlasUnlockedIdentity']);
+    await chrome.storage.session.remove(['atlasActiveSubIdentity', 'atlasUnlockedIdentity', 'atlasSiteIdentitySession']);
     await clearAutoBackupSessionKey();
   }
 
@@ -591,6 +599,12 @@ const AtlasWallet = (() => {
   async function writeSubIdentityVault(account, vault) {
     const { atlasSubIdentities } = await chrome.storage.local.get('atlasSubIdentities');
     const all = atlasSubIdentities || {};
+    // A site binding never outlives the identity it points to.
+    if (vault.siteBindings) {
+      for (const [site, binding] of Object.entries(vault.siteBindings)) {
+        if (!binding || (binding.identity !== 'main' && !vault.identities.some((e) => e.publicKey === binding.identity))) delete vault.siteBindings[site];
+      }
+    }
     all[account.publicKey] = await encryptAtRest(account, SUB_IDENTITY_STORE, vault);
     await chrome.storage.local.set({ atlasSubIdentities: all });
   }
@@ -633,6 +647,17 @@ const AtlasWallet = (() => {
     return { kind: 'sub', id: entry.id, label: entry.label, publicKey: entry.publicKey };
   }
 
+  async function makeSubIdentityEntry(label) {
+    const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    return {
+      id: b64urlEncode(crypto.getRandomValues(new Uint8Array(16)).buffer),
+      label,
+      publicKey: b64urlEncode(await crypto.subtle.exportKey('raw', pair.publicKey)),
+      privateKeyJwk: await crypto.subtle.exportKey('jwk', pair.privateKey),
+      createdAt: new Date().toISOString()
+    };
+  }
+
   async function createSubIdentity(label) {
     const name = normalizeSubIdentityLabel(label);
     return withSubIdentityLock(async () => {
@@ -640,14 +665,7 @@ const AtlasWallet = (() => {
       const vault = await readSubIdentityVault(account);
       if (vault.identities.length >= SUB_IDENTITY_LIMIT) throw new Error('You can have at most ' + SUB_IDENTITY_LIMIT + ' sub-identities.');
       assertUniqueSubIdentityLabel(vault, name, null);
-      const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-      const entry = {
-        id: b64urlEncode(crypto.getRandomValues(new Uint8Array(16)).buffer),
-        label: name,
-        publicKey: b64urlEncode(await crypto.subtle.exportKey('raw', pair.publicKey)),
-        privateKeyJwk: await crypto.subtle.exportKey('jwk', pair.privateKey),
-        createdAt: new Date().toISOString()
-      };
+      const entry = await makeSubIdentityEntry(name);
       vault.identities.push(entry);
       await writeSubIdentityVault(account, vault);
       await logActivity('identity', 'Sub-identity created');
@@ -754,6 +772,153 @@ const AtlasWallet = (() => {
       await logActivity('identity', 'Sub-identity removed');
       return true;
     });
+  }
+
+  // ---------- per-site identity ----------
+  //
+  // Each site (exact origin: scheme, host and port) answers to one identity of the account. The binding is kept in
+  // the sub-identities vault (so it is encrypted with it and travels in backups) and names the identity by its
+  // public key, 'main' standing for the account's own identity. A site that has no binding asks the person once
+  // (the bridge confirmation draws that prompt) when the account has sub-identities to choose from; without any,
+  // every site simply gets the main identity. A choice made without "remember" lives in session storage until the
+  // wallet locks. None of this changes the identity the wallet window itself is acting as.
+  const SITE_BINDING_LIMIT = 500;
+
+  function normalizeSiteOrigin(origin) {
+    let parsed;
+    try { parsed = new URL(String(origin)); } catch (err) { throw new Error('That is not a site address.'); }
+    if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || parsed.origin !== String(origin)) throw new Error('That is not a site address.');
+    return parsed.origin;
+  }
+
+  function siteTarget(account, vault, identityKey) {
+    if (identityKey === 'main' || identityKey === account.publicKey) return { kind: 'main', id: null, label: 'Main identity', publicKey: account.publicKey };
+    const entry = vault.identities.find((e) => e.publicKey === identityKey);
+    return entry ? { kind: 'sub', id: entry.id, label: entry.label, publicKey: entry.publicKey } : null;
+  }
+
+  async function readSiteSession(account) {
+    const { atlasSiteIdentitySession } = await chrome.storage.session.get('atlasSiteIdentitySession');
+    const all = atlasSiteIdentitySession || {};
+    return { all, mine: all[account.publicKey] || {} };
+  }
+
+  // Which identity answers `origin`: { state: 'bound', ...identity, remembered } when a choice exists,
+  // { state: 'default', ...main } when there is nothing to choose between, { state: 'ask' } when the person has
+  // to choose first, { state: 'locked' } when the wallet is locked.
+  async function getSiteIdentity(origin) {
+    const site = normalizeSiteOrigin(origin);
+    const account = await getAccountIdentity();
+    if (!account) return { state: 'locked', publicKey: null };
+    const main = { kind: 'main', id: null, label: 'Main identity', publicKey: account.publicKey };
+    if (account.mode !== 'local') return { state: 'default', ...main };
+    const vault = await readSubIdentityVault(account);
+    const bound = vault.siteBindings && vault.siteBindings[site];
+    if (bound) {
+      const target = siteTarget(account, vault, bound.identity);
+      if (target) return { state: 'bound', remembered: true, ...target };
+    }
+    const { mine } = await readSiteSession(account);
+    if (mine[site]) {
+      const target = siteTarget(account, vault, mine[site]);
+      if (target) return { state: 'bound', remembered: false, ...target };
+    }
+    if (!vault.identities.length) return { state: 'default', ...main };
+    return { state: 'ask', publicKey: null };
+  }
+
+  // Chooses the identity for a site. `identityPublicKey` is the account's own key or a sub-identity's.
+  // `remember` false keeps the choice only until the wallet locks.
+  async function setSiteIdentity(origin, identityPublicKey, opts) {
+    const site = normalizeSiteOrigin(origin);
+    const remember = !opts || opts.remember !== false;
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      const target = siteTarget(account, vault, identityPublicKey);
+      if (!target) throw new Error('No such identity.');
+      await storeSiteBinding(account, vault, site, target, remember);
+      return { state: 'bound', remembered: remember, ...target };
+    });
+  }
+
+  async function storeSiteBinding(account, vault, site, target, remember) {
+    const key = target.kind === 'main' ? 'main' : target.publicKey;
+    if (remember) {
+      vault.siteBindings = vault.siteBindings || {};
+      if (!vault.siteBindings[site] && Object.keys(vault.siteBindings).length >= SITE_BINDING_LIMIT) throw new Error('Too many sites are remembered. Forget some first.');
+      vault.siteBindings[site] = { identity: key, boundAt: new Date().toISOString() };
+      await writeSubIdentityVault(account, vault);
+    }
+    const { all, mine } = await readSiteSession(account);
+    if (remember) {
+      delete mine[site];
+    } else {
+      if (vault.siteBindings && vault.siteBindings[site]) { delete vault.siteBindings[site]; await writeSubIdentityVault(account, vault); }
+      mine[site] = key;
+    }
+    all[account.publicKey] = mine;
+    await chrome.storage.session.set({ atlasSiteIdentitySession: all });
+  }
+
+  // Makes a new identity named after the site and binds the site to it.
+  async function createSiteIdentity(origin, opts) {
+    const site = normalizeSiteOrigin(origin);
+    const remember = !opts || opts.remember !== false;
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      if (vault.identities.length >= SUB_IDENTITY_LIMIT) throw new Error('You can have at most ' + SUB_IDENTITY_LIMIT + ' sub-identities.');
+      const entry = await makeSubIdentityEntry(restoredSubIdentityLabel(vault, new URL(site).host.slice(0, SUB_IDENTITY_LABEL_MAX)));
+      vault.identities.push(entry);
+      await writeSubIdentityVault(account, vault);
+      await storeSiteBinding(account, vault, site, { kind: 'sub', id: entry.id, label: entry.label, publicKey: entry.publicKey }, remember);
+      await logActivity('identity', 'Sub-identity created for a site');
+      return { state: 'bound', remembered: remember, kind: 'sub', id: entry.id, label: entry.label, publicKey: entry.publicKey };
+    });
+  }
+
+  async function forgetSiteIdentity(origin) {
+    const site = normalizeSiteOrigin(origin);
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      if (vault.siteBindings && vault.siteBindings[site]) {
+        delete vault.siteBindings[site];
+        await writeSubIdentityVault(account, vault);
+      }
+      const { all, mine } = await readSiteSession(account);
+      if (mine[site]) {
+        delete mine[site];
+        all[account.publicKey] = mine;
+        await chrome.storage.session.set({ atlasSiteIdentitySession: all });
+      }
+      return true;
+    });
+  }
+
+  // The remembered sites, each with the identity it answers as. No keys.
+  async function listSiteIdentities() {
+    const account = await requireSubIdentityAccount();
+    const vault = await readSubIdentityVault(account);
+    const out = [];
+    for (const [site, binding] of Object.entries(vault.siteBindings || {})) {
+      const target = binding && siteTarget(account, vault, binding.identity);
+      if (target) out.push({ origin: site, boundAt: binding.boundAt || null, ...target });
+    }
+    return out.sort((a, b) => a.origin.localeCompare(b.origin));
+  }
+
+  // For the rest of this page's life, every wallet call here acts as `publicKey` instead of the selected
+  // identity. Used by the bridge confirmation, which runs in its own page, so the wallet window is untouched.
+  async function useIdentityInThisContext(publicKey) {
+    const account = await getAccountIdentity();
+    if (!account) throw new Error('Unlock your wallet first.');
+    if (account.mode !== 'local' || publicKey === account.publicKey) { contextIdentity = null; return; }
+    const vault = await readSubIdentityVault(account);
+    const entry = vault.identities.find((e) => e.publicKey === publicKey);
+    if (!entry) throw new Error('No such identity.');
+    contextIdentity = { publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk, mode: 'local', subIdentityId: entry.id, accountPublicKey: account.publicKey };
   }
 
   // Same trust rule as exportIdentity below: re-derives from the LOCAL
@@ -1302,6 +1467,12 @@ const AtlasWallet = (() => {
     return entry ? { mode: 'local', publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk } : null;
   }
 
+  // The identity whose keys protect `ownerPublicKey`'s stores: that owner when this wallet holds it, otherwise
+  // the active identity (which keeps a store for a key this wallet does not hold unreadable).
+  async function holderFor(ownerPublicKey) {
+    return (await localIdentityFor(ownerPublicKey)) || (await getIdentity());
+  }
+
   // Checked before anything is sent to an issuer that would have to be stored afterwards.
   async function assertWalletWritable(ownerPublicKey) {
     await getWalletStrict(ownerPublicKey);
@@ -1322,7 +1493,7 @@ const AtlasWallet = (() => {
   async function getWallet(ownerPublicKey) {
     const { atlasWallets, atlasResourceWallets } = await chrome.storage.local.get(['atlasWallets', 'atlasResourceWallets']);
     const wallets = atlasWallets || {};
-    const identity = await getIdentity();
+    const identity = await holderFor(ownerPublicKey);
     const stored = wallets[ownerPublicKey];
     // A stored value that is neither a list nor an encrypted envelope is shown as empty and left exactly as it is.
     if (stored !== undefined && stored !== null && !Array.isArray(stored) && !(typeof stored === 'object' && stored.__atlasEncrypted)) return [];
@@ -1340,14 +1511,10 @@ const AtlasWallet = (() => {
     return markUnresolved(cleaned, await readPendingOps(ownerPublicKey));
   }
 
-  // Task #137's activity-tracking design needs to know "did THIS wallet's
-  // holdings just change" without wallet.js knowing anything at all about
-  // presence, worlds, or connections — those are viewer.js's concern
-  // entirely. saveWallet() is the one choke point essentially every
-  // mutation already runs through (mint, split, consolidate, trade
-  // settle/claim, mail-gift claim — 14 call sites as of this
-  // writing), so a listener registered here fires for all of them without
-  // wallet.js needing a matching call added at each individual UI action.
+  // Lets a caller learn that a wallet's holdings changed without wallet.js knowing anything about presence,
+  // worlds or connections (viewer.js's concern). saveWallet() is the one choke point essentially every mutation
+  // runs through (mint, split, consolidate, trade settle/claim, mail-gift claim), so a listener registered
+  // here fires for all of them without a matching call at each UI action.
   // Deliberately fire-and-forget: a listener throwing is caught and
   // dropped rather than allowed to break the save it's just observing.
   const walletChangeListeners = [];
@@ -1503,7 +1670,7 @@ const AtlasWallet = (() => {
 
   async function readPendingOps(ownerPublicKey) {
     const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
-    const identity = await getIdentity();
+    const identity = await holderFor(ownerPublicKey);
     const list = await decryptAtRest(identity, 'pendingOps', (atlasPendingOps || {})[ownerPublicKey], []);
     return Array.isArray(list) ? list : [];
   }
@@ -6240,6 +6407,35 @@ const AtlasWallet = (() => {
     return out;
   }
 
+  // The remembered site bindings, naming each identity by public key (ids are reassigned on restore).
+  async function buildSiteIdentityBackup(account) {
+    const vault = await readSubIdentityVault(account);
+    return Object.entries(vault.siteBindings || {})
+      .filter(([, b]) => b && typeof b.identity === 'string')
+      .map(([origin, b]) => ({ origin, identity: b.identity === 'main' ? 'main' : b.identity, boundAt: b.boundAt || null }));
+  }
+
+  // Merges backed-up bindings into the vault: a site that already has a binding keeps it, and a binding whose
+  // identity is not in the vault is skipped.
+  async function restoreSiteIdentities(account, entries) {
+    let restored = 0;
+    await withSubIdentityLock(async () => {
+      const vault = await readSubIdentityVault(account);
+      vault.siteBindings = vault.siteBindings || {};
+      for (const e of entries) {
+        if (!e || typeof e.origin !== 'string' || typeof e.identity !== 'string') continue;
+        let site;
+        try { site = normalizeSiteOrigin(e.origin); } catch (err) { continue; }
+        if (vault.siteBindings[site] || Object.keys(vault.siteBindings).length >= SITE_BINDING_LIMIT) continue;
+        if (!siteTarget(account, vault, e.identity)) continue;
+        vault.siteBindings[site] = { identity: e.identity === account.publicKey ? 'main' : e.identity, boundAt: typeof e.boundAt === 'string' ? e.boundAt : new Date().toISOString() };
+        restored++;
+      }
+      if (restored) await writeSubIdentityVault(account, vault);
+    });
+    return restored;
+  }
+
   async function buildBackupPayload(identity) {
     const active = await getIdentity();
     const payload = active && active.publicKey === identity.publicKey
@@ -6248,6 +6444,8 @@ const AtlasWallet = (() => {
     if (identity.mode === 'local' && identity.privateKeyJwk) {
       const subIdentities = await buildSubIdentityBackup(identity);
       if (subIdentities.length) payload.subIdentities = subIdentities;
+      const siteIdentities = await buildSiteIdentityBackup(identity);
+      if (siteIdentities.length) payload.siteIdentities = siteIdentities;
     }
     return payload;
   }
@@ -6702,6 +6900,9 @@ const AtlasWallet = (() => {
     let subIdentitySummary = null;
     if (Array.isArray(payload.subIdentities) && payload.subIdentities.length) {
       subIdentitySummary = await restoreSubIdentities(identity, payload.subIdentities);
+    }
+    if (Array.isArray(payload.siteIdentities) && payload.siteIdentities.length) {
+      try { await restoreSiteIdentities(identity, payload.siteIdentities); } catch (err) { /* the sites ask again */ }
     }
     const journalNote = journalSummary && journalSummary.status !== 'absent'
       ? ' (pending operations: ' + journalSummary.added + ' added, ' + journalSummary.merged + ' merged, ' + journalSummary.quarantined + ' set aside)'
@@ -9066,14 +9267,14 @@ const AtlasWallet = (() => {
   // one-time upgrade path every other store here already pays for.
   async function getBridgeOffers(ownerPublicKey) {
     const { atlasBridgeOffers } = await chrome.storage.local.get('atlasBridgeOffers');
-    const identity = await getIdentity();
+    const identity = await holderFor(ownerPublicKey);
     return decryptAtRestAndMigrate(identity, 'bridgeOffers', (atlasBridgeOffers || {})[ownerPublicKey], [], (v) => saveBridgeOffers(ownerPublicKey, v));
   }
 
   async function saveBridgeOffers(ownerPublicKey, entries) {
     const { atlasBridgeOffers } = await chrome.storage.local.get('atlasBridgeOffers');
     const all = atlasBridgeOffers || {};
-    const identity = await getIdentity();
+    const identity = await holderFor(ownerPublicKey);
     all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'bridgeOffers', entries);
     await chrome.storage.local.set({ atlasBridgeOffers: all });
   }
@@ -9133,7 +9334,10 @@ const AtlasWallet = (() => {
     if (!verdict.valid) throw new Error(verdictBlockMessage(verdict, 'this offer') || ('offer credential does not check out: ' + verdict.reason));
 
     await commitOperation(ownerPublicKey, null, [{ owner: ownerPublicKey, add: [{ credential, lastVerdict: verdict }] }]);
-    await autoConsolidateAssetWallet(ownerPublicKey);
+    // Merging signs as the acting identity, so it only runs for that one; another identity's stacks are merged
+    // when it is next the acting identity.
+    const acting = await getIdentity();
+    if (acting && acting.publicKey === ownerPublicKey) await autoConsolidateAssetWallet(ownerPublicKey);
 
     entry.claimed = true;
     await saveBridgeOffers(ownerPublicKey, entries);
@@ -9169,14 +9373,14 @@ const AtlasWallet = (() => {
   // this file.
   async function getTrustedBridgeDomains(ownerPublicKey) {
     const { atlasTrustedBridgeDomains } = await chrome.storage.local.get('atlasTrustedBridgeDomains');
-    const identity = await getIdentity();
+    const identity = await holderFor(ownerPublicKey);
     return decryptAtRestAndMigrate(identity, 'trustedBridgeDomains', (atlasTrustedBridgeDomains || {})[ownerPublicKey], [], (v) => saveTrustedBridgeDomains(ownerPublicKey, v));
   }
 
   async function saveTrustedBridgeDomains(ownerPublicKey, entries) {
     const { atlasTrustedBridgeDomains } = await chrome.storage.local.get('atlasTrustedBridgeDomains');
     const all = atlasTrustedBridgeDomains || {};
-    const identity = await getIdentity();
+    const identity = await holderFor(ownerPublicKey);
     all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'trustedBridgeDomains', entries);
     await chrome.storage.local.set({ atlasTrustedBridgeDomains: all });
   }
@@ -10718,6 +10922,7 @@ const AtlasWallet = (() => {
 
   return {
     getAccountIdentity, listSubIdentities, getActiveIdentityInfo, createSubIdentity, renameSubIdentity, switchIdentity, removeSubIdentity,
+    getSiteIdentity, setSiteIdentity, createSiteIdentity, forgetSiteIdentity, listSiteIdentities, useIdentityInThisContext,
     prepareSubIdentityExport, completeSubIdentityExport, importSubIdentity, listMoveTargets, moveAssetToIdentity,
     hasIdentity, isUnlocked, getIdentity, createIdentity, unlockIdentity, lockIdentity, changePassword,
     exportIdentity, importIdentity, presentIdentity, recordVisit,

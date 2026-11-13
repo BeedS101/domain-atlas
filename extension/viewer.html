@@ -2134,6 +2134,14 @@
               </div>
               <div id="subImportStatus" class="mono" role="status" aria-live="polite"></div>
             </div>
+
+            <!-- Which identity each remembered site answers as. A site is matched by its exact address. -->
+            <div id="siteIdentitiesPanel" style="margin-top:14px;">
+              <div class="subhead" style="margin:0 0 6px;">Site identities</div>
+              <div class="empty-note" id="siteIdentitiesIntro">Each site below answers as the identity shown, whichever identity this wallet is showing. A site that is not listed asks the first time it wants your wallet.</div>
+              <div id="siteIdentityList" class="item-list"></div>
+              <div id="siteIdentityStatus" class="mono" role="status" aria-live="polite"></div>
+            </div>
           </div>
 
           <!-- Local-only nickname — see wallet.js's setAlias. Never signed,
