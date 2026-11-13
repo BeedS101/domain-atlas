@@ -3909,6 +3909,7 @@ function identityRowElement(model) {
     if (!model.active) add('switch', 'Switch to this identity');
     if (model.id) {
       add('rename', 'Rename');
+      add('export', 'Export\u2026');
       add('remove', model.confirmingRemove ? 'Confirm remove' : 'Remove');
     }
   }
@@ -3982,6 +3983,8 @@ identityListEl && identityListEl.addEventListener('click', async (e) => {
       await AtlasWallet.renameSubIdentity(id, name);
       renamingSubIdentityId = null;
     }, 'Renamed.');
+  } else if (action === 'export') {
+    openSubIdentityExportPanel(id, btn.closest('.identity-row'));
   } else if (action === 'remove') {
     if (confirmRemoveSubIdentityId !== id) {
       confirmRemoveSubIdentityId = id;
@@ -4014,6 +4017,180 @@ newSubIdentityInput && newSubIdentityInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); addSubIdentityFromInput(); }
 });
 actingAsBackBtn && actingAsBackBtn.addEventListener('click', () => runSubIdentityAction(() => AtlasWallet.switchIdentity(null)));
+
+// ---------- exporting one identity ----------
+//
+// The panel is separate from the identity list, which is rebuilt whenever the wallet changes, so what the
+// person has typed is not lost. The export code lives only in this state and is cleared when the panel closes.
+
+const subExportPanelEl = document.getElementById('subIdentityExportPanel');
+const subExportTitleEl = document.getElementById('subIdentityExportTitle');
+const subExportStep1El = document.getElementById('subIdentityExportStep1');
+const subExportStep2El = document.getElementById('subIdentityExportStep2');
+const subExportPasswordInput = document.getElementById('subExportPasswordInput');
+const subExportOtherPasswordCheck = document.getElementById('subExportOtherPasswordCheck');
+const subExportFilePasswordInput = document.getElementById('subExportFilePasswordInput');
+const subExportIncludeDataCheck = document.getElementById('subExportIncludeDataCheck');
+const subExportCreateBtn = document.getElementById('subExportCreateBtn');
+const subExportCancelBtn = document.getElementById('subExportCancelBtn');
+const subExportCodeText = document.getElementById('subExportCodeText');
+const subExportCopyCodeBtn = document.getElementById('subExportCopyCodeBtn');
+const subExportDownloadBtn = document.getElementById('subExportDownloadBtn');
+const subExportPasswordNote = document.getElementById('subExportPasswordNote');
+const subExportSavedCheck = document.getElementById('subExportSavedCheck');
+const subExportFinishBtn = document.getElementById('subExportFinishBtn');
+const subExportKeepBtn = document.getElementById('subExportKeepBtn');
+const subExportStatusEl = document.getElementById('subIdentityExportStatus');
+
+// { id, label } while the panel is open for an identity; prepared = the result of prepareSubIdentityExport.
+let subExportTarget = null;
+let subExportPrepared = null;
+
+function downloadJsonFile(data, filename) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function closeSubIdentityExportPanel() {
+  subExportTarget = null;
+  subExportPrepared = null;
+  subExportPanelEl.hidden = true;
+  subExportStep1El.hidden = false;
+  subExportStep2El.hidden = true;
+  subExportPasswordInput.value = '';
+  subExportFilePasswordInput.value = '';
+  subExportFilePasswordInput.hidden = true;
+  subExportOtherPasswordCheck.checked = false;
+  subExportIncludeDataCheck.checked = true;
+  subExportCodeText.textContent = '';
+  subExportSavedCheck.checked = false;
+  subExportFinishBtn.disabled = true;
+  subExportStatusEl.textContent = '';
+}
+
+function openSubIdentityExportPanel(id, rowEl) {
+  closeSubIdentityExportPanel();
+  const nameEl = rowEl && rowEl.querySelector('.identity-row-name');
+  subExportTarget = { id, label: nameEl ? nameEl.textContent : 'identity' };
+  subExportTitleEl.textContent = 'Export ' + subExportTarget.label;
+  subExportPanelEl.hidden = false;
+  subExportPasswordInput.focus();
+}
+
+subExportOtherPasswordCheck && subExportOtherPasswordCheck.addEventListener('change', () => {
+  subExportFilePasswordInput.hidden = !subExportOtherPasswordCheck.checked;
+  if (!subExportOtherPasswordCheck.checked) subExportFilePasswordInput.value = '';
+});
+
+subExportCancelBtn && subExportCancelBtn.addEventListener('click', closeSubIdentityExportPanel);
+
+subExportCreateBtn && subExportCreateBtn.addEventListener('click', async () => {
+  if (!subExportTarget) return;
+  subExportCreateBtn.disabled = true;
+  subExportStatusEl.textContent = 'Encrypting\u2026';
+  try {
+    const prepared = await AtlasWallet.prepareSubIdentityExport(subExportTarget.id, {
+      password: subExportPasswordInput.value,
+      filePassword: subExportOtherPasswordCheck.checked ? subExportFilePasswordInput.value : '',
+      includeData: subExportIncludeDataCheck.checked
+    });
+    subExportPrepared = prepared;
+    downloadJsonFile(prepared.file, prepared.filename);
+    subExportPasswordInput.value = '';
+    subExportFilePasswordInput.value = '';
+    subExportCodeText.textContent = prepared.code;
+    subExportPasswordNote.textContent = (prepared.usesWalletPassword
+      ? 'The file is protected by your wallet password as it is now.'
+      : 'The file is protected by the separate password you chose.')
+      + (prepared.includesData ? ' It includes this identity\u2019s items, mail and contacts.' : ' It holds the key only.');
+    subExportStep1El.hidden = true;
+    subExportStep2El.hidden = false;
+    subExportStatusEl.textContent = 'The file was downloaded as ' + prepared.filename + '. The identity has not been removed yet.';
+  } catch (err) {
+    subExportStatusEl.textContent = err.message;
+  } finally {
+    subExportCreateBtn.disabled = false;
+  }
+});
+
+subExportCopyCodeBtn && subExportCopyCodeBtn.addEventListener('click', async () => {
+  if (!subExportPrepared) return;
+  try {
+    await navigator.clipboard.writeText(subExportPrepared.code);
+    subExportStatusEl.textContent = 'Code copied.';
+  } catch (err) {
+    subExportStatusEl.textContent = 'Could not copy. Select the code and copy it by hand.';
+  }
+});
+
+subExportDownloadBtn && subExportDownloadBtn.addEventListener('click', () => {
+  if (subExportPrepared) downloadJsonFile(subExportPrepared.file, subExportPrepared.filename);
+});
+
+subExportSavedCheck && subExportSavedCheck.addEventListener('change', () => {
+  subExportFinishBtn.disabled = !subExportSavedCheck.checked;
+});
+
+subExportKeepBtn && subExportKeepBtn.addEventListener('click', () => {
+  closeSubIdentityExportPanel();
+  subIdentityStatusEl.textContent = 'Nothing was removed. The file you downloaded still opens with its password and code.';
+});
+
+subExportFinishBtn && subExportFinishBtn.addEventListener('click', async () => {
+  if (!subExportPrepared || !subExportSavedCheck.checked) return;
+  subExportFinishBtn.disabled = true;
+  try {
+    const done = await AtlasWallet.completeSubIdentityExport(subExportPrepared.check);
+    closeSubIdentityExportPanel();
+    subIdentityStatusEl.textContent = done.label + ' now exists only in the file you saved. Backups made before now still contain it.';
+    await refreshActingAsBadge();
+    await refreshSubIdentitiesDisplay();
+  } catch (err) {
+    subExportStatusEl.textContent = err.message;
+    subExportFinishBtn.disabled = !subExportSavedCheck.checked;
+  }
+});
+
+// ---------- importing one identity ----------
+
+const subImportFileInput = document.getElementById('subImportFileInput');
+const subImportPasswordInput = document.getElementById('subImportPasswordInput');
+const subImportCodeInput = document.getElementById('subImportCodeInput');
+const subImportNameInput = document.getElementById('subImportNameInput');
+const subImportBtn = document.getElementById('subImportBtn');
+const subImportStatusEl = document.getElementById('subImportStatus');
+const SUB_IMPORT_MAX_BYTES = 50 * 1024 * 1024;
+
+subImportBtn && subImportBtn.addEventListener('click', async () => {
+  const file = subImportFileInput.files && subImportFileInput.files[0];
+  if (!file) { subImportStatusEl.textContent = 'Choose an export file first.'; return; }
+  if (file.size > SUB_IMPORT_MAX_BYTES) { subImportStatusEl.textContent = 'That file is too large to be an identity export.'; return; }
+  subImportBtn.disabled = true;
+  subImportStatusEl.textContent = 'Decrypting\u2026';
+  try {
+    let parsed;
+    try { parsed = JSON.parse(await file.text()); } catch (err) { throw new Error('That is not an Atlas identity file.'); }
+    const added = await AtlasWallet.importSubIdentity(parsed, subImportPasswordInput.value, subImportCodeInput.value, { label: subImportNameInput.value });
+    subImportFileInput.value = '';
+    subImportPasswordInput.value = '';
+    subImportCodeInput.value = '';
+    subImportNameInput.value = '';
+    subImportStatusEl.textContent = 'Imported as ' + added.label + (added.includesData ? ', with its items, mail and contacts.' : ' (key only).')
+      + ' It is now part of this wallet\u2019s backups.';
+    await refreshSubIdentitiesDisplay();
+  } catch (err) {
+    subImportStatusEl.textContent = err.message;
+  } finally {
+    subImportBtn.disabled = false;
+  }
+});
 
 // The active "self" mechanism can be either the local password identity or
 // a WebAuthn passkey identity — see wallet.js's atlasIdentityMode. This

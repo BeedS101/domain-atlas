@@ -1,7 +1,7 @@
 # Sub-identities
 
-Status: design. Steps 1 and 2 of section 9 (storage layer, backups) are built; everything else below is
-planned and not yet implemented.
+Status: steps 1 to 4 of section 9 (storage layer, backups, screens, export and import) are built; the rest
+is planned and not yet implemented.
 
 A wallet today has one identity per login mechanism: a local password identity (`atlasIdentity`) and,
 independently, a passkey identity (`atlasWebAuthnIdentity`), with `atlasIdentityMode` choosing which one
@@ -78,15 +78,13 @@ owner. The operation fails and the stored data is left as it was.
   not sign, the account's own key, or anything past the limit is skipped and counted in the restore result.
   The identity sync backup (browser sync storage) carries the main identity key only and does not include
   sub-identities.
-- **Export** takes one identity, with its data by default or key only as an option, into a file protected by
-  a passphrase chosen at export time, and then removes it from the wallet. The wallet checks the file reads
-  back before removing anything, clears that identity's per-site bindings, and says the identity now exists
-  only in the file. Restoring a backup made before an export brings the identity back, so both the export
-  dialog and the restore screen warn about it.
-- **Import** takes an exported file, or a key, and adds it as a sub-identity. A key alone gives signing
-  ability but not the local credentials; a full export carries the data. Duplicates (by public key) are
-  refused, as are malformed or non-P-256 keys. Import adds the key to the vault and therefore to future
-  backups, and the dialog says so.
+- **Export** takes one identity, with its data by default or key only as an option, into a file and then
+  removes it from the wallet. It is two steps (section 13): the file and a fresh export code are made first,
+  and the identity is removed only after the person confirms they have both. The export screen warns that a
+  backup made before an export still contains the identity.
+- **Import** takes an exported file and adds it as a sub-identity. The file password and the export code are
+  both needed. Duplicates (by public key) are refused, as are malformed or non-P-256 keys. Import adds the
+  key to the vault and therefore to future backups, and the screen says so.
 
 ## 6. Delete
 
@@ -128,7 +126,9 @@ unlinkable.
 3. Switcher and management screens, naming, the active-identity badge. Built: Wallet -> Identity -> Identities
    (switch, rename, add, remove with a second confirming press) and an "acting as" badge under the wallet tabs
    with a "Back to main" button. Names are always rendered as text.
-4. Export, import, and the delete flow.
+4. Export and import of one identity. Built: Wallet -> Identity -> Identities has an Export panel per
+   identity and an "Import an identity" section. The delete flow that offers to move items first belongs
+   with transfers (step 5).
 5. Transfers between identities.
 6. Per-site binding and the untrusted-site prompt.
 7. Passkey accounts (section 10).
@@ -168,3 +168,36 @@ the test. A store that exists but cannot be read stops the backup with an error 
 
 Families not in any backup today, for the main identity or a sub-identity: avatar choices, pending wallet-bridge
 offers and trusted bridge domains.
+
+## 13. Exporting and importing one identity
+
+Export moves an identity out of the wallet, so it must not be possible to lose it half way.
+
+- **Step one, `prepareSubIdentityExport(id, {password, filePassword?, includeData?})`.** Checks the wallet
+  password against the stored identity blob (an unlocked wallet left open is not enough), refuses the
+  identity the wallet is acting as, refuses while the identity has unfinished operations, and refuses a
+  key-only export while it holds items (they would be left behind). It generates a fresh export code (16
+  words, never stored), builds the file, and reads the serialized file back through the import path before
+  returning. Nothing is removed. The result carries the file, the code, a file name and a `check` value.
+- **Step two, `completeSubIdentityExport(check)`.** Re-checks the same refusals, compares a hash of the
+  identity's data with the one the file was made from (so anything that changed in between blocks the
+  removal and asks for a new export), then removes the identity from the vault. When the file carried data,
+  every per-identity value stored under that public key is removed as well, so the identity exists in one
+  place only. A key-only export leaves the data as unreadable ciphertext, the same as deleting; it is
+  readable again if the same key is imported again.
+- **File.** `atlas-sub-identity-export/1.0`: salt, iv, ciphertext, kdfIterations, exportedAt. The payload
+  (version, name, creation time, public key, private key, optionally the data in the backup `data` shape) is
+  AES-GCM encrypted under a key derived from the file password and the export code together. The file
+  password is the wallet password by default, or a different one chosen for this file (8 or more
+  characters). Changing the wallet password later does not change a file made earlier.
+- **Import, `importSubIdentity(file, filePassword, code, {label?})`.** Opens this format and the main
+  identity's `atlas-identity-export/1.0` (key only, password plus seed phrase), so one screen handles both.
+  A wrong password, a wrong code and a damaged file give the same message. The key is validated (P-256,
+  public key matches the private key, it signs) and refused if it is this wallet's own key or already in the
+  vault, or if the vault is full. A name already in use gets a number. The key is written before the data;
+  if the data cannot be restored the key is taken out again and nothing is added.
+- **Main identity onboarding** refuses a sub-identity file with a message pointing at the Identities screen.
+- **Wording.** The second secret is an "export code" on these screens, not a seed phrase: it is not a key
+  seed and nothing is derived from it.
+- **Not covered.** The export code and file password are two secrets the person has to keep; if either is
+  lost the file cannot be opened. Passkey accounts have no sub-identities yet (section 10).

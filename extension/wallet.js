@@ -1011,6 +1011,9 @@ const AtlasWallet = (() => {
   // locally under the password alone (the everyday unlock scheme) and
   // unlocks it for this session.
   async function importIdentity(fileData, password, seedPhrase) {
+    if (fileData && fileData.format === SUB_IDENTITY_EXPORT_FORMAT) {
+      throw new Error('This file holds a sub-identity. Import it from Wallet > Identity > Identities inside a wallet.');
+    }
     if (!fileData || fileData.format !== 'atlas-identity-export/1.0') throw new Error('Not an Atlas identity file.');
     const salt = new Uint8Array(b64urlDecode(fileData.salt));
     const iv = new Uint8Array(b64urlDecode(fileData.iv));
@@ -6218,20 +6221,236 @@ const AtlasWallet = (() => {
           // The key is saved before its data, so a failure while restoring data never loses a key.
           await writeSubIdentityVault(account, vault);
         }
-        const holder = { mode: 'local', publicKey: e.publicKey, privateKeyJwk: e.privateKeyJwk };
-        const d = e.data || {};
         try {
-          await withWalletLock(() => saveWallet(holder.publicKey, d.wallet || [], {
-            identity: holder,
-            replaceUnreadable: true,
-            extraWrites: async (restoredIdentity) => (await planJournalRestore(restoredIdentity, holder.publicKey, d.pendingOps)).writes
-          }));
-          await withMessageLock(() => writeBackupFamilies(holder, d));
+          await restoreSubIdentityData(e);
         } catch (err) {
           summary.problem = 'data-incomplete';
         }
       }
       return summary;
+    });
+  }
+
+  // Writes a sub-identity's data (as carried by a backup or an export file) under its own key.
+  async function restoreSubIdentityData(entry) {
+    const holder = { mode: 'local', publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk };
+    const d = entry.data && typeof entry.data === 'object' ? entry.data : {};
+    await withWalletLock(() => saveWallet(holder.publicKey, d.wallet || [], {
+      identity: holder,
+      replaceUnreadable: true,
+      extraWrites: async (restoredIdentity) => (await planJournalRestore(restoredIdentity, holder.publicKey, d.pendingOps)).writes
+    }));
+    await withMessageLock(() => writeBackupFamilies(holder, d));
+  }
+
+  // ---------- exporting and importing one sub-identity ----------
+  //
+  // Export moves an identity out of the wallet into a file. It is two steps so nothing is removed before the
+  // person has the file and the code: prepareSubIdentityExport() builds and verifies the file and shows the
+  // code, completeSubIdentityExport() removes the identity afterwards. The file is encrypted under the
+  // wallet password (or a different file password) combined with a fresh code that is returned once and never
+  // stored, the same two-secret model as the main identity export, so one import path opens both.
+  const SUB_IDENTITY_EXPORT_FORMAT = 'atlas-sub-identity-export/1.0';
+  const LEGACY_IDENTITY_EXPORT_FORMAT = 'atlas-identity-export/1.0';
+  const SUB_IDENTITY_FILE_PASSWORD_MIN = 8;
+
+  async function sha256Hex(text) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // Re-derives from the local encrypted blob, so an unlocked wallet left open does not let someone export
+  // without the password (same rule as exportIdentity).
+  async function verifyWalletPassword(password) {
+    const { atlasIdentity } = await chrome.storage.local.get('atlasIdentity');
+    if (!atlasIdentity) throw new Error('No identity set up on this device yet.');
+    const key = await deriveAesKey([password], new Uint8Array(b64urlDecode(atlasIdentity.salt)), atlasIdentity.kdfIterations || KDF_ITERATIONS_LEGACY);
+    try {
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(b64urlDecode(atlasIdentity.iv)) }, key, b64urlDecode(atlasIdentity.ciphertext));
+    } catch (err) {
+      throw new Error('Incorrect password.');
+    }
+  }
+
+  async function sealSubIdentityExport(payload, filePassword, code) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveAesKey([filePassword, normalizeSeedPhrase(code)], salt, KDF_ITERATIONS_CURRENT);
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(payload)));
+    return {
+      format: SUB_IDENTITY_EXPORT_FORMAT,
+      salt: b64urlEncode(salt.buffer),
+      iv: b64urlEncode(iv.buffer),
+      ciphertext: b64urlEncode(ciphertext),
+      kdfIterations: KDF_ITERATIONS_CURRENT,
+      exportedAt: new Date().toISOString()
+    };
+  }
+
+  // Opens an export file (this format or the main identity's) with the file password and code. One generic
+  // error for any wrong secret or damaged file, and the contents are checked before they are used.
+  async function openIdentityExportFile(file, filePassword, code) {
+    if (!file || (file.format !== SUB_IDENTITY_EXPORT_FORMAT && file.format !== LEGACY_IDENTITY_EXPORT_FORMAT)) {
+      throw new Error('Not an Atlas identity file.');
+    }
+    if (!normalizeSeedPhrase(code)) throw new Error('Enter the export code.');
+    let parsed;
+    try {
+      const key = await deriveAesKey([filePassword, normalizeSeedPhrase(code)], new Uint8Array(b64urlDecode(file.salt)), file.kdfIterations || KDF_ITERATIONS_LEGACY);
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(b64urlDecode(file.iv)) }, key, b64urlDecode(file.ciphertext));
+      parsed = JSON.parse(new TextDecoder().decode(plaintext));
+    } catch (err) {
+      throw new Error('Incorrect password or code, or the file is damaged.');
+    }
+    if (!parsed || typeof parsed !== 'object' || (file.format === SUB_IDENTITY_EXPORT_FORMAT && parsed.version !== 1)) {
+      throw new Error('This identity file is not in a format this wallet understands.');
+    }
+    const jwk = parsed.privateKeyJwk || {};
+    const entry = {
+      publicKey: parsed.publicKey,
+      privateKeyJwk: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, d: jwk.d, ext: true, key_ops: ['sign'] }
+    };
+    if (await subIdentityKeyProblem(entry)) throw new Error('This file does not contain a usable identity key.');
+    entry.label = typeof parsed.label === 'string' ? parsed.label : '';
+    entry.createdAt = typeof parsed.createdAt === 'string' ? parsed.createdAt : null;
+    entry.data = parsed.data && typeof parsed.data === 'object' ? parsed.data : null;
+    return entry;
+  }
+
+  function exportFileName(label) {
+    const slug = String(label || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+    return 'atlas-identity-' + (slug || 'sub') + '-' + new Date().toISOString().slice(0, 10) + '.json';
+  }
+
+  // The identity must be one the wallet is not acting as: its data is then stable between making the file and
+  // removing the identity, and the wallet window is never left acting as an identity that is leaving.
+  async function subIdentityForExport(account, id) {
+    const vault = await readSubIdentityVault(account);
+    const entry = vault.identities.find((e) => e.id === id);
+    if (!entry) throw new Error('No such identity.');
+    if (await activeSubIdentityId(account) === id) throw new Error('Switch back to your main identity before exporting this one.');
+    const holder = { mode: 'local', publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk };
+    const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
+    const walletState = await storedListState(entry, 'wallet', (stored.atlasWallets || {})[entry.publicKey]);
+    const pendingState = await storedListState(entry, 'pendingOps', (stored.atlasPendingOps || {})[entry.publicKey]);
+    return { entry, holder, walletState, pendingState };
+  }
+
+  // Builds the export file and the code. Removes nothing. `check` is passed back to
+  // completeSubIdentityExport(); it ties the removal to exactly the data the file holds.
+  async function prepareSubIdentityExport(id, opts) {
+    const options = opts || {};
+    const includeData = options.includeData !== false;
+    const useOtherPassword = typeof options.filePassword === 'string' && options.filePassword !== '';
+    if (useOtherPassword && options.filePassword.length < SUB_IDENTITY_FILE_PASSWORD_MIN) {
+      throw new Error('The file password must be at least ' + SUB_IDENTITY_FILE_PASSWORD_MIN + ' characters.');
+    }
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      await verifyWalletPassword(options.password);
+      const { entry, holder, walletState, pendingState } = await subIdentityForExport(account, id);
+      if (pendingState !== 'empty') throw new Error('This identity has unfinished operations. Let them finish first.');
+      if (!includeData && walletState !== 'empty') {
+        throw new Error('This identity still holds items, and a key-only export would leave them behind. Export it with its data, or move the items first.');
+      }
+      const data = includeData ? await buildBackupDataExplicit(holder) : null;
+      const code = generateSeedPhrase();
+      const payload = { version: 1, label: entry.label, createdAt: entry.createdAt, publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk };
+      if (data) payload.data = data;
+      const filePassword = useOtherPassword ? options.filePassword : options.password;
+      const file = await sealSubIdentityExport(payload, filePassword, code);
+      // Read the serialized file back through the import path before anything is removed.
+      const reread = await openIdentityExportFile(JSON.parse(JSON.stringify(file)), filePassword, code);
+      if (reread.publicKey !== entry.publicKey || reread.privateKeyJwk.d !== entry.privateKeyJwk.d || (includeData && !reread.data)) {
+        throw new Error('The export file did not read back correctly, so nothing was removed. Try again.');
+      }
+      return {
+        file,
+        code,
+        filename: exportFileName(entry.label),
+        label: entry.label,
+        includesData: includeData,
+        usesWalletPassword: !useOtherPassword,
+        check: { id: entry.id, publicKey: entry.publicKey, includesData: includeData, digest: data ? await sha256Hex(JSON.stringify(data)) : null }
+      };
+    });
+  }
+
+  // Removes every per-identity value stored under `publicKey` (the stores are maps keyed by public key).
+  async function purgeOwnerStorage(publicKey) {
+    const all = await chrome.storage.local.get(null);
+    const changes = {};
+    for (const [key, value] of Object.entries(all)) {
+      if (key === 'atlasSubIdentities') continue;
+      if (value && typeof value === 'object' && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, publicKey)) {
+        const copy = { ...value };
+        delete copy[publicKey];
+        changes[key] = copy;
+      }
+    }
+    if (Object.keys(changes).length) await chrome.storage.local.set(changes);
+  }
+
+  // Second step: the person has the file and the code. Removes the identity from the vault, and its data
+  // when the file carried it, so the identity exists in one place only. A key-only export leaves the data as
+  // unreadable ciphertext, the same as deleting (it comes back if the same key is imported again).
+  async function completeSubIdentityExport(check) {
+    if (!check || typeof check.id !== 'string' || typeof check.publicKey !== 'string') throw new Error('Nothing to finish.');
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const { entry, holder, walletState, pendingState } = await subIdentityForExport(account, check.id);
+      if (entry.publicKey !== check.publicKey) throw new Error('This identity changed since the file was made. Export it again.');
+      if (pendingState !== 'empty') throw new Error('This identity has unfinished operations. Let them finish first.');
+      if (check.includesData) {
+        const digest = await sha256Hex(JSON.stringify(await buildBackupDataExplicit(holder)));
+        if (digest !== check.digest) throw new Error('This identity’s data changed after the file was made, so it was not removed. Export it again.');
+      } else if (walletState !== 'empty') {
+        throw new Error('This identity now holds items, so it was not removed. Export it again.');
+      }
+      const vault = await readSubIdentityVault(account);
+      vault.identities = vault.identities.filter((e) => e.id !== entry.id);
+      await writeSubIdentityVault(account, vault);
+      if (check.includesData) {
+        await withWalletLock(() => withMessageLock(() => purgeOwnerStorage(entry.publicKey)));
+      }
+      await logActivity('identity', 'Sub-identity exported to a file and removed');
+      return { removed: true, label: entry.label };
+    });
+  }
+
+  // Adds an exported identity (this format, or a main identity export file) to the vault. `filePassword` is
+  // whatever protected the file: the wallet password it was made under, or the different one chosen then.
+  async function importSubIdentity(file, filePassword, code, opts) {
+    const options = opts || {};
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const entry = await openIdentityExportFile(file, filePassword, code);
+      const vault = await readSubIdentityVault(account);
+      if (entry.publicKey === account.publicKey || vault.identities.some((e) => e.publicKey === entry.publicKey)) {
+        throw new Error('This identity is already in your wallet.');
+      }
+      if (vault.identities.length >= SUB_IDENTITY_LIMIT) throw new Error('You can have at most ' + SUB_IDENTITY_LIMIT + ' sub-identities.');
+      const wanted = typeof options.label === 'string' && options.label.trim() ? options.label : (entry.label || 'Imported identity');
+      const added = {
+        id: b64urlEncode(crypto.getRandomValues(new Uint8Array(16)).buffer),
+        label: restoredSubIdentityLabel(vault, wanted),
+        publicKey: entry.publicKey,
+        privateKeyJwk: entry.privateKeyJwk,
+        createdAt: entry.createdAt || new Date().toISOString()
+      };
+      vault.identities.push(added);
+      await writeSubIdentityVault(account, vault);
+      if (entry.data) {
+        try {
+          await restoreSubIdentityData(entry);
+        } catch (err) {
+          vault.identities = vault.identities.filter((e) => e.id !== added.id);
+          await writeSubIdentityVault(account, vault);
+          throw new Error('The identity’s data could not be restored, so nothing was added. Try again.');
+        }
+      }
+      await logActivity('identity', 'Sub-identity imported from a file');
+      return { ...publicSubIdentity(added, await activeSubIdentityId(account)), includesData: !!entry.data };
     });
   }
 
@@ -10398,6 +10617,7 @@ const AtlasWallet = (() => {
 
   return {
     getAccountIdentity, listSubIdentities, getActiveIdentityInfo, createSubIdentity, renameSubIdentity, switchIdentity, removeSubIdentity,
+    prepareSubIdentityExport, completeSubIdentityExport, importSubIdentity,
     hasIdentity, isUnlocked, getIdentity, createIdentity, unlockIdentity, lockIdentity, changePassword,
     exportIdentity, importIdentity, presentIdentity, recordVisit,
     // SPEC.md §3.8.1 — exported so confirm-bridge.js (the wallet-bridge

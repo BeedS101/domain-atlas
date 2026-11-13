@@ -2088,6 +2088,52 @@
               </div>
             </div>
             <div id="subIdentityStatus" class="mono" role="status" aria-live="polite"></div>
+
+            <!-- Export moves one identity out of the wallet into a file. Step 1 makes the file and shows the
+                 code; step 2 removes the identity once the person confirms they have both. -->
+            <div id="subIdentityExportPanel" class="identity-row" hidden style="margin-top:10px;">
+              <div class="subhead" id="subIdentityExportTitle" style="margin:0 0 6px;">Export identity</div>
+              <div id="subIdentityExportStep1">
+                <div class="warn-box">Exporting <strong>moves</strong> this identity into a file and removes it from this wallet once you confirm. Backups made earlier still contain it, and changing your wallet password later will not change this file's password.</div>
+                <input type="password" id="subExportPasswordInput" placeholder="Your wallet password" autocomplete="off">
+                <label class="check-row"><input type="checkbox" id="subExportOtherPasswordCheck"><span>Use a different password for this file</span></label>
+                <input type="password" id="subExportFilePasswordInput" placeholder="Password for this file (8+ characters)" autocomplete="off" hidden>
+                <label class="check-row"><input type="checkbox" id="subExportIncludeDataCheck" checked><span>Include this identity's items, mail and contacts (otherwise only its key)</span></label>
+                <div class="btn-col">
+                  <button id="subExportCreateBtn" type="button">Create export file</button>
+                  <button id="subExportCancelBtn" type="button" class="btn-secondary">Cancel</button>
+                </div>
+              </div>
+              <div id="subIdentityExportStep2" hidden>
+                <div class="warn-box"><strong>Save the file and this export code now.</strong> The code is shown once and is not kept. Importing needs the file, its password and this code; without any one of them the identity cannot be recovered.</div>
+                <div id="subExportCodeText" class="mono" style="user-select:all; word-break:normal; overflow-wrap:break-word;"></div>
+                <div class="btn-col" style="margin-top:8px;">
+                  <button id="subExportCopyCodeBtn" type="button" class="btn-secondary">Copy code</button>
+                  <button id="subExportDownloadBtn" type="button" class="btn-secondary">Download file again</button>
+                </div>
+                <div id="subExportPasswordNote" class="empty-note" style="margin-top:6px;"></div>
+                <label class="check-row"><input type="checkbox" id="subExportSavedCheck"><span>I have saved the file and the code</span></label>
+                <div class="btn-col">
+                  <button id="subExportFinishBtn" type="button" disabled>Finish and remove from this wallet</button>
+                  <button id="subExportKeepBtn" type="button" class="btn-secondary">Keep it in this wallet</button>
+                </div>
+              </div>
+              <div id="subIdentityExportStatus" class="mono" role="status" aria-live="polite"></div>
+            </div>
+
+            <!-- Import adds an exported identity (or an older identity export file) as a sub-identity. -->
+            <div id="importSubIdentityPanel" style="margin-top:14px;">
+              <div class="subhead" style="margin:0 0 6px;">Import an identity</div>
+              <div class="empty-note">Needs the export file, its password and the export code. The imported key becomes part of this wallet's future backups.</div>
+              <input type="file" id="subImportFileInput" accept="application/json">
+              <input type="password" id="subImportPasswordInput" placeholder="Password for the file" autocomplete="off">
+              <textarea id="subImportCodeInput" placeholder="Export code (all 16 words, space-separated)"></textarea>
+              <input type="text" id="subImportNameInput" placeholder="Name (optional, defaults to the file's name)" maxlength="40">
+              <div class="btn-col">
+                <button id="subImportBtn" type="button" class="btn-secondary">Import identity</button>
+              </div>
+              <div id="subImportStatus" class="mono" role="status" aria-live="polite"></div>
+            </div>
           </div>
 
           <!-- Local-only nickname — see wallet.js's setAlias. Never signed,
