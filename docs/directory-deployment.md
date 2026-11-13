@@ -243,7 +243,10 @@ is and its sites are crawled again at once.
 
 ## Which worlds will appear
 
-Only worlds whose manifest marks them `discoverable` are indexed. Live
+Only worlds whose manifest marks them `discoverable` and gives them an `entry`
+are indexed. A world entry with no `entry` exists only to carry a policy for a
+page (SPEC §3.8), so it is never listed; if one was indexed earlier it
+disappears at the next crawl. Live
 manifests are served from the live domains' own `/.well-known/spatial.json`.
 To list them, submit each domain's manifest address once. Domains whose
 worlds are all non-discoverable will submit successfully and show nothing,

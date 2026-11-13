@@ -199,6 +199,8 @@ function dir_crawl_one($url) {
     foreach (array_slice($manifest['worlds'], 0, $cfg['maxWorldsPerManifest']) as $world) {
       if (!is_array($world) || !isset($world['id']) || !is_string($world['id']) || $world['id'] === '') continue;
       if (!isset($world['policy']) || !is_array($world['policy']) || !isset($world['policy']['discoverable']) || $world['policy']['discoverable'] !== true) continue;
+      // §3.8: an entry-less world exists only to carry a policy for a page, so it is never listed as a world to enter.
+      if (!isset($world['entry']) || !is_array($world['entry']) || count($world['entry']) === 0 || !dir_is_assoc($world['entry'])) continue;
       $entry = dir_index_world($manifest, $world, $anchorType, $anchorKey, $pinned, $url);
       $entries[$entry['worldKey']] = $entry;
     }

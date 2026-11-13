@@ -421,6 +421,8 @@ async function crawlOne(url) {
     for (const world of manifest.worlds.slice(0, MAX_WORLDS_PER_MANIFEST)) {
       if (!world || typeof world !== 'object' || typeof world.id !== 'string' || !world.id) continue;
       if (!world.policy || world.policy.discoverable !== true) continue; // §3: discoverable is what makes a world directory-eligible
+      // §3.8: an entry-less world exists only to carry a policy for a page, so it is never listed as a world to enter.
+      if (!world.entry || typeof world.entry !== 'object' || Array.isArray(world.entry) || Object.keys(world.entry).length === 0) continue;
       const entry = indexWorld(manifest, world, anchorType, anchorKey, pinnedIdentityKey, url);
       worlds.set(entry.worldKey, entry);
       indexed++;

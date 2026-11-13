@@ -163,7 +163,7 @@ A world's `policy.discoverable` flag (§3) is what matters here — the differen
 
 **A concrete interface**, so this isn't left as a suggestion:
 
-- `POST /submit` — `{ "manifest": "https://mydomain.com/.well-known/spatial.json" }`. The directory fetches it, validates `spec` and shape, and indexes every world marked `discoverable: true`. It also indexes the services the manifest advertises (§3.9), so a domain that offers only a Post Office or a Chain Labs, with `"worlds": []`, is listed too.
+- `POST /submit` — `{ "manifest": "https://mydomain.com/.well-known/spatial.json" }`. The directory fetches it, validates `spec` and shape, and indexes every world marked `discoverable: true` that has an `entry`; a world entry without one exists only to carry a policy for a page (§3.8) and is never listed. It also indexes the services the manifest advertises (§3.9), so a domain that offers only a Post Office or a Chain Labs, with `"worlds": []`, is listed too.
 - `GET /search?genre=...&scale=...&combat=none` — returns matching worlds (domain, world `id`, `name`, a short description drawn straight from the manifest).
 
 A submission naming a key-anchored world (§3.6) is verified the same way any client would verify one, not taken on faith: the directory fetches the manifest and confirms `signature` actually checks out against the submitted `identityKey` before indexing it. Search results distinguish domain-anchored and key-anchored listings rather than presenting them identically, so a client — or a visitor reading directory results directly — can decide how much weight to give each without the directory quietly flattening a real difference.

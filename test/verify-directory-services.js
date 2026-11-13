@@ -31,6 +31,8 @@ const world = (id, genre, scale, combat, over = {}) => ({
   policy: { guestAccess: 'open', discoverable: true, itemDropsAllowed: false, trustedIssuers: 'any' },
   profile: { genre, scale, capabilities: caps(combat) }, portals: [], ...over
 });
+// A world entry with no `entry` (SPEC §3.8): it only carries a policy for a page, so it must never be listed.
+const pageOnly = (id) => ({ id, name: id, policy: { guestAccess: 'open', discoverable: true, itemDropsAllowed: false, trustedIssuers: 'any', walletBridge: { enabled: true } } });
 // A manifest server whose answer can be changed, and made to fail, while the test runs.
 function serve(build) {
   return new Promise((resolve) => {
@@ -88,9 +90,9 @@ function serve(build) {
     const C = await serve((h) => ({ spec: 'domain-atlas/1.0', domain: h, assetStudio: { enabled: true, url: `https://${h}/atlas/studio/` }, trading: { enabled: true, url: `http://127.0.0.1:${probe.server.address().port}/market` },
       directory: { enabled: true, url: `https://127.0.0.1:${probe.server.address().port}/dir` }, worlds: [] }));
     // D: worlds and services together.
-    const D = await serve((h) => ({ spec: 'domain-atlas/1.0', domain: h, owner: { name: 'Everything Inc' }, postOffice: true, chainlabs: { enabled: true }, scanner: true, calendar: true, worlds: [world('d1', 'marketplace', 'room', 'none'), world('d2', 'museum', 'building', 'none')] }));
+    const D = await serve((h) => ({ spec: 'domain-atlas/1.0', domain: h, owner: { name: 'Everything Inc' }, postOffice: true, chainlabs: { enabled: true }, scanner: true, calendar: true, worlds: [world('d1', 'marketplace', 'room', 'none'), world('d2', 'museum', 'building', 'none'), pageOnly('d-page')] }));
     // E: nothing public at all: a world that is not discoverable and no services.
-    const E = await serve((h) => ({ spec: 'domain-atlas/1.0', domain: h, worlds: [world('e1', 'secret', 'room', 'none', { policy: { guestAccess: 'open', discoverable: false, itemDropsAllowed: false, trustedIssuers: 'any' } })] }));
+    const E = await serve((h) => ({ spec: 'domain-atlas/1.0', domain: h, worlds: [world('e1', 'secret', 'room', 'none', { policy: { guestAccess: 'open', discoverable: false, itemDropsAllowed: false, trustedIssuers: 'any' } }), pageOnly('e-page')] }));
     // G: services declared and switched off, and one world.
     const G = await serve((h) => ({ spec: 'domain-atlas/1.0', domain: h, postOffice: false, chat: { enabled: false }, mailRelay: { enabled: 'true' }, worlds: [world('g1', 'garden', 'building', 'none')] }));
     servers.push(A, B, C, D, E, G);
@@ -124,6 +126,7 @@ function serve(build) {
     console.log('--- flat world search is unchanged ---');
     const flat = await (await fetch(dir.base + '/search?limit=100')).json();
     check('the flat list is worlds only, with the same fields', flat.count === 5 && flat.results.length === 5 && flat.results.every((r) => r.worldId && !('services' in r)) && !('groups' in flat), { count: flat.count, keys: Object.keys(flat) });
+    check('a discoverable entry with no `entry` field is never listed as a world', !JSON.stringify(flat).includes('-page') && flat.results.every((r) => r.worldId));
     const flatService = await (await fetch(dir.base + '/search?limit=100&category=communication')).json();
     check('...and ignores a category', flatService.count === 5);
     const flatDomain = await (await fetch(dir.base + '/search?domain=' + encodeURIComponent(B.host))).json();
@@ -210,7 +213,7 @@ function serve(build) {
     check('resubmitting refreshes the services: one removed, one switched off, one added', sb2.status === 200 && sb2.services === 1 && labels(g[B.host]).join() === 'Voice calling', { sb2, got: labels(g[B.host]) });
     check('the counts follow', (await sites()).serviceCount === 10 && (await sites()).count === 6, summary(await sites()));
     check('a good crawl moves the last-seen time forward', Date.parse(g[B.host].lastSeenAt) > Date.parse(before.lastSeenAt), { before: before.lastSeenAt, after: g[B.host].lastSeenAt });
-    D.build = (h) => ({ spec: 'domain-atlas/1.0', domain: h, owner: { name: 'Everything Inc' }, postOffice: true, chainlabs: { enabled: true }, scanner: true, worlds: [world('d1', 'marketplace', 'room', 'none'), world('d2', 'museum', 'building', 'none')] });
+    D.build = (h) => ({ spec: 'domain-atlas/1.0', domain: h, owner: { name: 'Everything Inc' }, postOffice: true, chainlabs: { enabled: true }, scanner: true, worlds: [world('d1', 'marketplace', 'room', 'none'), world('d2', 'museum', 'building', 'none'), pageOnly('d-page')] });
     await sleep(4500); // longer than the crawl interval (2 s) and a scheduler tick: nobody resubmits D
     g = byDomain(await sites());
     check('a scheduled crawl removes a service that is no longer advertised', labels(g[D.host]).join() === 'Post Office,Chain Labs,Scanner' && g[D.host].worldCount === 2, labels(g[D.host]));
