@@ -6789,7 +6789,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
   if (areaName === 'local' && changes.atlasIdentitySyncBackupEnabled) {
     await refreshIdentitySyncDisplay();
   }
-  if (areaName === 'session' && changes.atlasUnlockedIdentity) {
+  if (areaName === 'session' && (changes.atlasUnlockedIdentity || changes.atlasActiveSubIdentity)) {
     await refreshIdentityDisplay();
     // The Messaging button and window are gated behind an unlocked wallet (see
     // refreshMessagingLockGate()). Every local-mode lock and unlock path changes
@@ -6797,7 +6797,8 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
     await refreshMessagingLockGate();
     // Fetch mail and chat at once on login rather than at the periodic loop's next tick.
     // newValue is present only for a login (unlock, create, import), not for a lock.
-    if (changes.atlasUnlockedIdentity.newValue) {
+    // A switch between identities is shown the same way: the wallet is unlocked and now belongs to someone else.
+    if ((changes.atlasUnlockedIdentity && changes.atlasUnlockedIdentity.newValue) || changes.atlasActiveSubIdentity) {
       runWalletRecovery();
       // What is already stored is shown first, so the panel is usable at once even when a domain is
       // slow to answer; the network check then refreshes it.

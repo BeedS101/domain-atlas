@@ -364,6 +364,7 @@ const AtlasWallet = (() => {
     if (mode !== 'local' && mode !== 'webauthn') throw new Error('Unknown identity mode: ' + mode);
     const exists = mode === 'local' ? await hasLocalIdentity() : await hasWebAuthnIdentity();
     if (!exists) throw new Error('Set up that identity before switching to it.');
+    await chrome.storage.session.remove('atlasActiveSubIdentity');
     await chrome.storage.local.set({ atlasIdentityMode: mode });
   }
 
@@ -392,7 +393,23 @@ const AtlasWallet = (() => {
   // Returns null if there's nothing active yet (no identity, or a local
   // identity that hasn't been unlocked this session), so callers can check
   // state before acting on it.
+  //
+  // This is the ACTIVE identity: the main identity, or the sub-identity the person has switched to (see
+  // the sub-identities section below). Operations on the account itself (password, backup of the
+  // account) use getAccountIdentity() instead.
   async function getIdentity() {
+    const account = await getAccountIdentity();
+    if (!account || account.mode !== 'local') return account;
+    const { atlasActiveSubIdentity } = await chrome.storage.session.get('atlasActiveSubIdentity');
+    const sub = atlasActiveSubIdentity;
+    // A cached sub-identity that does not belong to the unlocked main identity (the main identity was
+    // replaced by an import or restore) is ignored, not trusted.
+    if (!sub || sub.accountPublicKey !== account.publicKey || !sub.privateKeyJwk) return account;
+    return { publicKey: sub.publicKey, privateKeyJwk: sub.privateKeyJwk, mode: 'local', subIdentityId: sub.id, accountPublicKey: account.publicKey };
+  }
+
+  // The identity the login itself unlocks, whichever identity is active.
+  async function getAccountIdentity() {
     const mode = await getIdentityMode();
     if (mode === 'webauthn') {
       const identity = await getWebAuthnIdentity();
@@ -515,8 +532,211 @@ const AtlasWallet = (() => {
 
   async function lockIdentity() {
     await endAllAdminSessions();
-    await chrome.storage.session.remove('atlasUnlockedIdentity');
+    await chrome.storage.session.remove(['atlasActiveSubIdentity', 'atlasUnlockedIdentity']);
     await clearAutoBackupSessionKey();
+  }
+
+  // ---------- sub-identities ----------
+  //
+  // A password account can hold extra P-256 identities next to its main one, each with a local friendly
+  // name. They live in one vault per account (atlasSubIdentities[mainPublicKey]), encrypted at rest with a
+  // key derived from the main private key, so one login unlocks all of them. Keying the vault by the main
+  // public key matches every other store here, and means replacing the main identity can never overwrite a
+  // vault the new one cannot decrypt.
+  //
+  // The active identity is atlasActiveSubIdentity in session storage (absent = main). It holds the
+  // sub-identity's key for the session, so getIdentity() costs one extra session read and a lock, or a new
+  // browser session, always returns to the main identity. Everything that is keyed by public key follows the
+  // active identity without change. Passkey accounts have no key to derive a vault key from, so they have no
+  // sub-identities yet.
+  const SUB_IDENTITY_LIMIT = 20;
+  const SUB_IDENTITY_LABEL_MAX = 40;
+  const SUB_IDENTITY_STORE = 'subIdentities';
+
+  let subIdentityChain = Promise.resolve();
+  function withSubIdentityLock(fn) {
+    if (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.request) {
+      return navigator.locks.request('atlas-sub-identities', fn);
+    }
+    const run = subIdentityChain.then(fn, fn);
+    subIdentityChain = run.catch(() => {});
+    return run;
+  }
+
+  function normalizeSubIdentityLabel(label) {
+    const text = typeof label === 'string' ? label.trim().replace(/\s+/g, ' ') : '';
+    if (!text) throw new Error('Give this identity a name.');
+    if (text.length > SUB_IDENTITY_LABEL_MAX) throw new Error('Names can be at most ' + SUB_IDENTITY_LABEL_MAX + ' characters.');
+    return text;
+  }
+
+  // The unlocked password account, or a clear error: everything below needs the main private key.
+  async function requireSubIdentityAccount() {
+    const account = await getAccountIdentity();
+    if (!account) throw new Error('Unlock your wallet first.');
+    if (account.mode !== 'local') throw new Error('Sub-identities need a password identity for now.');
+    return account;
+  }
+
+  // A vault that exists but cannot be read is an error, never "empty": writing back over it would destroy it.
+  async function readSubIdentityVault(account) {
+    const { atlasSubIdentities } = await chrome.storage.local.get('atlasSubIdentities');
+    const stored = (atlasSubIdentities || {})[account.publicKey];
+    if (stored === undefined || stored === null) return { version: 1, identities: [] };
+    const vault = await decryptAtRest(account, SUB_IDENTITY_STORE, stored, null);
+    if (!vault || !Array.isArray(vault.identities)) throw new Error('The sub-identities vault could not be read.');
+    return vault;
+  }
+
+  async function writeSubIdentityVault(account, vault) {
+    const { atlasSubIdentities } = await chrome.storage.local.get('atlasSubIdentities');
+    const all = atlasSubIdentities || {};
+    all[account.publicKey] = await encryptAtRest(account, SUB_IDENTITY_STORE, vault);
+    await chrome.storage.local.set({ atlasSubIdentities: all });
+  }
+
+  function publicSubIdentity(entry, activeId) {
+    return { id: entry.id, label: entry.label, publicKey: entry.publicKey, createdAt: entry.createdAt, active: entry.id === activeId };
+  }
+
+  async function activeSubIdentityId(account) {
+    const { atlasActiveSubIdentity } = await chrome.storage.session.get('atlasActiveSubIdentity');
+    return atlasActiveSubIdentity && atlasActiveSubIdentity.accountPublicKey === account.publicKey ? atlasActiveSubIdentity.id : null;
+  }
+
+  function assertUniqueSubIdentityLabel(vault, label, exceptId) {
+    const wanted = label.toLowerCase();
+    if (vault.identities.some((e) => e.id !== exceptId && e.label.toLowerCase() === wanted)) {
+      throw new Error('You already have an identity with that name.');
+    }
+  }
+
+  // Never includes a private key. `active` marks the identity the wallet is acting as now; no entry is
+  // active while the main identity is.
+  async function listSubIdentities() {
+    const account = await requireSubIdentityAccount();
+    const vault = await readSubIdentityVault(account);
+    const activeId = await activeSubIdentityId(account);
+    return vault.identities.map((e) => publicSubIdentity(e, activeId));
+  }
+
+  // Who the wallet is acting as right now: { kind: 'main' } or { kind: 'sub', id, label, publicKey }.
+  async function getActiveIdentityInfo() {
+    const account = await getAccountIdentity();
+    if (!account) return null;
+    if (account.mode !== 'local') return { kind: 'main', publicKey: account.publicKey };
+    const activeId = await activeSubIdentityId(account);
+    if (!activeId) return { kind: 'main', publicKey: account.publicKey };
+    const vault = await readSubIdentityVault(account);
+    const entry = vault.identities.find((e) => e.id === activeId);
+    if (!entry) return { kind: 'main', publicKey: account.publicKey };
+    return { kind: 'sub', id: entry.id, label: entry.label, publicKey: entry.publicKey };
+  }
+
+  async function createSubIdentity(label) {
+    const name = normalizeSubIdentityLabel(label);
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      if (vault.identities.length >= SUB_IDENTITY_LIMIT) throw new Error('You can have at most ' + SUB_IDENTITY_LIMIT + ' sub-identities.');
+      assertUniqueSubIdentityLabel(vault, name, null);
+      const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+      const entry = {
+        id: b64urlEncode(crypto.getRandomValues(new Uint8Array(16)).buffer),
+        label: name,
+        publicKey: b64urlEncode(await crypto.subtle.exportKey('raw', pair.publicKey)),
+        privateKeyJwk: await crypto.subtle.exportKey('jwk', pair.privateKey),
+        createdAt: new Date().toISOString()
+      };
+      vault.identities.push(entry);
+      await writeSubIdentityVault(account, vault);
+      await logActivity('identity', 'Sub-identity created');
+      return publicSubIdentity(entry, await activeSubIdentityId(account));
+    });
+  }
+
+  async function renameSubIdentity(id, label) {
+    const name = normalizeSubIdentityLabel(label);
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      const entry = vault.identities.find((e) => e.id === id);
+      if (!entry) throw new Error('No such identity.');
+      assertUniqueSubIdentityLabel(vault, name, id);
+      entry.label = name;
+      await writeSubIdentityVault(account, vault);
+      // The active key is cached with its name; keep the two the same.
+      const { atlasActiveSubIdentity } = await chrome.storage.session.get('atlasActiveSubIdentity');
+      if (atlasActiveSubIdentity && atlasActiveSubIdentity.id === id) {
+        await chrome.storage.session.set({ atlasActiveSubIdentity: { ...atlasActiveSubIdentity, label: name } });
+      }
+      return publicSubIdentity(entry, await activeSubIdentityId(account));
+    });
+  }
+
+  // Switches who the wallet acts as: a sub-identity's id, or null for the main identity. Nothing may stay
+  // authenticated as the previous identity, so every admin session is ended first.
+  async function switchIdentity(id) {
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const currentId = await activeSubIdentityId(account);
+      const targetId = id || null;
+      if (targetId === currentId) return getActiveIdentityInfo();
+      let entry = null;
+      if (targetId) {
+        const vault = await readSubIdentityVault(account);
+        entry = vault.identities.find((e) => e.id === targetId);
+        if (!entry) throw new Error('No such identity.');
+      }
+      await endAllAdminSessions();
+      if (entry) {
+        await chrome.storage.session.set({
+          atlasActiveSubIdentity: { id: entry.id, label: entry.label, publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk, accountPublicKey: account.publicKey }
+        });
+      } else {
+        await chrome.storage.session.remove('atlasActiveSubIdentity');
+      }
+      notifyWalletChanged(entry ? entry.publicKey : account.publicKey);
+      return getActiveIdentityInfo();
+    });
+  }
+
+  // 'empty', 'held' or 'unreadable' for a per-identity list stored under `storeName`. A value that cannot
+  // be read counts as something held: deleting the key would lose it for good.
+  async function storedListState(sub, storeName, stored) {
+    if (stored === undefined || stored === null) return 'empty';
+    const holder = { mode: 'local', privateKeyJwk: sub.privateKeyJwk };
+    const value = await decryptAtRest(holder, storeName, stored, undefined);
+    if (value === undefined) return 'unreadable';
+    if (Array.isArray(value)) return value.length ? 'held' : 'empty';
+    if (value && typeof value === 'object') return Object.keys(value).length ? 'held' : 'empty';
+    return 'held';
+  }
+
+  // Removes the key. Refused while the identity still holds assets or has unfinished operations: those would
+  // become unreachable. Data kept under its public key (mail, friends, ...) stays as encrypted data that
+  // nothing can read until the same key is imported again.
+  async function removeSubIdentity(id) {
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      const entry = vault.identities.find((e) => e.id === id);
+      if (!entry) throw new Error('No such identity.');
+      const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
+      const walletState = await storedListState(entry, 'wallet', (stored.atlasWallets || {})[entry.publicKey]);
+      const pendingState = await storedListState(entry, 'pendingOps', (stored.atlasPendingOps || {})[entry.publicKey]);
+      if (walletState !== 'empty') throw new Error('This identity still holds items. Move them to another identity first.');
+      if (pendingState !== 'empty') throw new Error('This identity has unfinished operations. Let them finish first.');
+      if (await activeSubIdentityId(account) === id) {
+        await endAllAdminSessions();
+        await chrome.storage.session.remove('atlasActiveSubIdentity');
+        notifyWalletChanged(account.publicKey);
+      }
+      vault.identities = vault.identities.filter((e) => e.id !== id);
+      await writeSubIdentityVault(account, vault);
+      await logActivity('identity', 'Sub-identity removed');
+      return true;
+    });
   }
 
   // Same trust rule as exportIdentity below: re-derives from the LOCAL
@@ -542,6 +762,14 @@ const AtlasWallet = (() => {
       throw new Error('Incorrect current password.');
     }
     if (newPassword === currentPassword) throw new Error('New password must be different from the current one.');
+    // Re-keying the automatic backup builds a backup of the main identity, which needs the wallet to be
+    // acting as it.
+    const actingAs = await getIdentity();
+    const account = await getAccountIdentity();
+    if (actingAs && account && actingAs.publicKey !== account.publicKey) {
+      const backupSettings = await getAutoBackupSettings();
+      if (backupSettings && backupSettings.enabled) throw new Error('Switch to your main identity to change the password while automatic backup is on.');
+    }
 
     const newSalt = crypto.getRandomValues(new Uint8Array(16));
     const newIv = crypto.getRandomValues(new Uint8Array(12));
@@ -576,7 +804,7 @@ const AtlasWallet = (() => {
     try {
       const settings = await getAutoBackupSettings();
       if (settings && settings.enabled) {
-        const identity = await getIdentity();
+        const identity = await getAccountIdentity();
         const blob = await buildAutoBackupBlob(identity, newPassword); // mints a fresh salt
         await setAutoBackupSettings({ salt: blob.salt, kdfIterations: blob.kdfIterations });
         await cacheAutoBackupSessionKey(newPassword);
@@ -5734,6 +5962,10 @@ const AtlasWallet = (() => {
   // original comment above for why), except the wallet and its pending
   // journal, which are read together and strictly (snapshotWalletAndJournal).
   async function buildBackupPayload(identity) {
+    // Every store below is read through the active identity. A backup of any other identity would carry the
+    // active one's data under the wrong key, so it is refused until the wallet is acting as that identity.
+    const active = await getIdentity();
+    if (!active || active.publicKey !== identity.publicKey) throw new Error('Switch to your main identity to make a backup.');
     const owner = identity.publicKey;
     // The wallet and its pending journal are captured from one storage read and strictly: a backup is
     // never made from a store that cannot be read, and never from two different moments.
@@ -5959,7 +6191,7 @@ const AtlasWallet = (() => {
   }
 
   async function exportFullBackup(password, seedPhrase) {
-    const identity = await getIdentity();
+    const identity = await getAccountIdentity();
     if (!identity || identity.mode !== 'local') {
       throw new Error('Unlock a local password identity first — a WebAuthn identity’s private key never leaves the authenticator, so it can’t be included in a backup.');
     }
@@ -6263,7 +6495,7 @@ const AtlasWallet = (() => {
   // gets immediate confirmation it worked, rather than waiting for the
   // debounce timer on whatever change happens to come next.
   async function setUpAutoBackup(fileHandle, password) {
-    const identity = await getIdentity();
+    const identity = await getAccountIdentity();
     if (!identity || identity.mode !== 'local') {
       throw new Error('Unlock a local password identity first — a WebAuthn identity’s private key never leaves the authenticator, so it can’t be included in a backup.');
     }
@@ -9954,6 +10186,7 @@ const AtlasWallet = (() => {
   }
 
   return {
+    getAccountIdentity, listSubIdentities, getActiveIdentityInfo, createSubIdentity, renameSubIdentity, switchIdentity, removeSubIdentity,
     hasIdentity, isUnlocked, getIdentity, createIdentity, unlockIdentity, lockIdentity, changePassword,
     exportIdentity, importIdentity, presentIdentity, recordVisit,
     // SPEC.md §3.8.1 — exported so confirm-bridge.js (the wallet-bridge

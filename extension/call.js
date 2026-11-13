@@ -1047,7 +1047,7 @@
   // ---------- wallet lock, identity changes, window close ----------
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if ((area === 'session' && 'atlasUnlockedIdentity' in changes) || (area === 'local' && ('atlasIdentityMode' in changes || 'atlasIdentity' in changes || 'atlasWebAuthnIdentity' in changes || 'atlasCallState' in changes))) {
+    if ((area === 'session' && ('atlasUnlockedIdentity' in changes || 'atlasActiveSubIdentity' in changes)) || (area === 'local' && ('atlasIdentityMode' in changes || 'atlasIdentity' in changes || 'atlasWebAuthnIdentity' in changes || 'atlasCallState' in changes))) {
       refreshWallet();
     }
   });
