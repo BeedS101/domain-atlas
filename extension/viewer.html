@@ -577,11 +577,28 @@
      would otherwise show through) and its own left/right/top padding to
      visually line back up with #walletPanelContent's 16px inset below it. */
   #walletTabBar {
-    display: none; gap: 5px; padding: 16px 10px 10px;
+    display: none; flex-wrap: wrap; gap: 5px; padding: 16px 10px 10px;
     position: sticky; top: 0; z-index: 1;
     background: rgba(14,22,27,0.97); border-bottom: 1px solid #2c3c44;
   }
   #walletTabBar.visible { display: flex; }
+  /* Shown under the tabs while the wallet is acting as a sub-identity, so it is never unclear who is acting. */
+  .acting-as {
+    flex: 1 1 100%; box-sizing: border-box; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    margin-top: 2px; padding: 5px 8px; border: 1px solid #c9a227; border-radius: 6px;
+    background: rgba(201,162,39,0.12); font-size: 12px; color: #fff6ef;
+  }
+  .acting-as[hidden] { display: none; }
+  .acting-as .acting-as-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #walletTabBar .acting-as button { flex: 0 0 auto; font-size: 11px; padding: 2px 8px; }
+  .identity-row { border: 1px solid #2c3c44; border-radius: 8px; padding: 8px 10px; }
+  .identity-row.active { border-color: #4a90a4; background: rgba(74,144,164,0.10); }
+  .identity-row .identity-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .identity-row .identity-row-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .identity-row .identity-row-tag { font-size: 11px; color: #57a593; flex: 0 0 auto; }
+  .identity-row .identity-row-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .identity-row .identity-row-actions button { flex: 1 1 auto; font-size: 12px; padding: 4px 8px; }
+  .identity-row input[type="text"] { width: 100%; box-sizing: border-box; margin-top: 6px; }
   #walletTabBar button { flex: 1 1 0; min-width: 0; padding-left: 4px; padding-right: 4px; font-size: 12px; }
   #walletTabBar button.active-tab { background: #1d2f38; border-color: #4a90a4; color: #fff6ef; }
 
@@ -1549,6 +1566,11 @@
       <button id="tradeTabBtn" type="button">Trade</button>
       <button id="characterTabBtn" type="button">Character</button>
       <button id="settingsTabBtn" type="button">Settings</button>
+      <!-- Visible only while a sub-identity is the active identity (see refreshActingAsBadge). -->
+      <div id="actingAsBadge" class="acting-as" role="status" aria-live="polite" hidden>
+        <span class="acting-as-name"></span>
+        <button id="actingAsBackBtn" type="button" class="btn-secondary">Back to main</button>
+      </div>
     </div>
 
     <div id="walletPanelContent">
@@ -2052,6 +2074,21 @@
             <button id="copyIdentityKeyBtn" type="button" class="btn-secondary">Copy public key</button>
           </div>
           <div id="copyIdentityKeyStatus" class="mono" role="status" aria-live="polite"></div>
+
+          <!-- Extra identities under this login (wallet.js, sub-identities): one password unlocks them all, the
+               wallet shows only the selected identity's data, and names stay on this device. -->
+          <div id="subIdentitiesSection" style="margin-top:16px;">
+            <div class="subhead" style="margin:0 0 6px;">Identities</div>
+            <div class="empty-note" id="subIdentitiesIntro">Switch between identities under this login. Each has its own items, mail and contacts; only the selected one is shown.</div>
+            <div id="identityList" class="item-list"></div>
+            <div id="addSubIdentityForm">
+              <input type="text" id="newSubIdentityInput" placeholder="Name for a new identity" maxlength="40" style="margin-top:8px;">
+              <div class="btn-col">
+                <button id="addSubIdentityBtn" type="button" class="btn-secondary">Add identity</button>
+              </div>
+            </div>
+            <div id="subIdentityStatus" class="mono" role="status" aria-live="polite"></div>
+          </div>
 
           <!-- Local-only nickname — see wallet.js's setAlias. Never signed,
                never shown to anyone else; just replaces the raw key in

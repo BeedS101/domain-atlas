@@ -3815,8 +3815,10 @@ copyIdentityKeyBtn && copyIdentityKeyBtn.addEventListener('click', async () => {
 async function refreshIdentityDisplay() {
   const identity = await AtlasWallet.getIdentity();
   const alias = identity ? await AtlasWallet.getAlias(identity.publicKey) : null;
+  const activeInfo = identity ? await AtlasWallet.getActiveIdentityInfo().catch(() => null) : null;
+  const subLabel = activeInfo && activeInfo.kind === 'sub' ? activeInfo.label : null;
   walletIdentityEl.textContent = identity
-    ? (alias ? alias + ' · ' : 'Identity: ') + short(identity.publicKey, 28)
+    ? (alias ? alias + ' · ' : subLabel ? subLabel + ' · ' : 'Identity: ') + short(identity.publicKey, 28)
     : 'Locked.';
   // Reflects whichever identity is active right now — switching identity
   // mode or unlocking a different one re-runs this and repopulates the
@@ -3827,7 +3829,191 @@ async function refreshIdentityDisplay() {
   await refreshIdentityModeControls();
   await refreshQuickLockButtonVisibility();
   await refreshAdminButtonVisibility();
+  await refreshActingAsBadge();
+  await refreshSubIdentitiesDisplay();
 }
+
+// ---------- sub-identities (Wallet -> Identity -> Identities) ----------
+
+const actingAsBadgeEl = document.getElementById('actingAsBadge');
+const actingAsBackBtn = document.getElementById('actingAsBackBtn');
+const subIdentitiesSectionEl = document.getElementById('subIdentitiesSection');
+const subIdentitiesIntroEl = document.getElementById('subIdentitiesIntro');
+const identityListEl = document.getElementById('identityList');
+const addSubIdentityFormEl = document.getElementById('addSubIdentityForm');
+const newSubIdentityInput = document.getElementById('newSubIdentityInput');
+const addSubIdentityBtn = document.getElementById('addSubIdentityBtn');
+const subIdentityStatusEl = document.getElementById('subIdentityStatus');
+
+// The row being renamed and the row waiting for a second click to confirm removal. Both are only view state.
+let renamingSubIdentityId = null;
+let confirmRemoveSubIdentityId = null;
+
+async function refreshActingAsBadge() {
+  if (!actingAsBadgeEl) return;
+  let info = null;
+  try { info = await AtlasWallet.getActiveIdentityInfo(); } catch (err) { /* locked */ }
+  const acting = !!(info && info.kind === 'sub');
+  actingAsBadgeEl.hidden = !acting;
+  if (acting) actingAsBadgeEl.querySelector('.acting-as-name').textContent = 'Acting as ' + info.label;
+}
+
+function identityRowElement(model) {
+  const row = document.createElement('div');
+  row.className = 'identity-row' + (model.active ? ' active' : '');
+  row.dataset.identityId = model.id || '';
+
+  const head = document.createElement('div');
+  head.className = 'identity-row-head';
+  const name = document.createElement('span');
+  name.className = 'identity-row-name';
+  name.textContent = model.label;
+  head.appendChild(name);
+  if (model.active) {
+    const tag = document.createElement('span');
+    tag.className = 'identity-row-tag';
+    tag.textContent = 'Active';
+    head.appendChild(tag);
+  }
+  row.appendChild(head);
+
+  const key = document.createElement('div');
+  key.className = 'mono';
+  key.textContent = short(model.publicKey, 24);
+  row.appendChild(key);
+
+  const actions = document.createElement('div');
+  actions.className = 'identity-row-actions';
+  const add = (action, text) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn-secondary';
+    b.dataset.action = action;
+    b.dataset.id = model.id || '';
+    b.textContent = text;
+    actions.appendChild(b);
+    return b;
+  };
+
+  if (model.renaming) {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.maxLength = 40;
+    input.value = model.label;
+    input.dataset.role = 'rename-input';
+    input.setAttribute('aria-label', 'New name');
+    row.appendChild(input);
+    add('rename-save', 'Save name');
+    add('rename-cancel', 'Cancel');
+  } else {
+    if (!model.active) add('switch', 'Switch to this identity');
+    if (model.id) {
+      add('rename', 'Rename');
+      add('remove', model.confirmingRemove ? 'Confirm remove' : 'Remove');
+    }
+  }
+  row.appendChild(actions);
+  return row;
+}
+
+async function refreshSubIdentitiesDisplay() {
+  if (!subIdentitiesSectionEl) return;
+  const account = await AtlasWallet.getAccountIdentity();
+  subIdentitiesSectionEl.hidden = !account;
+  if (!account) return;
+  if (account.mode !== 'local') {
+    subIdentitiesIntroEl.textContent = 'Extra identities need a password identity for now.';
+    identityListEl.innerHTML = '';
+    addSubIdentityFormEl.hidden = true;
+    return;
+  }
+  subIdentitiesIntroEl.textContent = 'Switch between identities under this login. Each has its own items, mail and contacts; only the selected one is shown.';
+  addSubIdentityFormEl.hidden = false;
+  let subs;
+  try {
+    subs = await AtlasWallet.listSubIdentities();
+  } catch (err) {
+    identityListEl.innerHTML = '';
+    subIdentityStatusEl.textContent = err.message;
+    return;
+  }
+  const mainActive = !subs.some((e) => e.active);
+  identityListEl.innerHTML = '';
+  identityListEl.appendChild(identityRowElement({ id: '', label: 'Main identity', publicKey: account.publicKey, active: mainActive }));
+  subs.forEach((e) => identityListEl.appendChild(identityRowElement({
+    id: e.id, label: e.label, publicKey: e.publicKey, active: e.active,
+    renaming: renamingSubIdentityId === e.id, confirmingRemove: confirmRemoveSubIdentityId === e.id
+  })));
+}
+
+async function runSubIdentityAction(fn, okMessage) {
+  subIdentityStatusEl.textContent = '';
+  try {
+    await fn();
+    if (okMessage) subIdentityStatusEl.textContent = okMessage;
+  } catch (err) {
+    subIdentityStatusEl.textContent = err.message;
+  }
+  await refreshActingAsBadge();
+  await refreshSubIdentitiesDisplay();
+}
+
+identityListEl && identityListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) return;
+  const id = btn.dataset.id || null;
+  const action = btn.dataset.action;
+  if (action !== 'remove') confirmRemoveSubIdentityId = null;
+  if (action === 'switch') {
+    await runSubIdentityAction(() => AtlasWallet.switchIdentity(id));
+  } else if (action === 'rename') {
+    renamingSubIdentityId = id;
+    subIdentityStatusEl.textContent = '';
+    await refreshSubIdentitiesDisplay();
+    const input = identityListEl.querySelector('input[data-role="rename-input"]');
+    if (input) { input.focus(); input.select(); }
+  } else if (action === 'rename-cancel') {
+    renamingSubIdentityId = null;
+    await refreshSubIdentitiesDisplay();
+  } else if (action === 'rename-save') {
+    const input = btn.closest('.identity-row').querySelector('input[data-role="rename-input"]');
+    const name = input ? input.value : '';
+    await runSubIdentityAction(async () => {
+      await AtlasWallet.renameSubIdentity(id, name);
+      renamingSubIdentityId = null;
+    }, 'Renamed.');
+  } else if (action === 'remove') {
+    if (confirmRemoveSubIdentityId !== id) {
+      confirmRemoveSubIdentityId = id;
+      subIdentityStatusEl.textContent = 'Removing deletes this identity\u2019s key from this wallet. Press Confirm remove to continue.';
+      await refreshSubIdentitiesDisplay();
+    } else {
+      confirmRemoveSubIdentityId = null;
+      await runSubIdentityAction(() => AtlasWallet.removeSubIdentity(id), 'Removed.');
+    }
+  }
+});
+
+identityListEl && identityListEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || !e.target.matches('input[data-role="rename-input"]')) return;
+  e.preventDefault();
+  const save = e.target.closest('.identity-row').querySelector('button[data-action="rename-save"]');
+  if (save) save.click();
+});
+
+async function addSubIdentityFromInput() {
+  const name = newSubIdentityInput.value;
+  await runSubIdentityAction(async () => {
+    const created = await AtlasWallet.createSubIdentity(name);
+    newSubIdentityInput.value = '';
+    subIdentityStatusEl.textContent = 'Added ' + created.label + '.';
+  });
+}
+addSubIdentityBtn && addSubIdentityBtn.addEventListener('click', addSubIdentityFromInput);
+newSubIdentityInput && newSubIdentityInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); addSubIdentityFromInput(); }
+});
+actingAsBackBtn && actingAsBackBtn.addEventListener('click', () => runSubIdentityAction(() => AtlasWallet.switchIdentity(null)));
 
 // The active "self" mechanism can be either the local password identity or
 // a WebAuthn passkey identity — see wallet.js's atlasIdentityMode. This

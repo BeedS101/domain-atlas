@@ -125,7 +125,9 @@ unlinkable.
    identities only), account-level operations pinned to the main identity, tests. No screens. Built.
 2. Backup: sub-identities in the full and automatic backups, restored by merge. Built. The identity sync
    backup and per-site bindings (which do not exist yet) are not part of it.
-3. Switcher and management screens, naming, the active-identity badge.
+3. Switcher and management screens, naming, the active-identity badge. Built: Wallet -> Identity -> Identities
+   (switch, rename, add, remove with a second confirming press) and an "acting as" badge under the wallet tabs
+   with a "Back to main" button. Names are always rendered as text.
 4. Export, import, and the delete flow.
 5. Transfers between identities.
 6. Per-site binding and the untrusted-site prompt.
