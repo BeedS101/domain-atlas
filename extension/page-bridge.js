@@ -18,16 +18,24 @@
   if (window.atlasWallet) return; // already injected — never double-wrap
 
   let nextRequestId = 1;
-  const pending = new Map(); // requestId -> {resolve, reject}
+  const pending = new Map(); // requestId -> { acked, finish(result) }
+
+  // The content script that answers these requests attaches after the page's own scripts may already have run, so a
+  // request is sent again until it is acknowledged, and one that is never acknowledged ends as "not available" after a
+  // few seconds. Once acknowledged it waits as long as the request needs (the visitor may be choosing an identity).
+  const NO_ACK_MS = 4000;
+  const RESEND_MS = 300;
 
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.origin !== location.origin) return;
     const data = event.data;
-    if (!data || data.__atlasBridge !== true || data.direction !== 'to-page') return;
+    if (!data || data.__atlasBridge !== true) return;
     const waiter = pending.get(data.requestId);
     if (!waiter) return;
+    if (data.direction === 'ack') { waiter.acked = true; return; }
+    if (data.direction !== 'to-page') return;
     pending.delete(data.requestId);
-    waiter.resolve(data.result);
+    waiter.finish(data.result);
   });
 
   // A request content.js never answers (extension reloaded mid-flight, a
@@ -45,13 +53,25 @@
   function sendBridgeRequest(action, payload, timeoutMs, defaultResult) {
     const requestId = nextRequestId++;
     return new Promise((resolve) => {
-      pending.set(requestId, { resolve });
-      window.postMessage({ __atlasBridge: true, direction: 'to-content', requestId, action, payload }, location.origin);
-      setTimeout(() => {
+      const timers = [];
+      const waiter = {
+        acked: false,
+        finish(result) { timers.forEach((t) => { clearTimeout(t); clearInterval(t); }); resolve(result); }
+      };
+      pending.set(requestId, waiter);
+      const post = () => window.postMessage({ __atlasBridge: true, direction: 'to-content', requestId, action, payload }, location.origin);
+      post();
+      timers.push(setInterval(() => { if (waiter.acked || !pending.has(requestId)) return; post(); }, RESEND_MS));
+      timers.push(setTimeout(() => {
+        if (waiter.acked || !pending.has(requestId)) return;
+        pending.delete(requestId);
+        waiter.finish(defaultResult);
+      }, NO_ACK_MS));
+      timers.push(setTimeout(() => {
         if (!pending.has(requestId)) return;
         pending.delete(requestId);
-        resolve(defaultResult);
-      }, timeoutMs);
+        waiter.finish(defaultResult);
+      }, timeoutMs));
     });
   }
 

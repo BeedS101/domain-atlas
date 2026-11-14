@@ -1066,6 +1066,7 @@
   // close, and reset to null on close so a later re-open captures a fresh
   // original rather than the stale one from a previous session.
   let originalDocumentTitle = null;
+  const seenBridgeRequests = new Set();
   window.addEventListener('message', (event) => {
     // SPEC.md §3.8 — page-bridge.js (the page's own MAIN-world script, not
     // the overlay iframe every other branch here handles) asking this
@@ -1077,6 +1078,11 @@
     if (event.source === window && event.origin === location.origin &&
         event.data && event.data.__atlasBridge === true && event.data.direction === 'to-content') {
       const { requestId, action, payload } = event.data;
+      // The page sends a request again until it is acknowledged (it may have asked before this script attached), so a
+      // request already taken is acknowledged again and not handled twice.
+      window.postMessage({ __atlasBridge: true, direction: 'ack', requestId }, location.origin);
+      if (seenBridgeRequests.has(requestId)) return;
+      seenBridgeRequests.add(requestId);
       handleBridgeRequest(action, payload).then((result) => {
         window.postMessage({ __atlasBridge: true, direction: 'to-page', requestId, result }, location.origin);
       });
