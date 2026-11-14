@@ -3813,6 +3813,7 @@ copyIdentityKeyBtn && copyIdentityKeyBtn.addEventListener('click', async () => {
 });
 
 async function refreshIdentityDisplay() {
+  await followSiteIdentityOnAccountChange();
   const identity = await AtlasWallet.getIdentity();
   const alias = identity ? await AtlasWallet.getAlias(identity.publicKey) : null;
   const activeInfo = identity ? await AtlasWallet.getActiveIdentityInfo().catch(() => null) : null;
@@ -3837,6 +3838,7 @@ async function refreshIdentityDisplay() {
 
 const actingAsBadgeEl = document.getElementById('actingAsBadge');
 const actingAsBackBtn = document.getElementById('actingAsBackBtn');
+const actingAsSiteBtn = document.getElementById('actingAsSiteBtn');
 const subIdentitiesSectionEl = document.getElementById('subIdentitiesSection');
 const subIdentitiesIntroEl = document.getElementById('subIdentitiesIntro');
 const identityListEl = document.getElementById('identityList');
@@ -3849,13 +3851,68 @@ const subIdentityStatusEl = document.getElementById('subIdentityStatus');
 let renamingSubIdentityId = null;
 let confirmRemoveSubIdentityId = null;
 
+// In the in-page world overlay the site is the embedding page's origin, read from the browser rather than from
+// the address (which a page could write). Standalone pages and the side panel have no embedding page.
+const overlayHostOrigin = (() => {
+  try {
+    const parent = location.ancestorOrigins && location.ancestorOrigins.length ? location.ancestorOrigins[0] : '';
+    return /^https?:\/\//.test(parent) ? parent : null;
+  } catch (err) { return null; }
+})();
+// { origin, state: 'bound' | 'ask' | 'default' | 'overridden', label } for the overlay; null elsewhere.
+let overlaySiteIdentity = null;
+let overlaySiteAccountKey = null;
+
+// Pins this overlay to the identity its site is bound to, so the world and the wallet inside it act as the same
+// identity the site's own requests get. A site with no binding follows the selected identity.
+async function applySiteIdentity() {
+  if (!overlayHostOrigin) return;
+  try {
+    overlaySiteIdentity = Object.assign({ origin: overlayHostOrigin }, await AtlasWallet.followSiteIdentity(overlayHostOrigin));
+  } catch (err) {
+    overlaySiteIdentity = null;
+  }
+}
+
+// Called wherever the identity display is refreshed: re-applies the site identity when the account changes
+// (first unlock, a restore, lock then unlock), and leaves an identity the person chose in this overlay alone.
+async function followSiteIdentityOnAccountChange() {
+  if (!overlayHostOrigin) return;
+  let account = null;
+  try { account = await AtlasWallet.getAccountIdentity(); } catch (err) { /* locked */ }
+  const key = account ? account.publicKey : null;
+  if (key === overlaySiteAccountKey) {
+    // Sub-identities may have been added since the site was looked up: a site with none had nothing to ask about.
+    if (key && overlaySiteIdentity && (overlaySiteIdentity.state === 'default' || overlaySiteIdentity.state === 'ask')) await applySiteIdentity();
+    return;
+  }
+  overlaySiteAccountKey = key;
+  if (key) await applySiteIdentity();
+}
+
+function markSiteIdentityOverridden() {
+  if (overlayHostOrigin && overlaySiteIdentity && overlaySiteIdentity.state === 'bound') {
+    overlaySiteIdentity = { origin: overlayHostOrigin, state: 'overridden' };
+  }
+}
+
 async function refreshActingAsBadge() {
   if (!actingAsBadgeEl) return;
   let info = null;
   try { info = await AtlasWallet.getActiveIdentityInfo(); } catch (err) { /* locked */ }
-  const acting = !!(info && info.kind === 'sub');
-  actingAsBadgeEl.hidden = !acting;
-  if (acting) actingAsBadgeEl.querySelector('.acting-as-name').textContent = 'Acting as ' + info.label;
+  const site = overlaySiteIdentity;
+  const bound = !!(site && site.state === 'bound');
+  const sub = !!(info && info.kind === 'sub');
+  // The main identity on a site with no binding is the ordinary case and shows nothing, as before.
+  const show = !!info && (sub || bound || !!(site && site.state === 'overridden'));
+  const choosing = show && !bound && !!(site && (site.state === 'ask' || site.state === 'overridden'));
+  actingAsBadgeEl.hidden = !show;
+  if (!show) return;
+  const name = info.kind === 'sub' ? info.label : 'Main identity';
+  const host = bound ? ' for ' + overlayHostOrigin.replace(/^https?:\/\//, '') : '';
+  actingAsBadgeEl.querySelector('.acting-as-name').textContent = 'Acting as ' + (bound ? site.label : name) + host;
+  if (actingAsSiteBtn) actingAsSiteBtn.hidden = !choosing;
+  if (actingAsBackBtn) actingAsBackBtn.hidden = bound || !sub;
 }
 
 function identityRowElement(model) {
@@ -3907,6 +3964,7 @@ function identityRowElement(model) {
     add('rename-cancel', 'Cancel');
   } else {
     if (!model.active) add('switch', 'Switch to this identity');
+    if (model.active && model.hasOthers) add('move-all', 'Move everything\u2026');
     if (model.id) {
       add('rename', 'Rename');
       add('export', 'Export\u2026');
@@ -3941,9 +3999,9 @@ async function refreshSubIdentitiesDisplay() {
   await refreshSiteIdentitiesDisplay(account, subs);
   const mainActive = !subs.some((e) => e.active);
   identityListEl.innerHTML = '';
-  identityListEl.appendChild(identityRowElement({ id: '', label: 'Main identity', publicKey: account.publicKey, active: mainActive }));
+  identityListEl.appendChild(identityRowElement({ id: '', label: 'Main identity', publicKey: account.publicKey, active: mainActive, hasOthers: subs.length > 0 }));
   subs.forEach((e) => identityListEl.appendChild(identityRowElement({
-    id: e.id, label: e.label, publicKey: e.publicKey, active: e.active,
+    id: e.id, label: e.label, publicKey: e.publicKey, active: e.active, hasOthers: true,
     renaming: renamingSubIdentityId === e.id, confirmingRemove: confirmRemoveSubIdentityId === e.id
   })));
 }
@@ -4007,6 +4065,8 @@ async function runSiteIdentityAction(fn, okMessage) {
   } catch (err) {
     siteIdentityStatusEl.textContent = err.message;
   }
+  // The overlay answers for its own site, so a change to that site's binding applies to it straight away.
+  if (overlayHostOrigin) { await applySiteIdentity(); await refreshActingAsBadge(); }
   await refreshSubIdentitiesDisplay();
 }
 
@@ -4032,6 +4092,7 @@ async function runSubIdentityAction(fn, okMessage) {
   } catch (err) {
     subIdentityStatusEl.textContent = err.message;
   }
+  await followSiteIdentityOnAccountChange();
   await refreshActingAsBadge();
   await refreshSubIdentitiesDisplay();
 }
@@ -4043,6 +4104,7 @@ identityListEl && identityListEl.addEventListener('click', async (e) => {
   const action = btn.dataset.action;
   if (action !== 'remove') confirmRemoveSubIdentityId = null;
   if (action === 'switch') {
+    markSiteIdentityOverridden();
     await runSubIdentityAction(() => AtlasWallet.switchIdentity(id));
   } else if (action === 'rename') {
     renamingSubIdentityId = id;
@@ -4062,14 +4124,24 @@ identityListEl && identityListEl.addEventListener('click', async (e) => {
     }, 'Renamed.');
   } else if (action === 'export') {
     openSubIdentityExportPanel(id, btn.closest('.identity-row'));
+  } else if (action === 'move-all') {
+    await openSubIdentityMovePanel(id, btn.closest('.identity-row'), false);
   } else if (action === 'remove') {
     if (confirmRemoveSubIdentityId !== id) {
+      // An identity that still holds items cannot be removed without losing them, so the move comes first.
+      let holdings = null;
+      try { holdings = await AtlasWallet.getSubIdentityHoldings(id); } catch (err) { /* the remove itself reports it */ }
+      if (holdings && holdings.state === 'held') {
+        await openSubIdentityMovePanel(id, btn.closest('.identity-row'), true);
+        return;
+      }
       confirmRemoveSubIdentityId = id;
       subIdentityStatusEl.textContent = 'Removing deletes this identity\u2019s key from this wallet. Press Confirm remove to continue.';
       await refreshSubIdentitiesDisplay();
     } else {
       confirmRemoveSubIdentityId = null;
       await runSubIdentityAction(() => AtlasWallet.removeSubIdentity(id), 'Removed.');
+      if (subMoveSource && subMoveSource.id === id) closeSubIdentityMovePanel();
     }
   }
 });
@@ -4093,7 +4165,121 @@ addSubIdentityBtn && addSubIdentityBtn.addEventListener('click', addSubIdentityF
 newSubIdentityInput && newSubIdentityInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); addSubIdentityFromInput(); }
 });
-actingAsBackBtn && actingAsBackBtn.addEventListener('click', () => runSubIdentityAction(() => AtlasWallet.switchIdentity(null)));
+actingAsBackBtn && actingAsBackBtn.addEventListener('click', () => { markSiteIdentityOverridden(); return runSubIdentityAction(() => AtlasWallet.switchIdentity(null)); });
+actingAsSiteBtn && actingAsSiteBtn.addEventListener('click', async () => {
+  try {
+    const me = await AtlasWallet.getIdentity();
+    await AtlasWallet.setSiteIdentity(overlayHostOrigin, me.publicKey, { remember: true });
+    await applySiteIdentity();
+  } catch (err) {
+    subIdentityStatusEl.textContent = err.message;
+  }
+  await refreshActingAsBadge();
+  await refreshSubIdentitiesDisplay();
+});
+
+// ---------- moving everything out of one identity ----------
+//
+// Opened from "Move everything..." on the identity the wallet is acting as, and by Remove on an identity that
+// still holds items. The wallet acts as the source identity while the moves run (a move is signed by the
+// holder), so a source that is not active is switched to first.
+const subMovePanelEl = document.getElementById('subIdentityMovePanel');
+const subMoveTitleEl = document.getElementById('subIdentityMoveTitle');
+const subMoveSummaryEl = document.getElementById('subIdentityMoveSummary');
+const subMoveTargetEl = document.getElementById('subIdentityMoveTarget');
+const subMoveNoteEl = document.getElementById('subIdentityMoveNote');
+const subMoveGoBtn = document.getElementById('subIdentityMoveGoBtn');
+const subMoveCancelBtn = document.getElementById('subIdentityMoveCancelBtn');
+const subMoveStatusEl = document.getElementById('subIdentityMoveStatus');
+
+// { id, label, thenRemove } while the panel is open.
+let subMoveSource = null;
+
+function closeSubIdentityMovePanel() {
+  subMoveSource = null;
+  subMovePanelEl.hidden = true;
+  subMoveStatusEl.textContent = '';
+}
+
+function describeHoldings(h) {
+  const parts = [];
+  if (h.items) parts.push(h.items + (h.items === 1 ? ' item' : ' items'));
+  if (h.balances) parts.push(h.balances + (h.balances === 1 ? ' balance' : ' balances'));
+  return parts.length ? parts.join(' and ') : 'nothing that can be moved';
+}
+
+async function openSubIdentityMovePanel(id, rowEl, thenRemove) {
+  closeSubIdentityMovePanel();
+  const account = await AtlasWallet.getAccountIdentity();
+  const subs = await AtlasWallet.listSubIdentities();
+  const active = subs.find((e) => e.active) || null;
+  const nameEl = rowEl && rowEl.querySelector('.identity-row-name');
+  const label = nameEl ? nameEl.textContent : 'this identity';
+  const sourceKey = id ? (subs.find((e) => e.id === id) || {}).publicKey : account.publicKey;
+  let holdings;
+  try {
+    holdings = id ? await AtlasWallet.getSubIdentityHoldings(id) : await AtlasWallet.getMoveEverythingPlan();
+  } catch (err) {
+    subIdentityStatusEl.textContent = err.message;
+    return;
+  }
+  const targets = [{ label: 'Main identity', publicKey: account.publicKey }].concat(subs.map((e) => ({ label: e.label, publicKey: e.publicKey })))
+    .filter((t) => t.publicKey !== sourceKey);
+  subMoveSource = { id, label, publicKey: sourceKey, thenRemove: !!thenRemove };
+  subMoveTitleEl.textContent = 'Move everything out of ' + label;
+  subMoveSummaryEl.textContent = label + ' holds ' + describeHoldings(holdings) + '.'
+    + (holdings.bound ? ' ' + holdings.bound + ' bound to it cannot be moved.' : '')
+    + (holdings.heldBack ? ' ' + holdings.heldBack + ' are waiting on unfinished work and are left for now.' : '');
+  subMoveTargetEl.innerHTML = '';
+  targets.forEach((t) => {
+    const o = document.createElement('option');
+    o.value = t.publicKey;
+    o.textContent = t.label;
+    subMoveTargetEl.appendChild(o);
+  });
+  const isActive = id ? !!(active && active.id === id) : !active;
+  subMoveNoteEl.textContent = (isActive ? '' : 'The wallet switches to ' + label + ' while this runs, because a move is signed by the identity that holds the item. ')
+    + 'Each item moves through its issuer, so this needs the issuers to be reachable. Items that cannot move are listed and stay where they are.'
+    + (thenRemove ? ' When everything has moved you can remove ' + label + '.' : '');
+  subMoveGoBtn.textContent = thenRemove ? 'Move everything, then remove' : 'Move everything';
+  subMoveGoBtn.disabled = !targets.length || (!holdings.items && !holdings.balances);
+  subMovePanelEl.hidden = false;
+  subMoveTargetEl.focus();
+}
+
+subMoveCancelBtn && subMoveCancelBtn.addEventListener('click', closeSubIdentityMovePanel);
+
+subMoveGoBtn && subMoveGoBtn.addEventListener('click', async () => {
+  if (!subMoveSource) return;
+  const source = subMoveSource;
+  subMoveGoBtn.disabled = true;
+  subMoveStatusEl.textContent = 'Starting\u2026';
+  try {
+    if (source.id) {
+      const info = await AtlasWallet.getActiveIdentityInfo();
+      if (!info || info.id !== source.id) { markSiteIdentityOverridden(); await AtlasWallet.switchIdentity(source.id); }
+    }
+    const result = await AtlasWallet.moveEverythingToIdentity(subMoveTargetEl.value, (done, total) => {
+      subMoveStatusEl.textContent = 'Moved ' + done + ' of ' + total + '\u2026';
+    }, source.publicKey);
+    const lines = ['Moved ' + result.moved.items + (result.moved.items === 1 ? ' item' : ' items') + ' and ' + result.moved.balances + (result.moved.balances === 1 ? ' balance' : ' balances') + ' to ' + result.to.label + '.'];
+    result.failed.forEach((f) => lines.push('Could not move ' + f.name + ': ' + f.reason));
+    result.left.forEach((f) => lines.push('Left ' + f.name + ': ' + f.reason));
+    subMoveStatusEl.textContent = lines.join('\n');
+    subMoveStatusEl.style.whiteSpace = 'pre-wrap';
+    await refreshActingAsBadge();
+    await refreshInventoryDisplay();
+    if (source.thenRemove && !result.failed.length && !result.left.length && source.id) {
+      confirmRemoveSubIdentityId = source.id;
+      subIdentityStatusEl.textContent = 'Everything was moved. Press Confirm remove to remove ' + source.label + '.';
+    }
+    await refreshSubIdentitiesDisplay();
+  } catch (err) {
+    subMoveStatusEl.textContent = err.message;
+  } finally {
+    subMoveGoBtn.disabled = false;
+  }
+});
 
 // ---------- exporting one identity ----------
 //
@@ -13817,6 +14003,7 @@ setInterval(async () => {
   if (walletPanel.classList.contains('open')) await routeWalletScreen();
 }, AUTO_LOCK_CHECK_INTERVAL_MS);
 
+const siteIdentityApplied = applySiteIdentity().then(() => followSiteIdentityOnAccountChange());
 refreshIdentityDisplay();
 refreshInventoryDisplay();
 runWalletRecovery();
@@ -13839,7 +14026,7 @@ if (start.manifest) {
   // closes that gap as a side effect — worth doing now specifically
   // because SPEC.md §3.5 is what actually starts populating start.world/
   // start.anchor from a real page link rather than leaving them unused.
-  loadManifest(start.manifest, start.world, start.anchor).then(() => {
+  siteIdentityApplied.then(() => loadManifest(start.manifest, start.world, start.anchor)).then(() => {
     requestAnimationFrame(render);
   });
 } else {

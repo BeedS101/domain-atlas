@@ -1566,9 +1566,10 @@
       <button id="tradeTabBtn" type="button">Trade</button>
       <button id="characterTabBtn" type="button">Character</button>
       <button id="settingsTabBtn" type="button">Settings</button>
-      <!-- Visible only while a sub-identity is the active identity (see refreshActingAsBadge). -->
+      <!-- Visible while a sub-identity is the active identity, or while a world overlay is answering for a site (see refreshActingAsBadge). -->
       <div id="actingAsBadge" class="acting-as" role="status" aria-live="polite" hidden>
         <span class="acting-as-name"></span>
+        <button id="actingAsSiteBtn" type="button" class="btn-secondary" hidden>Use for this site</button>
         <button id="actingAsBackBtn" type="button" class="btn-secondary">Back to main</button>
       </div>
     </div>
@@ -1891,7 +1892,7 @@
         <button type="button" class="settings-category-toggle"><span>Identity sync</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
           <div id="identitySyncLocalSection">
-            <div class="empty-note">Keeps just your identity (not your wallet, mail, or other data) synced to your Chrome account, so a new device can recover it with just your password — no file to keep track of. The data still passes through Google's own sync infrastructure, encrypted; off by default.</div>
+            <div class="empty-note">Keeps just your identity and the keys of your sub-identities (not your wallet, mail, or other data) synced to your Chrome account, so a new device can recover it with just your password — no file to keep track of. The data still passes through Google's own sync infrastructure, encrypted; off by default.</div>
             <div id="identitySyncStatusLine" class="mono" style="margin-top:8px;">Off.</div>
             <div class="btn-col" style="margin-top:8px;">
               <button id="identitySyncEnableBtn" type="button">Turn on identity sync</button>
@@ -2119,6 +2120,22 @@
                 </div>
               </div>
               <div id="subIdentityExportStatus" class="mono" role="status" aria-live="polite"></div>
+            </div>
+
+            <!-- Moves everything an identity holds to another identity of this wallet, so it can be emptied
+                 before it is removed or exported without its items. The wallet acts as the source identity
+                 while the moves run. -->
+            <div id="subIdentityMovePanel" class="identity-row" hidden style="margin-top:10px;">
+              <div class="subhead" id="subIdentityMoveTitle" style="margin:0 0 6px;">Move everything</div>
+              <div id="subIdentityMoveSummary" class="empty-note"></div>
+              <label for="subIdentityMoveTarget" style="margin-top:6px;">Move to</label>
+              <select id="subIdentityMoveTarget"></select>
+              <div id="subIdentityMoveNote" class="warn-box" style="margin-top:6px;"></div>
+              <div class="btn-col">
+                <button id="subIdentityMoveGoBtn" type="button">Move everything</button>
+                <button id="subIdentityMoveCancelBtn" type="button" class="btn-secondary">Cancel</button>
+              </div>
+              <div id="subIdentityMoveStatus" class="mono" role="status" aria-live="polite"></div>
             </div>
 
             <!-- Import adds an exported identity (or an older identity export file) as a sub-identity. -->

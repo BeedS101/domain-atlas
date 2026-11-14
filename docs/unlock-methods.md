@@ -208,12 +208,13 @@ All tests use scratch Chromium profiles and throw-away identities. No live site,
 5. Later, if wanted: several methods at once (`unlocks[]`), a passkey used with a passphrase where PRF is
    missing, identity sync backup for passkey wallets.
 
-## 11. Open decisions
+## 11. Decisions
 
-- Whether PRF-less devices get nothing (the passphrase password, as proposed) or an explicitly labelled
-  "passkey check plus passphrase" mode.
-- Whether the backup rehearsal during conversion is required (proposed) or only strongly encouraged.
-- Whether the old record is kept until the next successful unlock (proposed) or for a fixed time.
+- Without PRF the wallet keeps normal password protection. There is no "passkey check plus passphrase" mode for now.
+- Conversion requires a verified backup: the backup file must have been saved and decrypted successfully, not just
+  generated in memory.
+- The old protected identity record is kept until the new unlock method has worked in a fresh session, then
+  securely retired. A failed conversion always leaves the existing unlock method working.
 
 ## 12. Phase 1 results
 
@@ -233,5 +234,54 @@ Chromium 141 with Chrome's virtual authenticator (PRF enabled), from an extensio
   at set-up is.
 - A user verification that is required and not given fails with `NotAllowedError` and nothing is derived.
 
-Real hardware: see the next section when it has been run.
+### Real hardware, first attempt (void)
+
+The first Windows Hello run in Chrome 156 reported a platform authenticator and `extension:prf` true, then
+failed passkey creation with `SecurityError`. The probe had been opened as a local file (`file://`), which cannot
+use WebAuthn, so the run says nothing about Windows Hello and PRF. The probe now shows its origin, opens itself as
+a `chrome-extension://` page on install and from the toolbar icon, and refuses to attempt WebAuthn from `file://`
+or any origin that is not an extension page, https or localhost. The hardware run must be repeated.
+
+### Real hardware, second attempt (inconclusive)
+
+Run from the extension origin in Chrome 156 on Windows (`attachmentRequested: platform`): a platform authenticator
+is available and `extension:prf` is reported true, but `navigator.credentials.create()` with the PRF extension
+failed with `NotAllowedError`. That run never created a passkey without PRF and recorded neither timing nor
+whether a prompt appeared, so it cannot separate an ordinary registration failure from PRF incompatibility. Chrome's
+`extension:prf` flag is browser-level only, and Windows Hello was reported not to support PRF as of mid-2025, so
+neither is taken as evidence either way.
+
+The probe is now a staged diagnostic (`atlas-prf-probe/2`):
+
+- Every create call leaves `rp.id` unspecified. With `rp.id` omitted Chromium uses the full origin
+  (`chrome-extension://<id>`) as the RP ID for an extension page and the host name for a web page; the virtual
+  authenticator confirms this, and the probe checks the RP ID hash in the authenticator data against it.
+- Ordinary registration runs first (no extensions; user verification required, then relaxed, then browser defaults),
+  and PRF is tested only once an ordinary passkey has been created.
+- PRF is then requested enable-only and with an eval at create. If neither reports `enabled`, one unlock with a PRF
+  eval is attempted on the passkey anyway to confirm.
+- Each attempt records elapsed time and `immediate` (refused before the user could act), `after-interaction` or
+  `timeout`, whether the page had focus, and transient user activation. The user can record whether a prompt appeared.
+  Only lengths and short hash fingerprints are ever reported.
+- Individual tests can be run one at a time, each from its own click.
+- `serve-localhost.js` optionally serves the probe at `http://localhost:8251/` as a control: if registration works
+  there but not from the extension page, the problem is the extension origin as RP ID rather than Windows Hello.
+
+### Real hardware, diagnostic run: Windows Hello does not enable PRF here
+
+Chrome 157 on Windows, extension origin, `attachmentRequested: any`, Windows Hello platform authenticator:
+
+- Ordinary registration without PRF works (user verification required, about 7.7 s with a prompt). The RP ID hash
+  matches `chrome-extension://<id>`, so the omitted `rp.id` resolves as expected.
+- Creating a passkey with the `prf` extension also works, both enable-only and with an eval at create, and Chrome
+  returns a `prf` result object, but `enabled` is false in both cases and no output is evaluated.
+- Asking for a PRF eval at unlock on that passkey succeeds as an assertion (user verified) but returns no PRF
+  result.
+- Conclusion: this Chrome and Windows Hello combination does not support PRF. A passkey on this machine cannot
+  supply a wallet-wrapping secret.
+- The earlier `NotAllowedError` from Chrome 156 (platform requested, eval at create) did not reproduce here, and it
+  is unexplained; transient user activation turned out not to be required.
+
+Not yet tested on real hardware: a FIDO2 security key, and a passkey held by a phone or a third-party passkey
+manager. Those are the remaining candidates for a PRF source for this user.
 

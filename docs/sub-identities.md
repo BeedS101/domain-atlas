@@ -1,7 +1,8 @@
 # Sub-identities
 
-Status: steps 1 to 4 of section 9 (storage layer, backups, screens, export and import) and the single-asset
-part of step 5 (moving one item between identities) are built; the rest is planned and not yet implemented.
+Status: steps 1 to 6 of section 9 are built (storage layer, backups, screens, export and import, moves of items,
+balances and everything an identity holds, per-site identity). Passkey accounts are designed in
+`unlock-methods.md` and paused.
 
 A wallet today has one identity per login mechanism: a local password identity (`atlasIdentity`) and,
 independently, a passkey identity (`atlasWebAuthnIdentity`), with `atlasIdentityMode` choosing which one
@@ -76,8 +77,12 @@ owner. The operation fails and the stored data is left as it was.
   takes the backup's data (as the main identity does), and a name that clashes gets a number. Entries are
   checked before they are used: a malformed key, a public key that is not the private key's, a key that does
   not sign, the account's own key, or anything past the limit is skipped and counted in the restore result.
-  The identity sync backup (browser sync storage) carries the main identity key only and does not include
-  sub-identities.
+  The backup carries every data family the wallet keeps per identity, including equipped avatar choices,
+  pending wallet-bridge offers and the sites trusted to skip the offer prompt (section 12).
+  The identity sync backup (browser sync storage) also mirrors the sub-identities vault when it is on, as the
+  same ciphertext the vault has in local storage, split into parts that each fit a sync item. Restoring the
+  identity from sync brings the sub-identity keys, names and site bindings back, not their data, the same
+  scope as the main identity.
 - **Export** takes one identity, with its data by default or key only as an option, into a file and then
   removes it from the wallet. It is two steps (section 13): the file and a fresh export code are made first,
   and the identity is removed only after the person confirms they have both. The export screen warns that a
@@ -88,8 +93,10 @@ owner. The operation fails and the stored data is left as it was.
 
 ## 6. Delete
 
-A sub-identity that still holds any asset or resource is not deleted. The wallet offers to move everything
-to another identity first. Deleting removes the key. Local data stored under that public key stays as
+A sub-identity that still holds any asset or resource is not deleted. Pressing Remove on one that holds items
+opens the move-everything panel instead of the confirmation, offering to move everything to another identity
+first (section 8); once it is empty the same row asks for the confirming press. Items that cannot move (bound
+items, or work still unfinished) are listed and keep the identity from being removed. Deleting removes the key. Local data stored under that public key stays as
 encrypted data that nothing can read until the same key is imported again.
 
 ## 7. Per-site identity
@@ -121,8 +128,16 @@ site's requests (read, sign, offer, buy) with it.
 - Wallet -> Identity -> Site identities lists the remembered sites with the identity each answers as; the
   identity can be changed from the list, and a site can be forgotten (it asks again next time).
 - A site learns only the public key of the identity in use. It cannot list, choose or influence identities.
-- Not built: making the in-page world overlay follow the site's identity (the overlay still uses the wallet
-  window's selected identity), whole-domain bindings, and bindings for passkey accounts.
+- The in-page world overlay follows the site's identity. The overlay reads its site from the browser (the
+  embedding page's origin, not from its address) and pins itself to the bound identity for its lifetime with
+  `followSiteIdentity(origin)`, so the world, chat and the wallet inside it act as the identity the site's own
+  requests get. The wallet window keeps its selected identity. A page pinned to the main identity stays on it
+  while a sub-identity is selected (`useIdentityInThisContext` pins the main identity too). The acting-as badge
+  reads "Acting as Shopping for example.com"; on a site with no binding it offers "Use for this site", and
+  an identity chosen inside the overlay replaces the pin for that overlay only. A change to the site's binding
+  from the site list applies to the overlay at once. Export refuses an identity that is selected or pinned, and
+  removing a pinned identity releases the pin.
+- Not built: whole-domain bindings, and bindings for passkey accounts.
 
 ## 8. Transfers between identities
 
@@ -182,6 +197,21 @@ balance, with an "All" button) and the same notes about the issuer and the link 
 - The issuer's own rules still apply (class policy, Gold holds, partner approvals).
 - Chain labs coins (their ledger balances) are not asset credentials moved by this route and are not covered.
 
+**Built (everything an identity holds).** `moveEverythingToIdentity(targetPublicKey, onProgress)` moves what the
+acting identity holds to another identity of the account, one step at a time: each unique item on its own, and
+each balance (one class from one issuer) as a single move of everything that can be moved now.
+`getMoveEverythingPlan()` and `getSubIdentityHoldings(id)` describe what it would move.
+
+- Wallet -> Identity -> Identities: the identity the wallet is acting as has "Move everything...", which opens a
+  panel with the target, what it holds and what will be left behind. Remove on an identity that holds items opens
+  the same panel with "Move everything, then remove": the wallet switches to that identity (a move is signed by
+  the identity that holds the item), moves everything, and the row then asks for the confirming Remove press.
+- It does not stop at the first problem. Each item that could not move is reported with its reason. A domain
+  that did not answer (a saved, retried request) is not asked again for the other items of that domain; those are
+  reported as not tried. What already moved stays moved, and a later run picks up the rest.
+- Bound items and anything held back by unfinished work are never moved and are listed as left behind. An
+  identity that still holds them cannot be removed.
+
 **Not built.** "Move everything", and the delete flow that offers to move items out first. Bound items can only leave an identity
 by exporting it with its data (section 13) or by redeeming them (SPEC.md §5.7).
 
@@ -190,15 +220,14 @@ by exporting it with its data (section 13) or by redeeming them (SPEC.md §5.7).
 1. Storage layer, password accounts only: vault, active identity, create, rename, switch, remove (empty
    identities only), account-level operations pinned to the main identity, tests. No screens. Built.
 2. Backup: sub-identities in the full and automatic backups, restored by merge. Built. The identity sync
-   backup is not part of it. Per-site bindings (step 6) are carried in the same backups.
+   backup mirrors the vault when it is on. Per-site bindings (step 6) are carried in the same backups.
 3. Switcher and management screens, naming, the active-identity badge. Built: Wallet -> Identity -> Identities
    (switch, rename, add, remove with a second confirming press) and an "acting as" badge under the wallet tabs
    with a "Back to main" button. Names are always rendered as text.
 4. Export and import of one identity. Built: Wallet -> Identity -> Identities has an Export panel per
-   identity and an "Import an identity" section. The delete flow that offers to move items first belongs
-   with transfers (step 5).
-5. Transfers between identities. Built for a single unique asset and for a fungible balance, all or part
-   (section 8); move-everything is not.
+   identity and an "Import an identity" section. Remove offers to move items out first (section 6).
+5. Transfers between identities. Built for a single unique asset, for a fungible balance, all or part, and for
+   everything an identity holds in one go (section 8).
 6. Per-site binding and the untrusted-site prompt. Built (section 7).
 7. Passkey accounts: designed in `unlock-methods.md`, not built.
 
@@ -234,8 +263,11 @@ mirrors the data fields of the active-identity backup, and the sub-identity test
 backup both ways and requires every field to be equal, so a family added to one path and not the other fails
 the test. A store that exists but cannot be read stops the backup with an error instead of being left out.
 
-Families not in any backup today, for the main identity or a sub-identity: avatar choices, pending wallet-bridge
-offers and trusted bridge domains.
+The families the active-identity payload does not assemble from its own getters (avatar choices, pending
+wallet-bridge offers, trusted bridge domains) are read and written through the explicit-identity path for every
+identity, the main one included (`BACKUP_EXPLICIT_FIELDS`). Device-level caches and settings that are not
+identity data (friend-sync digests, consolidation status, pinned remote keys, presence approvals) are not backed
+up.
 
 ## 13. Exporting and importing one identity
 

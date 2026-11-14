@@ -12,12 +12,18 @@
   button.primary { background: #1f6b3a; border-color: #1f6b3a; color: #eafff1; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .5; }
   pre { background: #0e161b; border: 1px solid #22303a; border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+  .origin { border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; border: 1px solid #2c3c44; margin: 12px 0; }
+  .origin.ok { background: #12301d; border-color: #1f6b3a; }
+  .origin.warn { background: #33290f; border-color: #8a6d1c; }
+  .origin.bad { background: #3a1616; border-color: #a33; }
+  [hidden] { display: none !important; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
 </style>
 </head>
 <body>
   <h1>WebAuthn PRF probe</h1>
-  <p>This page checks whether this browser and authenticator can derive a secret from a passkey (the WebAuthn PRF extension). It creates one disposable passkey named "Domain Atlas PRF probe" and asks it for a few values. It stores nothing, reads no wallet and contacts no site. Each step may show a Windows Hello or security key prompt. Delete the passkey afterwards in Windows Settings &gt; Accounts &gt; Passkeys if you wish.</p>
+  <p>This page checks whether this browser and authenticator can derive a secret from a passkey (the WebAuthn PRF extension). It creates a few disposable passkeys named "Domain Atlas PRF probe" and, where PRF works, asks them for a few values. The full diagnostic first tries an ordinary passkey with no PRF, then PRF, so a failure can be told apart from missing PRF support. It stores nothing, reads no wallet and contacts no site. Each step may show a Windows Hello or security key prompt. Delete the passkey afterwards in Windows Settings &gt; Accounts &gt; Passkeys if you wish.</p>
+  <div id="origin" class="origin">Checking the page origin...</div>
   <div class="row">
     <label for="attachment">Authenticator</label>
     <select id="attachment">
@@ -25,8 +31,28 @@
       <option value="platform">This device (Windows Hello, Touch ID)</option>
       <option value="cross-platform">Security key</option>
     </select>
+    <label for="test">Test</label>
+    <select id="test">
+      <option value="full">Full diagnostic (stops early)</option>
+      <option value="plain">1. Passkey without PRF</option>
+      <option value="plain-relaxed">2. Passkey without PRF, relaxed options</option>
+      <option value="plain-default">3. Passkey without PRF, browser defaults</option>
+      <option value="prf-enable">4. Passkey with PRF (enable only)</option>
+      <option value="prf-eval">5. Passkey with PRF (eval at create)</option>
+    </select>
     <button id="run" class="primary" type="button">Run probe</button>
     <button id="copy" type="button" disabled>Copy results</button>
+  </div>
+  <div id="observedBox" class="row" hidden>
+    <label for="observed">What did you see?</label>
+    <select id="observed">
+      <option value="">(not answered)</option>
+      <option value="no prompt appeared at all">No prompt appeared at all</option>
+      <option value="windows hello prompt appeared and I approved it">A Windows Hello prompt appeared and I approved it</option>
+      <option value="windows hello prompt appeared and I cancelled or closed it">A Windows Hello prompt appeared and I cancelled or closed it</option>
+      <option value="windows hello prompt appeared and then failed">A Windows Hello prompt appeared and then failed</option>
+      <option value="a different Chrome or Windows dialog appeared">A different Chrome or Windows dialog appeared</option>
+    </select>
   </div>
   <pre id="out">Not run yet.</pre>
   <script src="probe.js"></script>
