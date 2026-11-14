@@ -152,14 +152,37 @@ identities.
   unfinished move into an identity counts as unfinished work for it). If it disappears some other way, the
   issuer's result stays in the journal until it is applied.
 - Refused before anything is sent: items bound to an identity (memberships and other `tradeScope: bound`
-  items), fungible balances, anything not in the acting identity's wallet, a target that is not in this
-  wallet. The issuer still applies its own rules (class policy, Gold holds, partner approvals), so a
+  items), fungible balances (they move as below), anything not in the acting identity's wallet, a target that is
+  not in this wallet. The issuer still applies its own rules (class policy, Gold holds, partner approvals), so a
   sub-identity is never a way around them.
 - The transfer is recorded by the issuer like any other, so it links the two keys on that ledger. The sandbox
   limits the damage a hostile site can do; it does not make the identities unlinkable.
 
-**Not built.** Moving fungible balances (they move by the split-then-hand-off route of SPEC.md §5.4), "move
-everything", and the delete flow that offers to move items out first. Bound items can only leave an identity
+**Built (balances, all or part).** `moveBalanceToIdentity(credentialId, targetPublicKey, amount)` moves a whole
+number of units of a fungible balance from the acting identity to another identity of the account. Balance
+card menu -> "Move balance...", with a dialog that has the target, an amount box (starting at the whole
+balance, with an "All" button) and the same notes about the issuer and the link between identities.
+
+- It is the issuer's split (SPEC.md §5.4) with the other identity's key as the recipient: the receiving identity
+  gets a credential for the amount, the acting identity gets a credential for the rest, and the old balance is
+  revoked. Moving the whole balance is a split with no remainder. No issuer change was needed: the split
+  endpoint already takes any whole amount and a recipient key, and already answers a repeated request id with
+  its stored result.
+- The balances drawn on are the acting identity's stacks of that class from that issuer that are not bound and
+  not held back by unfinished work. Normally that is one stack. When a request needs more, whole stacks are
+  taken first, largest first, and only the last is split. Each step is its own journalled operation
+  (`kind: 'split'` with a `toOwner`), so a step that fails leaves what was already moved moved, and the error
+  says how much that was.
+- The journal rules treat a split to another identity like a transfer: the entry may name a receiving
+  identity, recovery keeps the issuer's result until that identity is in the wallet, an unfinished split into an
+  identity blocks removing or exporting it, and a journal entry that names another receiving identity is accepted
+  when a backup's journal is restored.
+- The receiving identity does not merge what it receives (merging is signed by the acting identity). Its new
+  balance sits next to any it already had until that identity is the acting one and its wallet is next checked.
+- The issuer's own rules still apply (class policy, Gold holds, partner approvals).
+- Chain labs coins (their ledger balances) are not asset credentials moved by this route and are not covered.
+
+**Not built.** "Move everything", and the delete flow that offers to move items out first. Bound items can only leave an identity
 by exporting it with its data (section 13) or by redeeming them (SPEC.md §5.7).
 
 ## 9. Phasing
@@ -174,8 +197,8 @@ by exporting it with its data (section 13) or by redeeming them (SPEC.md §5.7).
 4. Export and import of one identity. Built: Wallet -> Identity -> Identities has an Export panel per
    identity and an "Import an identity" section. The delete flow that offers to move items first belongs
    with transfers (step 5).
-5. Transfers between identities. Built for a single unique asset (section 8); balances and move-everything
-   are not.
+5. Transfers between identities. Built for a single unique asset and for a fungible balance, all or part
+   (section 8); move-everything is not.
 6. Per-site binding and the untrusted-site prompt. Built (section 7).
 7. Passkey accounts (section 10).
 

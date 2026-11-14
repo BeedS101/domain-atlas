@@ -730,7 +730,7 @@ const AtlasWallet = (() => {
       if (all[holder.publicKey] === undefined || all[holder.publicKey] === null) continue;
       const list = await decryptAtRest(holder, 'pendingOps', all[holder.publicKey], unreadable);
       if (list === unreadable) return true;
-      if (Array.isArray(list) && list.some((e) => e && e.kind === 'transfer' && e.toOwner === publicKey)) return true;
+      if (Array.isArray(list) && list.some((e) => e && (e.kind === 'transfer' || e.kind === 'split') && e.toOwner === publicKey)) return true;
     }
     return false;
   }
@@ -1977,7 +1977,7 @@ const AtlasWallet = (() => {
       }
       // A move is applied to two identities of this wallet. If the receiving one is gone the result is kept
       // in the journal (the issuer keeps its answer) rather than written under the wrong keys.
-      if (entry.kind === 'transfer' && !(await localIdentityFor(entry.toOwner))) {
+      if ((entry.kind === 'transfer' || (entry.kind === 'split' && entry.toOwner && entry.toOwner !== entry.owner)) && !(await localIdentityFor(entry.toOwner))) {
         await retryLater('the receiving identity is not in this wallet');
         throw operationError(entry.label, 0, 'the issuer completed this move but the receiving identity is not in this wallet; it is kept and will be applied once it is', null, { pending: true, requestId: entry.requestId });
       }
@@ -2338,7 +2338,7 @@ const AtlasWallet = (() => {
     if (!usablePendingEntry(entry)) return 'unusable';
     if (entry.owner !== owner) return 'wrong-owner';
     if (entry.toOwner !== undefined && entry.toOwner !== null && entry.toOwner !== owner
-        && !(entry.kind === 'transfer' && typeof entry.toOwner === 'string' && entry.toOwner !== '')) return 'wrong-owner';
+        && !((entry.kind === 'transfer' || entry.kind === 'split') && typeof entry.toOwner === 'string' && entry.toOwner !== '')) return 'wrong-owner';
     if (!Object.prototype.hasOwnProperty.call(JOURNAL_PATHS, entry.kind) || JOURNAL_PATHS[entry.kind] !== entry.path) return 'unknown-operation';
     if (!/^[A-Za-z0-9.\-:\[\]]{1,255}$/.test(entry.domain)) return 'malformed';
     if (entry.state !== undefined && entry.state !== 'pending' && entry.state !== 'needs-attention') return 'malformed';
@@ -2985,7 +2985,8 @@ const AtlasWallet = (() => {
   // identity's public key, the issuer revokes the credential and signs a new one for that key, and the
   // wallet writes the new credential into the other identity's wallet. It runs through the journalled
   // operation path, so an answer that does not arrive is asked for again with the same request id.
-  // Items that are bound to their owner, and fungible balances, are not moved this way.
+  // Items that are bound to their owner are not moved this way. A fungible balance moves through the issuer's
+  // split instead (moveBalanceToIdentity below).
 
   // The identities a move can go to: every identity of this account except the acting one.
   async function listMoveTargets() {
@@ -3006,7 +3007,7 @@ const AtlasWallet = (() => {
     if (!entry) throw new Error('This item is not in the identity you are acting as.');
     const credential = entry.credential;
     if (credential.asset.tradeScope === 'bound') throw new Error('This item is bound to this identity and cannot be moved.');
-    if (credential.asset.fungible !== false) throw new Error('Balances cannot be moved between identities yet.');
+    if (credential.asset.fungible !== false) throw new Error('This is a balance. Use Move balance\u2026 to choose how much to move.');
     const done = await runIssuerOperation({
       owner: sender.publicKey, toOwner: target.publicKey, kind: 'transfer', label: 'Move',
       domain: credential.issuer.domain, path: '/atlas/asset/transfer',
@@ -3019,6 +3020,77 @@ const AtlasWallet = (() => {
     await unloadItem(credential.id);
     await logActivity('asset', 'Moved ' + credential.asset.class + ' to another identity in this wallet');
     return { credential: done.data.credential, to: target };
+  }
+
+  // The balances a move of `credentialId`'s class can draw on: this issuer's stacks of the same class held by
+  // the acting identity that are not bound and not held back by unfinished work, largest first.
+  async function movableBalance(sender, credentialId) {
+    const wallet = await getWallet(sender.publicKey);
+    const entry = wallet.find((e) => e.credential.id === credentialId);
+    if (!entry) throw new Error('This balance is not in the identity you are acting as.');
+    const asset = entry.credential.asset;
+    if (asset.fungible !== true) throw new Error('This is a unique item, not a balance.');
+    if (asset.tradeScope === 'bound') throw new Error('This balance is bound to this identity and cannot be moved.');
+    const stacks = wallet
+      .filter((e) => e.credential.asset.fungible === true && e.credential.asset.tradeScope !== 'bound' && !isHeldBack(e)
+        && e.credential.asset.class === asset.class && e.credential.issuer.domain === entry.credential.issuer.domain)
+      .map((e) => e.credential)
+      .sort((a, b) => b.quantity - a.quantity);
+    return { asset, domain: entry.credential.issuer.domain, stacks, total: stacks.reduce((n, c) => n + c.quantity, 0) };
+  }
+
+  // What can be moved for the balance shown on a card: its class, issuer and the total available.
+  async function getBalanceMoveInfo(credentialId) {
+    const sender = await getIdentity();
+    if (!sender) throw new Error('Unlock your wallet first.');
+    const { asset, domain, stacks, total } = await movableBalance(sender, credentialId);
+    return { assetClass: asset.class, name: asset.name, domain, total, stacks: stacks.length };
+  }
+
+  // Moves `amount` of a balance (the whole of it, or part) from the acting identity to another identity of this
+  // account. It is the issuer's split with the other identity's key as the recipient (SPEC.md section 5.4): the
+  // receiving identity gets a credential for the amount and the acting identity keeps the rest. A request that
+  // needs more than one stack takes whole stacks first, largest first, and splits only the last; each is its
+  // own journalled operation, so a failure part-way leaves what was already moved moved.
+  async function moveBalanceToIdentity(credentialId, targetPublicKey, amount) {
+    const sender = await getIdentity();
+    if (!sender) throw new Error('Unlock your wallet first.');
+    const target = (await listMoveTargets()).find((t) => t.publicKey === targetPublicKey);
+    if (!target) throw new Error('That identity is not in this wallet.');
+    if (!Number.isInteger(amount) || amount < 1) throw new Error('Enter a whole amount of at least 1.');
+    const { asset, domain, stacks, total } = await movableBalance(sender, credentialId);
+    if (amount > total) throw new Error('Only ' + total + ' of this balance can be moved now.');
+    const plan = [];
+    let left = amount;
+    for (const stack of stacks) {
+      if (left <= 0) break;
+      const send = Math.min(left, stack.quantity);
+      plan.push({ stack, send });
+      left -= send;
+    }
+    let moved = 0;
+    try {
+      for (const { stack, send } of plan) {
+        await runIssuerOperation({
+          owner: sender.publicKey, toOwner: target.publicKey, kind: 'split', label: 'Move',
+          domain, path: '/atlas/asset/split',
+          predecessors: [stack.id],
+          body: async (requestId) => {
+            const payload = { action: 'split', credentialId: stack.id, sendAmount: send, toPublicKey: target.publicKey, requestId, domain };
+            return { credential: stack, sendAmount: send, toPublicKey: target.publicKey, intent: { payload, proof: await signWithSelf(payload) } };
+          }
+        });
+        moved += send;
+      }
+    } catch (err) {
+      if (moved > 0 && err && typeof err.message === 'string') err.message += ' (' + moved + ' of ' + amount + ' was moved before this stopped.)';
+      throw err;
+    }
+    // Merging signs as the acting identity, so only its own leftovers are merged here; the receiving
+    // identity merges when it is next the acting identity.
+    await autoConsolidateAssetWallet(sender.publicKey);
+    await logActivity('asset', 'Moved ' + asset.class + ' to another identity in this wallet');
+    return { moved, to: target, steps: plan.length };
   }
 
   // Merges up to 20 balances of the same class AND issuer into one - the
@@ -10923,7 +10995,7 @@ const AtlasWallet = (() => {
   return {
     getAccountIdentity, listSubIdentities, getActiveIdentityInfo, createSubIdentity, renameSubIdentity, switchIdentity, removeSubIdentity,
     getSiteIdentity, setSiteIdentity, createSiteIdentity, forgetSiteIdentity, listSiteIdentities, useIdentityInThisContext,
-    prepareSubIdentityExport, completeSubIdentityExport, importSubIdentity, listMoveTargets, moveAssetToIdentity,
+    prepareSubIdentityExport, completeSubIdentityExport, importSubIdentity, listMoveTargets, moveAssetToIdentity, getBalanceMoveInfo, moveBalanceToIdentity,
     hasIdentity, isUnlocked, getIdentity, createIdentity, unlockIdentity, lockIdentity, changePassword,
     exportIdentity, importIdentity, presentIdentity, recordVisit,
     // SPEC.md §3.8.1 — exported so confirm-bridge.js (the wallet-bridge

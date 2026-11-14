@@ -6147,6 +6147,10 @@ function renderAssetCard(entry, container, opts) {
   if (!held && opts.moveEnabled && !fungible && asset.tradeScope !== 'bound') {
     actionsHtml += '<button data-action="move-identity" data-id="' + entry.credential.id + '" class="btn-secondary">Move to another identity\u2026</button>';
   }
+  // A balance moves in whole or in part: the dialog asks for the amount.
+  if (!held && opts.moveEnabled && fungible && asset.tradeScope !== 'bound') {
+    actionsHtml += '<button data-action="move-balance" data-id="' + entry.credential.id + '" class="btn-secondary">Move balance\u2026</button>';
+  }
   actionsHtml += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
   const menuHtml =
     '<div class="card-menu">' +
@@ -8749,6 +8753,30 @@ function openAssetFileDialog(options) {
     row.appendChild(select);
     bridgeOfferPreviewBodyEl.appendChild(row);
   }
+  if (options.amount) {
+    const row = document.createElement('div');
+    row.style.marginTop = '8px';
+    const label = document.createElement('label');
+    label.htmlFor = 'assetFileDialogAmount';
+    label.textContent = options.amount.label || 'Amount ';
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.id = 'assetFileDialogAmount';
+    input.min = '1';
+    input.max = String(options.amount.max);
+    input.step = '1';
+    input.value = String(options.amount.max);
+    const all = document.createElement('button');
+    all.type = 'button';
+    all.id = 'assetFileDialogAmountAll';
+    all.className = 'btn-secondary';
+    all.textContent = 'All';
+    all.addEventListener('click', () => { input.value = String(options.amount.max); });
+    row.appendChild(label);
+    row.appendChild(input);
+    row.appendChild(all);
+    bridgeOfferPreviewBodyEl.appendChild(row);
+  }
   bridgeOfferPreviewClaimBtn.textContent = options.primaryLabel || '';
   bridgeOfferPreviewClaimBtn.style.display = options.primaryLabel ? '' : 'none';
   bridgeOfferPreviewClaimBtn.disabled = false;
@@ -8765,7 +8793,8 @@ async function runAssetFileDialogPrimary() {
   bridgeOfferPreviewStatusEl.textContent = 'Working…';
   try {
     const choice = document.getElementById('assetFileDialogChoice');
-    await dialog.onPrimary(choice ? choice.value : undefined);
+    const amountInput = document.getElementById('assetFileDialogAmount');
+    await dialog.onPrimary(choice ? choice.value : undefined, amountInput ? Number(amountInput.value) : undefined);
   } catch (err) {
     if (assetFileDialog === dialog) {
       bridgeOfferPreviewStatusEl.textContent = err.message;
@@ -8882,6 +8911,56 @@ async function beginMoveAssetToIdentity(credentialId) {
       closeBridgeOfferPreview();
       await refreshInventoryDisplay();
       statusEl.textContent = 'Moved ' + credential.asset.name + ' to ' + moved.to.label + '.';
+    }
+  });
+}
+
+// Moves all or part of a balance to another identity of this wallet. Same issuer-side route as an item move,
+// through the issuer's split.
+async function beginMoveBalanceToIdentity(credentialId) {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  const entry = (await AtlasWallet.getWallet(identity.publicKey)).find((e) => e.credential.id === credentialId);
+  if (!entry) return;
+  const credential = entry.credential;
+  let targets = [];
+  let info = null;
+  try { targets = await AtlasWallet.listMoveTargets(); } catch (err) { targets = []; }
+  try { info = await AtlasWallet.getBalanceMoveInfo(credentialId); } catch (err) { info = null; }
+  if (!targets.length || !info || info.total < 1) {
+    openAssetFileDialog({ credential, originLabel: 'Move balance', notes: [!targets.length ? 'This wallet has no other identity to move it to.' : 'Nothing in this balance can be moved right now.'], secondaryLabel: 'Close' });
+    return;
+  }
+  openAssetFileDialog({
+    credential,
+    originLabel: 'Move balance',
+    notes: [
+      'The issuer, ' + credential.issuer.domain + ', does the move: it splits this balance and signs the amount you choose for the identity you pick. This needs ' + credential.issuer.domain + ' to be reachable.',
+      'You can move all of it or part of it, in whole units. You have ' + formatMass(info.total) + ' that can be moved now.',
+      'The issuer\u2019s records will show that the two identities are connected.',
+      'If the connection drops, the wallet asks the issuer again afterwards, so nothing is lost or made twice.'
+    ],
+    choiceLabel: 'Move to ',
+    choices: targets.map((t) => ({ value: t.publicKey, label: t.label })),
+    amount: { label: 'Amount (g) ', max: info.total },
+    primaryLabel: 'Move',
+    secondaryLabel: 'Cancel',
+    onPrimary: async (targetPublicKey, amount) => {
+      let moved;
+      try {
+        moved = await AtlasWallet.moveBalanceToIdentity(credentialId, targetPublicKey, amount);
+      } catch (err) {
+        if (err.pending) {
+          closeBridgeOfferPreview();
+          await refreshInventoryDisplay();
+          statusEl.textContent = err.message;
+          return;
+        }
+        throw err;
+      }
+      closeBridgeOfferPreview();
+      await refreshInventoryDisplay();
+      statusEl.textContent = 'Moved ' + formatMass(moved.moved) + ' of ' + credential.asset.name + ' to ' + moved.to.label + '.';
     }
   });
 }
@@ -13366,6 +13445,8 @@ function assetActionHandler(listEl) {
       await beginSaveAssetToFile(id);
     } else if (btn.dataset.action === 'move-identity') {
       await beginMoveAssetToIdentity(id);
+    } else if (btn.dataset.action === 'move-balance') {
+      await beginMoveBalanceToIdentity(id);
     } else if (btn.dataset.action === 'hide') {
       await AtlasWallet.hideAsset(who.publicKey, id);
       await refreshInventoryDisplay();

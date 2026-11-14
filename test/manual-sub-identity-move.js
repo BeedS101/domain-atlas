@@ -64,7 +64,7 @@ async function launch() {
     const balanceId = wallet0.find((e) => e.cls === 'atlas.currency.alpha').id;
     check('an unknown item is refused', /not in the identity/.test(await fails(async (A, a) => A.moveAssetToIdentity('urn:atlas:asset:nope', a), shopping.publicKey)));
     check('a bound item is refused', /bound/.test(await fails(async (A, a) => A.moveAssetToIdentity(a.id, a.to), { id: badgeId, to: shopping.publicKey })));
-    check('a fungible balance is refused', /Balances/.test(await fails(async (A, a) => A.moveAssetToIdentity(a.id, a.to), { id: balanceId, to: shopping.publicKey })));
+    check('a fungible balance is refused', /Move balance/.test(await fails(async (A, a) => A.moveAssetToIdentity(a.id, a.to), { id: balanceId, to: shopping.publicKey })));
     check('nothing was moved by the refusals', (await walletOf(main)).length === 3 && (await journalOf(main)) === 0);
 
     console.log('--- a move ---');
