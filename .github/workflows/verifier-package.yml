@@ -41,7 +41,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: curl, openssl, json, mbstring
+          extensions: curl, openssl, json, mbstring, zip
           coverage: none
           ini-values: display_errors=Off
 
@@ -71,6 +71,12 @@ jobs:
 
       - name: Offline verifier setup assistant
         run: node test/verifier-setup-wizard.js
+
+      - name: Pinned test-domain installer (offline, no live domains)
+        run: node test/verifier-verified-installer.js
+
+      - name: Installer HTTP integration (loopback, simulated HTTPS flag only)
+        run: node test/verifier-installer-http.js
 
       - name: Endpoint abuse limits
         run: node test/verifier-endpoint-abuse.js
