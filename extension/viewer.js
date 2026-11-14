@@ -4210,6 +4210,10 @@ identityListEl && identityListEl.addEventListener('click', async (e) => {
   } else if (action === 'move-all') {
     await openSubIdentityMovePanel(id, btn.closest('.identity-row'), false);
   } else if (action === 'remove') {
+    if (subExportPrepared && subExportTarget && subExportTarget.id === id) {
+      subIdentityStatusEl.textContent = 'This identity is being exported. Finish or keep it in the Export box first; removing it now would lose the export code.';
+      return;
+    }
     if (confirmRemoveSubIdentityId !== id) {
       // An identity that still holds items cannot be removed without losing them, so the move comes first.
       let holdings = null;
@@ -4384,6 +4388,8 @@ const subExportCopyCodeBtn = document.getElementById('subExportCopyCodeBtn');
 const subExportDownloadBtn = document.getElementById('subExportDownloadBtn');
 const subExportPasswordNote = document.getElementById('subExportPasswordNote');
 const subExportSavedCheck = document.getElementById('subExportSavedCheck');
+const subExportConfirmWordsEl = document.getElementById('subExportConfirmWords');
+const subExportConfirmStatusEl = document.getElementById('subExportConfirmStatus');
 const subExportFinishBtn = document.getElementById('subExportFinishBtn');
 const subExportKeepBtn = document.getElementById('subExportKeepBtn');
 const subExportStatusEl = document.getElementById('subIdentityExportStatus');
@@ -4404,7 +4410,52 @@ function downloadJsonFile(data, filename) {
   URL.revokeObjectURL(url);
 }
 
+// Removing the identity waits until the person has typed back three words of the export code, chosen at random, so an
+// identity cannot be removed by someone who never saw or kept the code. Finish also needs the file to be marked as saved.
+let subExportConfirmWords = []; // [{ position (1-based), word, input }]
+
+function subExportProofDone() {
+  return subExportConfirmWords.length > 0 && subExportConfirmWords.every((w) => w.input.value.trim().toLowerCase() === w.word);
+}
+
+function updateSubExportFinishState() {
+  const proven = subExportProofDone();
+  const typed = subExportConfirmWords.filter((w) => w.input.value.trim() !== '').length;
+  subExportConfirmStatusEl.textContent = !subExportConfirmWords.length ? ''
+    : proven ? 'These words match the code.'
+    : typed === subExportConfirmWords.length ? 'One or more words do not match the code. Check what you saved.' : '';
+  subExportFinishBtn.disabled = !(subExportSavedCheck.checked && proven);
+}
+
+function buildSubExportProof(code) {
+  const words = String(code).trim().toLowerCase().split(/\s+/);
+  const picked = new Set();
+  const buf = new Uint32Array(32);
+  crypto.getRandomValues(buf);
+  for (let i = 0; picked.size < Math.min(3, words.length) && i < buf.length; i++) picked.add(buf[i] % words.length);
+  subExportConfirmWords = [...picked].sort((a, b) => a - b).map((index) => ({ position: index + 1, word: words[index], input: null }));
+  subExportConfirmWordsEl.textContent = '';
+  subExportConfirmWords.forEach((w) => {
+    const label = document.createElement('label');
+    label.textContent = 'Word ' + w.position;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.setAttribute('autocapitalize', 'off');
+    input.setAttribute('aria-label', 'Word ' + w.position + ' of the export code');
+    input.addEventListener('input', updateSubExportFinishState);
+    label.appendChild(input);
+    subExportConfirmWordsEl.appendChild(label);
+    w.input = input;
+  });
+  updateSubExportFinishState();
+}
+
 function closeSubIdentityExportPanel() {
+  subExportConfirmWords = [];
+  subExportConfirmWordsEl.textContent = '';
+  subExportConfirmStatusEl.textContent = '';
   subExportTarget = null;
   subExportPrepared = null;
   subExportPanelEl.hidden = true;
@@ -4428,6 +4479,12 @@ function openSubIdentityExportPanel(id, rowEl) {
   subExportTitleEl.textContent = 'Export ' + subExportTarget.label;
   subExportPanelEl.hidden = false;
   subExportPasswordInput.focus();
+  scrollSubExportPanelIntoView();
+}
+
+// The panel sits below the identity list, so it is brought into view when it opens and when the code appears.
+function scrollSubExportPanelIntoView() {
+  try { subExportPanelEl.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (err) { /* cosmetic */ }
 }
 
 subExportOtherPasswordCheck && subExportOtherPasswordCheck.addEventListener('change', () => {
@@ -4458,6 +4515,8 @@ subExportCreateBtn && subExportCreateBtn.addEventListener('click', async () => {
       + (prepared.includesData ? ' It includes this identity\u2019s items, mail and contacts.' : ' It holds the key only.');
     subExportStep1El.hidden = true;
     subExportStep2El.hidden = false;
+    buildSubExportProof(prepared.code);
+    scrollSubExportPanelIntoView();
     subExportStatusEl.textContent = 'The file was downloaded as ' + prepared.filename + '. The identity has not been removed yet.';
   } catch (err) {
     subExportStatusEl.textContent = err.message;
@@ -4480,9 +4539,7 @@ subExportDownloadBtn && subExportDownloadBtn.addEventListener('click', () => {
   if (subExportPrepared) downloadJsonFile(subExportPrepared.file, subExportPrepared.filename);
 });
 
-subExportSavedCheck && subExportSavedCheck.addEventListener('change', () => {
-  subExportFinishBtn.disabled = !subExportSavedCheck.checked;
-});
+subExportSavedCheck && subExportSavedCheck.addEventListener('change', updateSubExportFinishState);
 
 subExportKeepBtn && subExportKeepBtn.addEventListener('click', () => {
   closeSubIdentityExportPanel();
@@ -4490,7 +4547,7 @@ subExportKeepBtn && subExportKeepBtn.addEventListener('click', () => {
 });
 
 subExportFinishBtn && subExportFinishBtn.addEventListener('click', async () => {
-  if (!subExportPrepared || !subExportSavedCheck.checked) return;
+  if (!subExportPrepared || !subExportSavedCheck.checked || !subExportProofDone()) return;
   subExportFinishBtn.disabled = true;
   try {
     const done = await AtlasWallet.completeSubIdentityExport(subExportPrepared.check);
@@ -4500,7 +4557,7 @@ subExportFinishBtn && subExportFinishBtn.addEventListener('click', async () => {
     await refreshSubIdentitiesDisplay();
   } catch (err) {
     subExportStatusEl.textContent = err.message;
-    subExportFinishBtn.disabled = !subExportSavedCheck.checked;
+    updateSubExportFinishState();
   }
 });
 

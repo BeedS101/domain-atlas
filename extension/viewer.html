@@ -596,6 +596,9 @@
   .identity-row .identity-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .identity-row .identity-row-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .identity-row .identity-row-tag { font-size: 11px; color: #57a593; flex: 0 0 auto; }
+  .export-confirm-words { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+  .export-confirm-words label { flex: 1 1 90px; font-size: 12px; }
+  .export-confirm-words input { width: 100%; box-sizing: border-box; margin-top: 2px; }
   .identity-row .identity-row-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .identity-row .card-menu-items button { font-size: 12px; padding: 4px 8px; margin-bottom: 4px; }
   .identity-row .card-menu-items button:last-child { margin-bottom: 0; }
@@ -2116,7 +2119,10 @@
                   <button id="subExportDownloadBtn" type="button" class="btn-secondary">Download file again</button>
                 </div>
                 <div id="subExportPasswordNote" class="empty-note" style="margin-top:6px;"></div>
-                <label class="check-row"><input type="checkbox" id="subExportSavedCheck"><span>I have saved the file and the code</span></label>
+                <div class="empty-note" style="margin-top:8px;">To show you have the code, type these words from it (type them; pasting is not needed):</div>
+                <div id="subExportConfirmWords" class="export-confirm-words"></div>
+                <div id="subExportConfirmStatus" class="mono" role="status" aria-live="polite"></div>
+                <label class="check-row"><input type="checkbox" id="subExportSavedCheck"><span>I have saved the file</span></label>
                 <div class="btn-col">
                   <button id="subExportFinishBtn" type="button" disabled>Finish and remove from this wallet</button>
                   <button id="subExportKeepBtn" type="button" class="btn-secondary">Keep it in this wallet</button>

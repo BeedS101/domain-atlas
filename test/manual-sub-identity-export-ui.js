@@ -28,6 +28,18 @@ async function menuClick(row, action) {
   await item.click();
 }
 
+// Types the words the proof step asks for, taken from the code.
+async function typeProofWords(frame, code, transform) {
+  const words = code.trim().split(/\s+/);
+  const labels = await frame.locator('#subExportConfirmWords label').evaluateAll((ls) => ls.map((l) => l.firstChild.textContent));
+  const inputs = frame.locator('#subExportConfirmWords input');
+  for (let i = 0; i < labels.length; i++) {
+    const position = Number(labels[i].replace('Word ', ''));
+    await inputs.nth(i).fill(transform ? transform(words[position - 1]) : words[position - 1]);
+  }
+  return labels.map((l) => Number(l.replace('Word ', '')));
+}
+
 (async () => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-sub-export-ui-'));
   const downloads = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-sub-export-dl-'));
@@ -117,14 +129,40 @@ async function menuClick(row, action) {
     check('the file holds no plaintext', !/Shopping|Pal/.test(fs.readFileSync(filePath, 'utf8')));
     check('step two shows the code and nothing has been removed', await frame.locator('#subIdentityExportStep2').isVisible() && (await names()).includes('Shopping'));
     const code = (await frame.locator('#subExportCodeText').textContent()).trim();
+    await settle(1200);
+    check('the code and the words to type are scrolled into view', await frame.evaluate(() => {
+      const box = document.getElementById('subExportCodeText').getBoundingClientRect(), words = document.getElementById('subExportConfirmWords').getBoundingClientRect();
+      return box.top >= 0 && words.bottom <= window.innerHeight;
+    }));
+    await page.screenshot({ path: path.join(SHOTS, 'sub-export-step2.png') });
     check('the code is 16 words', code.split(/\s+/).length === 16, code);
     check('the password note says which password protects the file', /wallet password/.test(await frame.locator('#subExportPasswordNote').textContent()));
     check('Finish is disabled until the person confirms', await frame.locator('#subExportFinishBtn').isDisabled());
+    const positions = await frame.locator('#subExportConfirmWords label').evaluateAll((ls) => ls.map((l) => l.firstChild.textContent));
+    check('three different words of the code are asked for', positions.length === 3 && new Set(positions).size === 3 && positions.every((p) => /^Word \d+$/.test(p)), positions);
+    check('the box warns that the code is shown once and not kept', /shown once and is not kept/.test(await frame.locator('#subIdentityExportStep2').textContent()));
+    await frame.locator('#subExportSavedCheck').check();
+    check('marking the file saved is not enough to finish', await frame.locator('#subExportFinishBtn').isDisabled());
+    await frame.locator('#subExportConfirmWords input').first().fill('wrongword');
+    await frame.locator('#subExportConfirmWords input').nth(1).fill('wrongword');
+    await frame.locator('#subExportConfirmWords input').nth(2).fill('wrongword');
+    check('wrong words keep Finish disabled and say so', await frame.locator('#subExportFinishBtn').isDisabled() && /do not match/.test(await frame.locator('#subExportConfirmStatus').textContent()), await frame.locator('#subExportConfirmStatus').textContent());
+    await typeProofWords(frame, code);
+    await frame.locator('#subExportConfirmWords input').nth(2).fill('');
+    check('two right words and an empty one keep it disabled', await frame.locator('#subExportFinishBtn').isDisabled());
+    await frame.locator('#subExportSavedCheck').uncheck();
+    await typeProofWords(frame, code, (w) => '  ' + w.toUpperCase() + ' ');
+    check('right words with different case and spaces match, but the file must be marked saved too', await frame.locator('#subExportFinishBtn').isDisabled() && /match the code/.test(await frame.locator('#subExportConfirmStatus').textContent()));
+    await frame.locator('#subExportSavedCheck').check();
+    check('Finish is enabled once the words match and the file is marked saved', await frame.locator('#subExportFinishBtn').isEnabled());
+    await frame.locator('#subExportSavedCheck').uncheck();
+    await menuClick(rowFor('Shopping'), 'remove');
+    await settle(500);
+    check('the identity cannot be removed while its export waits for the second step', (await names()).includes('Shopping') && /being exported/.test(await listStatus()), await listStatus());
     check('the code is not in the wallet\'s storage anywhere', await frame.evaluate(async (c) => {
       const all = JSON.stringify(await chrome.storage.local.get(null)) + JSON.stringify(await chrome.storage.session.get(null));
       return !all.includes(c);
     }, code));
-    await page.screenshot({ path: path.join(SHOTS, 'sub-export-step2.png') });
     await page.setViewportSize({ width: 390, height: 800 });
     await settle(600);
     check('the panel fits a phone width', await frame.evaluate(() => { const p = document.getElementById('subIdentityExportPanel'); return p.scrollWidth <= p.clientWidth + 1; }));
@@ -151,6 +189,8 @@ async function menuClick(row, action) {
     check('the second code is different', code2 !== code);
     check('the note names the separate password', /separate password/.test(await frame.locator('#subExportPasswordNote').textContent()));
     await frame.locator('#subExportSavedCheck').check();
+    check('Finish stays disabled until the words are typed', await frame.locator('#subExportFinishBtn').isDisabled());
+    await typeProofWords(frame, code2);
     check('Finish is enabled after confirming', await frame.locator('#subExportFinishBtn').isEnabled());
     await frame.locator('#subExportFinishBtn').click();
     await settle(1000);

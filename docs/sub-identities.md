@@ -308,6 +308,11 @@ Export moves an identity out of the wallet, so it must not be possible to lose i
   public key matches the private key, it signs) and refused if it is this wallet's own key or already in the
   vault, or if the vault is full. A name already in use gets a number. The key is written before the data;
   if the data cannot be restored the key is taken out again and nothing is added.
+- **Proof before removal (screen).** After the file is made, the Export box scrolls into view and shows the code with
+  a warning that it is shown once. "Finish and remove" stays disabled until the person has typed back three words of
+  the code, chosen at random (case and spaces ignored), and marked the file as saved. Remove is refused for an
+  identity whose export is waiting for this step, so the code cannot be lost by removing it from the list. The check
+  is in the screen only; `completeSubIdentityExport` itself is unchanged.
 - **Main identity onboarding** refuses a sub-identity file with a message pointing at the Identities screen.
 - **Wording.** The second secret is an "export code" on these screens, not a seed phrase: it is not a key
   seed and nothing is derived from it.
