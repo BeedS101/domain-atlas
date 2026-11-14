@@ -21,6 +21,13 @@ function check(name, ok, detail) {
   if (!ok) failures++;
 }
 
+// The secondary identity actions sit behind each row's "more actions" menu; the second click of Remove (Confirm remove) is a visible button.
+async function menuClick(row, action) {
+  const item = row.locator('button[data-action="' + action + '"]');
+  if (!(await item.isVisible())) await row.locator('.card-menu-toggle').click();
+  await item.click();
+}
+
 (async () => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-sub-identities-ui-'));
   const context = await chromium.launchPersistentContext(profile, {
@@ -97,7 +104,7 @@ function check(name, ok, detail) {
     await page.screenshot({ path: path.join(SHOTS, 'sub-identities-switched.png') });
 
     console.log('--- renaming ---');
-    await frame.locator('#identityList .identity-row', { hasText: 'Shopping' }).locator('button[data-action="rename"]').click();
+    await menuClick(frame.locator('#identityList .identity-row', { hasText: 'Shopping' }), 'rename');
     await frame.waitForSelector('#identityList input[data-role="rename-input"]', { timeout: 3000 });
     const input = frame.locator('#identityList input[data-role="rename-input"]');
     check('the rename field starts with the current name', (await input.inputValue()) === 'Shopping');
@@ -105,7 +112,7 @@ function check(name, ok, detail) {
     await input.press('Enter');
     await settle();
     check('Enter saves the new name and the badge follows', (await rows()).map((x) => x.name).join() === 'Main identity,Weekend shopping,Trading' && (await badge()).text === 'Acting as Weekend shopping', { rows: await rows(), badge: await badge() });
-    await frame.locator('#identityList .identity-row', { hasText: 'Trading' }).locator('button[data-action="rename"]').click();
+    await menuClick(frame.locator('#identityList .identity-row', { hasText: 'Trading' }), 'rename');
     await frame.waitForSelector('#identityList input[data-role="rename-input"]', { timeout: 3000 });
     await frame.locator('#identityList input[data-role="rename-input"]').fill('weekend SHOPPING');
     await frame.locator('#identityList button[data-action="rename-save"]').click();
@@ -121,8 +128,8 @@ function check(name, ok, detail) {
     await settle(700);
     check('a name with markup is shown literally', (await frame.$$('#identityList img')).length === 0 && (await rows()).some((x) => x.name.includes('<img')), await rows());
     check('...and nothing ran', (await frame.evaluate(() => window.__pwned)) === undefined);
-    await frame.locator('#identityList .identity-row', { hasText: '<img' }).locator('button[data-action="remove"]').click();
-    await frame.locator('#identityList .identity-row', { hasText: '<img' }).locator('button[data-action="remove"]').click();
+    await menuClick(frame.locator('#identityList .identity-row', { hasText: '<img' }), 'remove');
+    await menuClick(frame.locator('#identityList .identity-row', { hasText: '<img' }), 'remove');
     await settle();
 
     console.log('--- going back, removing ---');
@@ -130,16 +137,16 @@ function check(name, ok, detail) {
     await settle(700);
     check('"Back to main" returns to the main identity and hides the badge', (await badge()).hidden === true && (await frame.evaluate(async () => (await AtlasWallet.getIdentity()).publicKey)) === mainKey);
     check('the main identity row is active again', (await rows())[0].active === true);
-    await frame.locator('#identityList .identity-row', { hasText: 'Trading' }).locator('button[data-action="remove"]').click();
+    await menuClick(frame.locator('#identityList .identity-row', { hasText: 'Trading' }), 'remove');
     await settle();
     r = await rows();
     check('Remove asks for confirmation first and removes nothing yet', r.length === 3 && r[2].buttons.includes('Confirm remove') && /Press Confirm remove/.test(await status()), { r, status: await status() });
-    await frame.locator('#identityList .identity-row', { hasText: 'Weekend shopping' }).locator('button[data-action="rename"]').click();
+    await menuClick(frame.locator('#identityList .identity-row', { hasText: 'Weekend shopping' }), 'rename');
     await frame.locator('#identityList button[data-action="rename-cancel"]').click();
     await settle();
     check('doing something else cancels the pending removal', (await rows()).every((x) => !x.buttons.includes('Confirm remove')), await rows());
-    await frame.locator('#identityList .identity-row', { hasText: 'Trading' }).locator('button[data-action="remove"]').click();
-    await frame.locator('#identityList .identity-row', { hasText: 'Trading' }).locator('button[data-action="remove"]').click();
+    await menuClick(frame.locator('#identityList .identity-row', { hasText: 'Trading' }), 'remove');
+    await menuClick(frame.locator('#identityList .identity-row', { hasText: 'Trading' }), 'remove');
     await settle();
     check('the second press removes it', (await rows()).map((x) => x.name).join() === 'Main identity,Weekend shopping' && /Removed/.test(await status()), { rows: await rows(), status: await status() });
 
@@ -151,8 +158,8 @@ function check(name, ok, detail) {
       all[pk] = [{ credential: { credential: 'domain-atlas-asset/1.0', n: 1 } }];
       await chrome.storage.local.set({ atlasWallets: all });
     }, shopId);
-    await frame.locator('#identityList .identity-row', { hasText: 'Weekend shopping' }).locator('button[data-action="remove"]').click();
-    await frame.locator('#identityList .identity-row', { hasText: 'Weekend shopping' }).locator('button[data-action="remove"]').click();
+    await menuClick(frame.locator('#identityList .identity-row', { hasText: 'Weekend shopping' }), 'remove');
+    await menuClick(frame.locator('#identityList .identity-row', { hasText: 'Weekend shopping' }), 'remove');
     await settle();
     check('the wallet explains why, and the identity stays', /still holds items/.test(await status()) && (await rows()).length === 2, await status());
 

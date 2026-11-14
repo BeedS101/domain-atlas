@@ -20,6 +20,13 @@ function check(name, ok, detail) {
   if (!ok) failures++;
 }
 
+// The secondary identity actions sit behind each row's "more actions" menu; the second click of Remove (Confirm remove) is a visible button.
+async function menuClick(row, action) {
+  const item = row.locator('button[data-action="' + action + '"]');
+  if (!(await item.isVisible())) await row.locator('.card-menu-toggle').click();
+  await item.click();
+}
+
 (async () => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-move-everything-ui-'));
   const context = await chromium.launchPersistentContext(profile, {
@@ -76,7 +83,7 @@ function check(name, ok, detail) {
     await settle();
     r = await rows();
     check('the active identity offers it, an inactive one does not', r[0].buttons.includes('Move everything…') && !r[1].buttons.includes('Move everything…'), r);
-    await row('Main identity').locator('button[data-action="move-all"]').click();
+    await menuClick(row('Main identity'), 'move-all');
     await frame.waitForSelector('#subIdentityMovePanel:not([hidden])', { timeout: 5000 });
     const summary = await frame.locator('#subIdentityMoveSummary').textContent();
     check('the panel says what it holds', /holds 2 items and 1 balance\./.test(summary), summary);
@@ -92,7 +99,7 @@ function check(name, ok, detail) {
     check('Cancel closes the panel', await panelHidden());
 
     console.log('--- Remove offers to move first ---');
-    await row('Shopping').locator('button[data-action="remove"]').click();
+    await menuClick(row('Shopping'), 'remove');
     await frame.waitForSelector('#subIdentityMovePanel:not([hidden])', { timeout: 5000 });
     check('the panel names the identity being emptied', /Move everything out of Shopping/.test(await frame.locator('#subIdentityMoveTitle').textContent()), await frame.locator('#subIdentityMoveTitle').textContent());
     check('the targets are the others, main first', (await frame.$$eval('#subIdentityMoveTarget option', (os) => os.map((o) => o.textContent))).join() === 'Main identity');
@@ -103,7 +110,7 @@ function check(name, ok, detail) {
     await settle(800);
     check('the wallet acted as Shopping to move it', true);
     check('Confirm remove is now offered, with a message', (await row('Shopping').locator('button[data-action="remove"]').textContent()) === 'Confirm remove' && /Everything was moved/.test(await status()), await status());
-    await row('Shopping').locator('button[data-action="remove"]').click();
+    await menuClick(row('Shopping'), 'remove');
     await settle(800);
     r = await rows();
     check('the identity is removed and the wallet is back on the main identity', r.length === 1 && r[0].name === 'Main identity' && r[0].active && (await badge()).hidden === true, r);
@@ -119,7 +126,7 @@ function check(name, ok, detail) {
     await mint('atlas.badge');
     await frame.locator('#identityList .identity-row', { hasText: 'Main identity' }).locator('button[data-action="switch"]').click();
     await settle(700);
-    await row('Badges').locator('button[data-action="remove"]').click();
+    await menuClick(row('Badges'), 'remove');
     await frame.waitForSelector('#subIdentityMovePanel:not([hidden])', { timeout: 5000 });
     const boundSummary = await frame.locator('#subIdentityMoveSummary').textContent();
     check('it says nothing can be moved and that one is bound', /nothing that can be moved/.test(boundSummary) && /1 bound/.test(boundSummary), boundSummary);

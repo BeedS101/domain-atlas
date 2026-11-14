@@ -596,6 +596,9 @@
   .identity-row .identity-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .identity-row .identity-row-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .identity-row .identity-row-tag { font-size: 11px; color: #57a593; flex: 0 0 auto; }
+  .identity-row .identity-row-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .identity-row .card-menu-items button { font-size: 12px; padding: 4px 8px; margin-bottom: 4px; }
+  .identity-row .card-menu-items button:last-child { margin-bottom: 0; }
   .identity-row .identity-row-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .identity-row .identity-row-actions button { flex: 1 1 auto; font-size: 12px; padding: 4px 8px; }
   .identity-row input[type="text"] { width: 100%; box-sizing: border-box; margin-top: 6px; }
@@ -2138,6 +2141,14 @@
               <div id="subIdentityMoveStatus" class="mono" role="status" aria-live="polite"></div>
             </div>
 
+            <!-- Which identity each remembered site answers as. A site is matched by its exact address. -->
+            <div id="siteIdentitiesPanel" style="margin-top:14px;">
+              <div class="subhead" style="margin:0 0 6px;">Site identities</div>
+              <div class="empty-note" id="siteIdentitiesIntro">Each site below answers as the identity shown, whichever identity this wallet is showing. A site that is not listed asks the first time it wants your wallet.</div>
+              <div id="siteIdentityList" class="item-list"></div>
+              <div id="siteIdentityStatus" class="mono" role="status" aria-live="polite"></div>
+            </div>
+
             <!-- Import adds an exported identity (or an older identity export file) as a sub-identity. -->
             <div id="importSubIdentityPanel" style="margin-top:14px;">
               <div class="subhead" style="margin:0 0 6px;">Import an identity</div>
@@ -2150,14 +2161,6 @@
                 <button id="subImportBtn" type="button" class="btn-secondary">Import identity</button>
               </div>
               <div id="subImportStatus" class="mono" role="status" aria-live="polite"></div>
-            </div>
-
-            <!-- Which identity each remembered site answers as. A site is matched by its exact address. -->
-            <div id="siteIdentitiesPanel" style="margin-top:14px;">
-              <div class="subhead" style="margin:0 0 6px;">Site identities</div>
-              <div class="empty-note" id="siteIdentitiesIntro">Each site below answers as the identity shown, whichever identity this wallet is showing. A site that is not listed asks the first time it wants your wallet.</div>
-              <div id="siteIdentityList" class="item-list"></div>
-              <div id="siteIdentityStatus" class="mono" role="status" aria-live="polite"></div>
             </div>
           </div>
 

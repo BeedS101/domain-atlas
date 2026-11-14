@@ -21,6 +21,13 @@ function check(name, ok, detail) {
   if (!ok) failures++;
 }
 
+// The secondary identity actions sit behind each row's "more actions" menu; the second click of Remove (Confirm remove) is a visible button.
+async function menuClick(row, action) {
+  const item = row.locator('button[data-action="' + action + '"]');
+  if (!(await item.isVisible())) await row.locator('.card-menu-toggle').click();
+  await item.click();
+}
+
 (async () => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-sub-export-ui-'));
   const downloads = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-sub-export-dl-'));
@@ -74,7 +81,7 @@ function check(name, ok, detail) {
     console.log('--- opening the export panel ---');
     check('the panel is closed to start with', await panelHidden());
     check('only sub-identities have an Export button', (await frame.$$eval('#identityList .identity-row', (els) => els.map((e) => !!e.querySelector('button[data-action="export"]')))).join() === 'false,true,true');
-    await rowFor('Shopping').locator('button[data-action="export"]').click();
+    await menuClick(rowFor('Shopping'), 'export');
     check('the panel opens for the chosen identity', !(await panelHidden()) && /Export Shopping/.test(await frame.locator('#subIdentityExportTitle').textContent()));
     check('the file password field is hidden until asked for', await frame.locator('#subExportFilePasswordInput').isHidden());
     check('data is included by default', await frame.locator('#subExportIncludeDataCheck').isChecked());
@@ -130,7 +137,7 @@ function check(name, ok, detail) {
     check('the code is gone from the page', !(await frame.evaluate((c) => document.body.innerText.includes(c), code)));
 
     console.log('--- finishing ---');
-    await rowFor('Shopping').locator('button[data-action="export"]').click();
+    await menuClick(rowFor('Shopping'), 'export');
     await frame.locator('#subExportPasswordInput').fill(PASSWORD);
     await frame.locator('#subExportOtherPasswordCheck').check();
     await frame.locator('#subExportFilePasswordInput').fill('a-separate-file-password');
@@ -198,7 +205,7 @@ function check(name, ok, detail) {
     console.log('--- an identity that is active cannot be exported ---');
     await rowFor('Travel').locator('button[data-action="switch"]').click();
     await settle(900);
-    await rowFor('Travel').locator('button[data-action="export"]').click();
+    await menuClick(rowFor('Travel'), 'export');
     await frame.locator('#subExportPasswordInput').fill(PASSWORD);
     await frame.locator('#subExportCreateBtn').click();
     await settle(1500);

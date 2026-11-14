@@ -3920,17 +3920,60 @@ function identityRowElement(model) {
   row.className = 'identity-row' + (model.active ? ' active' : '');
   row.dataset.identityId = model.id || '';
 
+  const button = (action, text, cls) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = cls || 'btn-secondary';
+    b.dataset.action = action;
+    b.dataset.id = model.id || '';
+    b.textContent = text;
+    return b;
+  };
+
+  // Switching stays a visible button; the other actions sit behind the same "more actions" menu the item cards use.
+  // While Remove waits for its second click, the confirmation is shown outside the menu so it cannot be missed.
+  const menuItems = [];
+  if (!model.renaming) {
+    if (model.active && model.hasOthers) menuItems.push(button('move-all', 'Move everything\u2026'));
+    if (model.id) {
+      menuItems.push(button('rename', 'Rename'));
+      menuItems.push(button('export', 'Export\u2026'));
+      if (!model.confirmingRemove) menuItems.push(button('remove', 'Remove'));
+    }
+  }
+
   const head = document.createElement('div');
   head.className = 'identity-row-head';
+  const title = document.createElement('div');
+  title.className = 'identity-row-title';
   const name = document.createElement('span');
   name.className = 'identity-row-name';
   name.textContent = model.label;
-  head.appendChild(name);
+  title.appendChild(name);
   if (model.active) {
     const tag = document.createElement('span');
     tag.className = 'identity-row-tag';
     tag.textContent = 'Active';
-    head.appendChild(tag);
+    title.appendChild(tag);
+  }
+  head.appendChild(title);
+  if (menuItems.length) {
+    const menu = document.createElement('div');
+    menu.className = 'card-menu';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'link-btn card-menu-toggle';
+    toggle.dataset.action = 'toggle-identity-menu';
+    toggle.title = 'More actions';
+    toggle.setAttribute('aria-label', 'More actions for ' + model.label);
+    toggle.setAttribute('aria-haspopup', 'true');
+    toggle.textContent = '\u22ef';
+    const items = document.createElement('div');
+    items.className = 'card-menu-items';
+    menuItems.forEach((b) => items.appendChild(b));
+    menu.appendChild(toggle);
+    menu.appendChild(items);
+    head.appendChild(menu);
   }
   row.appendChild(head);
 
@@ -3941,17 +3984,6 @@ function identityRowElement(model) {
 
   const actions = document.createElement('div');
   actions.className = 'identity-row-actions';
-  const add = (action, text) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'btn-secondary';
-    b.dataset.action = action;
-    b.dataset.id = model.id || '';
-    b.textContent = text;
-    actions.appendChild(b);
-    return b;
-  };
-
   if (model.renaming) {
     const input = document.createElement('input');
     input.type = 'text';
@@ -3960,18 +3992,15 @@ function identityRowElement(model) {
     input.dataset.role = 'rename-input';
     input.setAttribute('aria-label', 'New name');
     row.appendChild(input);
-    add('rename-save', 'Save name');
-    add('rename-cancel', 'Cancel');
-  } else {
-    if (!model.active) add('switch', 'Switch to this identity');
-    if (model.active && model.hasOthers) add('move-all', 'Move everything\u2026');
-    if (model.id) {
-      add('rename', 'Rename');
-      add('export', 'Export\u2026');
-      add('remove', model.confirmingRemove ? 'Confirm remove' : 'Remove');
-    }
+    actions.appendChild(button('rename-save', 'Save name'));
+    actions.appendChild(button('rename-cancel', 'Cancel'));
+  } else if (model.confirmingRemove) {
+    actions.appendChild(button('remove', 'Confirm remove'));
+    actions.appendChild(button('remove-cancel', 'Cancel'));
+  } else if (!model.active) {
+    actions.appendChild(button('switch', 'Switch to this identity'));
   }
-  row.appendChild(actions);
+  if (actions.children.length) row.appendChild(actions);
   return row;
 }
 
@@ -4145,6 +4174,14 @@ identityListEl && identityListEl.addEventListener('click', async (e) => {
   if (!btn) return;
   const id = btn.dataset.id || null;
   const action = btn.dataset.action;
+  if (action === 'toggle-identity-menu') {
+    const menu = btn.parentElement.querySelector('.card-menu-items');
+    const opening = menu && !menu.classList.contains('show');
+    closeAllCardMenus();
+    if (opening && menu) menu.classList.add('show');
+    return;
+  }
+  closeAllCardMenus(); // an action was chosen: close the menu it came from
   if (action !== 'remove') confirmRemoveSubIdentityId = null;
   if (action === 'switch') {
     markSiteIdentityOverridden();
@@ -4157,6 +4194,9 @@ identityListEl && identityListEl.addEventListener('click', async (e) => {
     if (input) { input.focus(); input.select(); }
   } else if (action === 'rename-cancel') {
     renamingSubIdentityId = null;
+    await refreshSubIdentitiesDisplay();
+  } else if (action === 'remove-cancel') {
+    subIdentityStatusEl.textContent = '';
     await refreshSubIdentitiesDisplay();
   } else if (action === 'rename-save') {
     const input = btn.closest('.identity-row').querySelector('input[data-role="rename-input"]');
