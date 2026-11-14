@@ -3333,7 +3333,8 @@ function txnState(rec) {
   return n === 0 ? 'aborted' : 'inconsistent';
 }
 function txnRegister(rec) {
-  for (const s of rec.successors) holdingsNoteIssued(s.owner, { fungible: true, class: s.cls }, s.id, s.q);
+  // A record written before `f` existed describes a fungible successor.
+  for (const s of rec.successors) holdingsNoteIssued(s.owner, { fungible: s.f !== false, class: s.cls }, s.id, s.q);
 }
 // Completes a committed transaction. Every step is safe to repeat. The journal
 // entry is removed only after the replay record is stored.
@@ -3397,7 +3398,7 @@ async function commitReplacement(res, { requestId, op, predecessorIds, reason, p
     requestId: requestId || null,
     op, reason, params,
     predecessors: [...predecessorIds].sort(),
-    successors: successors.map((c) => ({ owner: c.owner.publicKey, cls: c.asset.class, id: c.id, q: c.quantity })),
+    successors: successors.map((c) => ({ owner: c.owner.publicKey, cls: c.asset.class, id: c.id, q: c.quantity, f: c.asset.fungible === true })),
     response,
     createdAt: new Date().toISOString()
   };
@@ -8468,7 +8469,7 @@ async function main() {
         return sendJson(res, 200, {
           requestIds: {
             version: 1,
-            operations: ['issue', 'issue-unique', 'split', 'consolidate', 'convert', 'purchase', 'trade-claim', 'trade-claim-remainder'],
+            operations: ['issue', 'issue-unique', 'split', 'consolidate', 'convert', 'purchase', 'trade-claim', 'trade-claim-remainder', 'transfer'],
             retentionHours: REPLAY_TTL_MS / 3600000
           }
         });
@@ -8556,7 +8557,8 @@ async function main() {
       // verifyEnvelope, same shape /atlas/trade/submit and
       // /atlas/world/drop already use for theirs.
       if (req.method === 'POST' && req.url === '/atlas/asset/transfer') {
-        const { credential, recipientPublicKey, intent } = JSON.parse((await readBody(req)) || '{}');
+        const transferBody = JSON.parse((await readBody(req)) || '{}');
+        const { credential, recipientPublicKey, intent } = transferBody;
         if (!credential || !recipientPublicKey || !intent) return sendJson(res, 400, { error: 'credential, recipientPublicKey, and intent are all required' });
         if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
         if (intent.payload.credentialId !== credential.id || intent.payload.recipientPublicKey !== recipientPublicKey || intent.payload.action !== 'transfer') {
@@ -8569,9 +8571,30 @@ async function main() {
 
         if (recipientPublicKey === senderPub) return sendJson(res, 400, { error: 'cannot transfer a credential to yourself' });
 
-        const problem = await checkPresentedGiftableAsset(credential, senderPub, credential.asset && credential.asset.class);
-        if (problem) return sendJson(res, 400, { error: problem });
+        // With a requestId the transfer is a replacement like a split: the signed result is journalled before
+        // the original is revoked and stored for a repeat, so an answer that never arrives can be asked for
+        // again. The intent must then name the requestId and nothing else beyond the three transfer fields.
+        const requestId = parseRequestId(transferBody);
+        if (requestId) {
+          const refusal = await ownerIntentProblem(transferBody, { action: 'transfer', credentialId: credential.id, recipientPublicKey, requestId }, [credential]);
+          if (refusal) return sendJson(res, 403, refusal);
+          if (await beginReplacement(res, requestId, 'transfer', [credential], { recipientPublicKey })) return;
+        }
 
+        const problem = await checkPresentedGiftableAsset(credential, senderPub, credential.asset && credential.asset.class);
+        if (problem) return sendJson(res, 400, spendProblemBody(problem, credential));
+
+        if (requestId) {
+          const received = await issueAsset(recipientPublicKey, credential.asset, credential.quantity, credential.id, true);
+          const transferResult = { status: 'transferred', credential: received };
+          await commitReplacement(res, {
+            requestId, op: 'transfer', predecessorIds: [credential.id], reason: 'transferred', params: { recipientPublicKey },
+            successors: [received], response: transferResult
+          });
+          archiveIfAudited(credential, 'transferred');
+          console.log('Transferred', credential.asset.class, credential.id, '->', recipientPublicKey.slice(0, 16) + '...');
+          return sendJson(res, 200, transferResult);
+        }
         const received = await transferUniqueAsset(recipientPublicKey, credential);
         revoke(credential.id, 'transferred');
         archiveIfAudited(credential, 'transferred');

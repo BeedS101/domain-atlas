@@ -528,6 +528,14 @@ rejection, the bound rejection, a non-owner's signature being rejected,
 self-transfers being rejected, and a mismatched intent being rejected
 without spending anything — on both issuers.
 
+A transfer may also carry a client-chosen requestId, and then repeats safely like a split: the intent must be
+exactly {action, credentialId, recipientPublicKey, requestId}, the signed result is journalled before the
+original is revoked and kept for the replay window, and sending the same request again returns the same
+credential instead of "asset already revoked". The same id with another recipient is refused (409). 'transfer'
+is listed by GET /atlas/capabilities only when transfer.php is the version that does this, so a wallet never
+repeats a transfer to an issuer that would make a second item. test/transfer-replay-integration.js covers
+it on this issuer; test/manual-sub-identity-move.js covers the Node issuer through the wallet.
+
 This is also what powers demo-domain-a/business-demo.html on the Node
 side — a standalone, extension-free page that issues a visitor a giftable
 demo coupon (atlas.demo.coupon) alongside a non-transferable badge, lets

@@ -577,11 +577,34 @@
      would otherwise show through) and its own left/right/top padding to
      visually line back up with #walletPanelContent's 16px inset below it. */
   #walletTabBar {
-    display: none; gap: 5px; padding: 16px 10px 10px;
+    display: none; flex-wrap: wrap; gap: 5px; padding: 16px 10px 10px;
     position: sticky; top: 0; z-index: 1;
     background: rgba(14,22,27,0.97); border-bottom: 1px solid #2c3c44;
   }
   #walletTabBar.visible { display: flex; }
+  /* Shown under the tabs while the wallet is acting as a sub-identity, so it is never unclear who is acting. */
+  .acting-as {
+    flex: 1 1 100%; box-sizing: border-box; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    margin-top: 2px; padding: 5px 8px; border: 1px solid #c9a227; border-radius: 6px;
+    background: rgba(201,162,39,0.12); font-size: 12px; color: #fff6ef;
+  }
+  .acting-as[hidden] { display: none; }
+  .acting-as .acting-as-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #walletTabBar .acting-as button { flex: 0 0 auto; font-size: 11px; padding: 2px 8px; }
+  .identity-row { border: 1px solid #2c3c44; border-radius: 8px; padding: 8px 10px; }
+  .identity-row.active { border-color: #4a90a4; background: rgba(74,144,164,0.10); }
+  .identity-row .identity-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .identity-row .identity-row-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .identity-row .identity-row-tag { font-size: 11px; color: #57a593; flex: 0 0 auto; }
+  .export-confirm-words { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+  .export-confirm-words label { flex: 1 1 90px; font-size: 12px; }
+  .export-confirm-words input { width: 100%; box-sizing: border-box; margin-top: 2px; }
+  .identity-row .identity-row-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .identity-row .card-menu-items button { font-size: 12px; padding: 4px 8px; margin-bottom: 4px; }
+  .identity-row .card-menu-items button:last-child { margin-bottom: 0; }
+  .identity-row .identity-row-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .identity-row .identity-row-actions button { flex: 1 1 auto; font-size: 12px; padding: 4px 8px; }
+  .identity-row input[type="text"] { width: 100%; box-sizing: border-box; margin-top: 6px; }
   #walletTabBar button { flex: 1 1 0; min-width: 0; padding-left: 4px; padding-right: 4px; font-size: 12px; }
   #walletTabBar button.active-tab { background: #1d2f38; border-color: #4a90a4; color: #fff6ef; }
 
@@ -1549,6 +1572,12 @@
       <button id="tradeTabBtn" type="button">Trade</button>
       <button id="characterTabBtn" type="button">Character</button>
       <button id="settingsTabBtn" type="button">Settings</button>
+      <!-- Visible while a sub-identity is the active identity, or while a world overlay is answering for a site (see refreshActingAsBadge). -->
+      <div id="actingAsBadge" class="acting-as" role="status" aria-live="polite" hidden>
+        <span class="acting-as-name"></span>
+        <button id="actingAsSiteBtn" type="button" class="btn-secondary" hidden>Use for this site</button>
+        <button id="actingAsBackBtn" type="button" class="btn-secondary">Back to main</button>
+      </div>
     </div>
 
     <div id="walletPanelContent">
@@ -1869,7 +1898,7 @@
         <button type="button" class="settings-category-toggle"><span>Identity sync</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
           <div id="identitySyncLocalSection">
-            <div class="empty-note">Keeps just your identity (not your wallet, mail, or other data) synced to your Chrome account, so a new device can recover it with just your password — no file to keep track of. The data still passes through Google's own sync infrastructure, encrypted; off by default.</div>
+            <div class="empty-note">Keeps just your identity and the keys of your sub-identities (not your wallet, mail, or other data) synced to your Chrome account, so a new device can recover it with just your password — no file to keep track of. The data still passes through Google's own sync infrastructure, encrypted; off by default.</div>
             <div id="identitySyncStatusLine" class="mono" style="margin-top:8px;">Off.</div>
             <div class="btn-col" style="margin-top:8px;">
               <button id="identitySyncEnableBtn" type="button">Turn on identity sync</button>
@@ -2052,6 +2081,94 @@
             <button id="copyIdentityKeyBtn" type="button" class="btn-secondary">Copy public key</button>
           </div>
           <div id="copyIdentityKeyStatus" class="mono" role="status" aria-live="polite"></div>
+
+          <!-- Extra identities under this login (wallet.js, sub-identities): one password unlocks them all, the
+               wallet shows only the selected identity's data, and names stay on this device. -->
+          <div id="subIdentitiesSection" style="margin-top:16px;">
+            <div class="subhead" style="margin:0 0 6px;">Identities</div>
+            <div class="empty-note" id="subIdentitiesIntro">Switch between identities under this login. Each has its own items, mail and contacts; only the selected one is shown.</div>
+            <div id="identityList" class="item-list"></div>
+            <div id="addSubIdentityForm">
+              <input type="text" id="newSubIdentityInput" placeholder="Name for a new identity" maxlength="40" style="margin-top:8px;">
+              <div class="btn-col">
+                <button id="addSubIdentityBtn" type="button" class="btn-secondary">Add identity</button>
+              </div>
+            </div>
+            <div id="subIdentityStatus" class="mono" role="status" aria-live="polite"></div>
+
+            <!-- Export moves one identity out of the wallet into a file. Step 1 makes the file and shows the
+                 code; step 2 removes the identity once the person confirms they have both. -->
+            <div id="subIdentityExportPanel" class="identity-row" hidden style="margin-top:10px;">
+              <div class="subhead" id="subIdentityExportTitle" style="margin:0 0 6px;">Export identity</div>
+              <div id="subIdentityExportStep1">
+                <div class="warn-box">Exporting <strong>moves</strong> this identity into a file and removes it from this wallet once you confirm. Backups made earlier still contain it, and changing your wallet password later will not change this file's password.</div>
+                <input type="password" id="subExportPasswordInput" placeholder="Your wallet password" autocomplete="off">
+                <label class="check-row"><input type="checkbox" id="subExportOtherPasswordCheck"><span>Use a different password for this file</span></label>
+                <input type="password" id="subExportFilePasswordInput" placeholder="Password for this file (8+ characters)" autocomplete="off" hidden>
+                <label class="check-row"><input type="checkbox" id="subExportIncludeDataCheck" checked><span>Include this identity's items, mail and contacts (otherwise only its key)</span></label>
+                <div class="btn-col">
+                  <button id="subExportCreateBtn" type="button">Create export file</button>
+                  <button id="subExportCancelBtn" type="button" class="btn-secondary">Cancel</button>
+                </div>
+              </div>
+              <div id="subIdentityExportStep2" hidden>
+                <div class="warn-box"><strong>Save the file and this export code now.</strong> The code is shown once and is not kept. Importing needs the file, its password and this code; without any one of them the identity cannot be recovered.</div>
+                <div id="subExportCodeText" class="mono" style="user-select:all; word-break:normal; overflow-wrap:break-word;"></div>
+                <div class="btn-col" style="margin-top:8px;">
+                  <button id="subExportCopyCodeBtn" type="button" class="btn-secondary">Copy code</button>
+                  <button id="subExportDownloadBtn" type="button" class="btn-secondary">Download file again</button>
+                </div>
+                <div id="subExportPasswordNote" class="empty-note" style="margin-top:6px;"></div>
+                <div class="empty-note" style="margin-top:8px;">To show you have the code, type these words from it (type them; pasting is not needed):</div>
+                <div id="subExportConfirmWords" class="export-confirm-words"></div>
+                <div id="subExportConfirmStatus" class="mono" role="status" aria-live="polite"></div>
+                <label class="check-row"><input type="checkbox" id="subExportSavedCheck"><span>I have saved the file</span></label>
+                <div class="btn-col">
+                  <button id="subExportFinishBtn" type="button" disabled>Finish and remove from this wallet</button>
+                  <button id="subExportKeepBtn" type="button" class="btn-secondary">Keep it in this wallet</button>
+                </div>
+              </div>
+              <div id="subIdentityExportStatus" class="mono" role="status" aria-live="polite"></div>
+            </div>
+
+            <!-- Moves everything an identity holds to another identity of this wallet, so it can be emptied
+                 before it is removed or exported without its items. The wallet acts as the source identity
+                 while the moves run. -->
+            <div id="subIdentityMovePanel" class="identity-row" hidden style="margin-top:10px;">
+              <div class="subhead" id="subIdentityMoveTitle" style="margin:0 0 6px;">Move everything</div>
+              <div id="subIdentityMoveSummary" class="empty-note"></div>
+              <label for="subIdentityMoveTarget" style="margin-top:6px;">Move to</label>
+              <select id="subIdentityMoveTarget"></select>
+              <div id="subIdentityMoveNote" class="warn-box" style="margin-top:6px;"></div>
+              <div class="btn-col">
+                <button id="subIdentityMoveGoBtn" type="button">Move everything</button>
+                <button id="subIdentityMoveCancelBtn" type="button" class="btn-secondary">Cancel</button>
+              </div>
+              <div id="subIdentityMoveStatus" class="mono" role="status" aria-live="polite"></div>
+            </div>
+
+            <!-- Which identity each remembered site answers as. A site is matched by its exact address. -->
+            <div id="siteIdentitiesPanel" style="margin-top:14px;">
+              <div class="subhead" style="margin:0 0 6px;">Site identities</div>
+              <div class="empty-note" id="siteIdentitiesIntro">Each site below answers as the identity shown, whichever identity this wallet is showing. A site that is not listed asks the first time it wants your wallet.</div>
+              <div id="siteIdentityList" class="item-list"></div>
+              <div id="siteIdentityStatus" class="mono" role="status" aria-live="polite"></div>
+            </div>
+
+            <!-- Import adds an exported identity (or an older identity export file) as a sub-identity. -->
+            <div id="importSubIdentityPanel" style="margin-top:14px;">
+              <div class="subhead" style="margin:0 0 6px;">Import an identity</div>
+              <div class="empty-note">Needs the export file, its password and the export code. The imported key becomes part of this wallet's future backups.</div>
+              <input type="file" id="subImportFileInput" accept="application/json">
+              <input type="password" id="subImportPasswordInput" placeholder="Password for the file" autocomplete="off">
+              <textarea id="subImportCodeInput" placeholder="Export code (all 16 words, space-separated)"></textarea>
+              <input type="text" id="subImportNameInput" placeholder="Name (optional, defaults to the file's name)" maxlength="40">
+              <div class="btn-col">
+                <button id="subImportBtn" type="button" class="btn-secondary">Import identity</button>
+              </div>
+              <div id="subImportStatus" class="mono" role="status" aria-live="polite"></div>
+            </div>
+          </div>
 
           <!-- Local-only nickname — see wallet.js's setAlias. Never signed,
                never shown to anyone else; just replaces the raw key in

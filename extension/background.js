@@ -101,7 +101,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const kind = message.kind;
     if (sender.frameId !== 0 || !origin || /^chrome-extension:/.test(origin) ||
         typeof message.token !== 'string' || message.token.length < 32 ||
-        (kind !== 'sign' && kind !== 'offer' && kind !== 'buy') ||
+        (kind !== 'sign' && kind !== 'offer' && kind !== 'buy' && kind !== 'identity') ||
         (kind === 'buy' && !(message.payload && typeof message.payload.domain === 'string' && /^[0-9a-f]{32}$/.test(String(message.payload.coinId))))) {
       sendResponse({ ok: false });
       return;
@@ -152,11 +152,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // ms later: the sender's message port had already closed by then. The
     // explicit callback form is the older, more conservative contract and
     // doesn't share that race.
-    AtlasWallet.getIdentity().then((identity) => {
-      sendResponse({ publicKey: identity ? identity.publicKey : null });
-    }).catch(() => {
-      sendResponse({ publicKey: null });
-    });
+    //
+    // The answer is the identity bound to the sender's exact origin, never the one the wallet window is
+    // showing. A site that still has to be asked gets no identity until the person chooses.
+    (async () => {
+      try {
+        const origin = senderOrigin(sender);
+        if (!origin || sender.frameId !== 0) { sendResponse({ publicKey: null }); return; }
+        const site = await AtlasWallet.getSiteIdentity(origin);
+        sendResponse({ publicKey: site.state === 'bound' || site.state === 'default' ? site.publicKey : null });
+      } catch (err) {
+        sendResponse({ publicKey: null });
+      }
+    })();
+    return true;
+  } else if (message && message.type === 'domain-atlas-bridge-site-identity') {
+    // Which identity answers this site: lets content.js open the first-contact prompt before anything else when
+    // the person still has to choose. Carries no key material.
+    (async () => {
+      try {
+        const origin = senderOrigin(sender);
+        if (!origin || sender.frameId !== 0) { sendResponse({ state: 'denied' }); return; }
+        const site = await AtlasWallet.getSiteIdentity(origin);
+        sendResponse({ state: site.state, publicKey: site.publicKey || null });
+      } catch (err) {
+        sendResponse({ state: 'denied' });
+      }
+    })();
     return true;
   } else if (message && message.type === 'domain-atlas-bridge-preview-dock') {
     // SPEC.md §3.8.5 — which screen corner the visitor docked the world
@@ -172,7 +194,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // asset.class against this page's own effective policy.walletBridge.
     // offer whitelist before ever sending this; this file's only job is
     // the one thing it has that content.js never could (AtlasWallet): is
-    // the sender's origin (as Chrome reports it) on the ACTIVE identity's
+    // the sender's origin (as Chrome reports it) on that site's identity's
     // own trusted-offer-domains list. {trusted:false} (no active identity, or this origin was never
     // trusted for it) tells content.js to fall through to the ordinary
     // confirmation overlay, unchanged from §3.8.2 — this is deliberately
@@ -188,8 +210,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const origin = senderOrigin(sender);
     (async () => {
       try {
-        const identity = await AtlasWallet.getIdentity();
-        if (!identity || !origin || sender.frameId !== 0) { sendResponse({ trusted: false }); return; }
+        // The site's own identity, not the one the wallet window is showing.
+        const site = origin && sender.frameId === 0 ? await AtlasWallet.getSiteIdentity(origin) : null;
+        const identity = site && (site.state === 'bound' || site.state === 'default') ? { publicKey: site.publicKey } : null;
+        if (!identity) { sendResponse({ trusted: false }); return; }
         const trusted = await AtlasWallet.isTrustedBridgeDomain(identity.publicKey, origin);
         if (!trusted) { sendResponse({ trusted: false }); return; }
         const entry = await AtlasWallet.queueBridgeOffer(identity.publicKey, origin, message.credential);

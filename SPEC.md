@@ -305,6 +305,8 @@ A `worlds[]` entry's `entry` field (§3) is now OPTIONAL. An entry with none dec
 
 A page with no `<link rel="spatial">` tag at all has no world-level override to check in the first place; only the domain-level `walletBridge` default applies, the same as any other §3.4.1 field resolves outside a world context.
 
+A client that holds more than one identity MAY answer each site with the identity the visitor chose for that site's exact origin instead of one global identity, asking the visitor before the first answer. The page still learns only a public key and cannot tell how it was chosen.
+
 A manifest grants wallet bridge access only to pages on its own origin. A page may link a manifest hosted on another origin for discovery (§3.5), but that domain has not authorised the page to use the wallet, so a client resolves every `walletBridge` capability to its hard default for such a page.
 
 ```json

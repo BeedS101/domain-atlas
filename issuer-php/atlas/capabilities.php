@@ -24,6 +24,7 @@ if ($has('asset/consolidate.php', 'atlas_require_owner_intent')) $operations[] =
 if ($has('convert.php', 'atlas_require_owner_intent')) $operations[] = 'convert';
 if ($has('asset/purchase.php', "'purchase', [\$credential]")) $operations[] = 'purchase';
 if ($has('asset/open-chest.php', 'atlas_commit_replacement')) $operations[] = 'open-chest';
+if ($has('asset/transfer.php', 'atlas_commit_replacement')) $operations[] = 'transfer';
 if ($has('trade/claim.php', 'atlas_store_claim_outcome')) $operations[] = 'trade-claim';
 if ($has('trade/claim.php', "'remainder' => \$bRemainder, 'code' => 'claim-incomplete'")) $operations[] = 'trade-claim-remainder';
 

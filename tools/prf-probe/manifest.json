@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Domain Atlas PRF probe (disposable)",
+  "version": "0.0.1",
+  "description": "Checks whether this browser and authenticator support the WebAuthn PRF extension from an extension page. Stores nothing, touches no wallet, contacts no site.",
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Open the PRF probe" }
+}

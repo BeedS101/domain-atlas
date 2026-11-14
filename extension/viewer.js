@@ -3813,10 +3813,13 @@ copyIdentityKeyBtn && copyIdentityKeyBtn.addEventListener('click', async () => {
 });
 
 async function refreshIdentityDisplay() {
+  await followSiteIdentityOnAccountChange();
   const identity = await AtlasWallet.getIdentity();
   const alias = identity ? await AtlasWallet.getAlias(identity.publicKey) : null;
+  const activeInfo = identity ? await AtlasWallet.getActiveIdentityInfo().catch(() => null) : null;
+  const subLabel = activeInfo && activeInfo.kind === 'sub' ? activeInfo.label : null;
   walletIdentityEl.textContent = identity
-    ? (alias ? alias + ' · ' : 'Identity: ') + short(identity.publicKey, 28)
+    ? (alias ? alias + ' · ' : subLabel ? subLabel + ' · ' : 'Identity: ') + short(identity.publicKey, 28)
     : 'Locked.';
   // Reflects whichever identity is active right now — switching identity
   // mode or unlocking a different one re-runs this and repopulates the
@@ -3827,7 +3830,770 @@ async function refreshIdentityDisplay() {
   await refreshIdentityModeControls();
   await refreshQuickLockButtonVisibility();
   await refreshAdminButtonVisibility();
+  await refreshActingAsBadge();
+  await refreshSubIdentitiesDisplay();
 }
+
+// ---------- sub-identities (Wallet -> Identity -> Identities) ----------
+
+const actingAsBadgeEl = document.getElementById('actingAsBadge');
+const actingAsBackBtn = document.getElementById('actingAsBackBtn');
+const actingAsSiteBtn = document.getElementById('actingAsSiteBtn');
+const subIdentitiesSectionEl = document.getElementById('subIdentitiesSection');
+const subIdentitiesIntroEl = document.getElementById('subIdentitiesIntro');
+const identityListEl = document.getElementById('identityList');
+const addSubIdentityFormEl = document.getElementById('addSubIdentityForm');
+const newSubIdentityInput = document.getElementById('newSubIdentityInput');
+const addSubIdentityBtn = document.getElementById('addSubIdentityBtn');
+const subIdentityStatusEl = document.getElementById('subIdentityStatus');
+
+// The row being renamed and the row waiting for a second click to confirm removal. Both are only view state.
+let renamingSubIdentityId = null;
+let confirmRemoveSubIdentityId = null;
+
+// In the in-page world overlay the site is the embedding page's origin, read from the browser rather than from
+// the address (which a page could write). Standalone pages and the side panel have no embedding page.
+const overlayHostOrigin = (() => {
+  try {
+    const parent = location.ancestorOrigins && location.ancestorOrigins.length ? location.ancestorOrigins[0] : '';
+    return /^https?:\/\//.test(parent) ? parent : null;
+  } catch (err) { return null; }
+})();
+// { origin, state: 'bound' | 'ask' | 'default' | 'overridden', label } for the overlay; null elsewhere.
+let overlaySiteIdentity = null;
+let overlaySiteAccountKey = null;
+
+// Pins this overlay to the identity its site is bound to, so the world and the wallet inside it act as the same
+// identity the site's own requests get. A site with no binding follows the selected identity.
+async function applySiteIdentity() {
+  if (!overlayHostOrigin) return;
+  try {
+    overlaySiteIdentity = Object.assign({ origin: overlayHostOrigin }, await AtlasWallet.followSiteIdentity(overlayHostOrigin));
+  } catch (err) {
+    overlaySiteIdentity = null;
+  }
+}
+
+// Called wherever the identity display is refreshed: re-applies the site identity when the account changes
+// (first unlock, a restore, lock then unlock), and leaves an identity the person chose in this overlay alone.
+async function followSiteIdentityOnAccountChange() {
+  if (!overlayHostOrigin) return;
+  let account = null;
+  try { account = await AtlasWallet.getAccountIdentity(); } catch (err) { /* locked */ }
+  const key = account ? account.publicKey : null;
+  if (key === overlaySiteAccountKey) {
+    // Sub-identities may have been added since the site was looked up: a site with none had nothing to ask about.
+    if (key && overlaySiteIdentity && (overlaySiteIdentity.state === 'default' || overlaySiteIdentity.state === 'ask')) await applySiteIdentity();
+    return;
+  }
+  overlaySiteAccountKey = key;
+  if (key) await applySiteIdentity();
+}
+
+function markSiteIdentityOverridden() {
+  if (overlayHostOrigin && overlaySiteIdentity && overlaySiteIdentity.state === 'bound') {
+    overlaySiteIdentity = { origin: overlayHostOrigin, state: 'overridden' };
+  }
+}
+
+async function refreshActingAsBadge() {
+  if (!actingAsBadgeEl) return;
+  let info = null;
+  try { info = await AtlasWallet.getActiveIdentityInfo(); } catch (err) { /* locked */ }
+  const site = overlaySiteIdentity;
+  const bound = !!(site && site.state === 'bound');
+  const sub = !!(info && info.kind === 'sub');
+  // The main identity on a site with no binding is the ordinary case and shows nothing, as before.
+  const show = !!info && (sub || bound || !!(site && site.state === 'overridden'));
+  const choosing = show && !bound && !!(site && (site.state === 'ask' || site.state === 'overridden'));
+  actingAsBadgeEl.hidden = !show;
+  if (!show) return;
+  const name = info.kind === 'sub' ? info.label : 'Main identity';
+  const host = bound ? ' for ' + overlayHostOrigin.replace(/^https?:\/\//, '') : '';
+  actingAsBadgeEl.querySelector('.acting-as-name').textContent = 'Acting as ' + (bound ? site.label : name) + host;
+  if (actingAsSiteBtn) actingAsSiteBtn.hidden = !choosing;
+  if (actingAsBackBtn) actingAsBackBtn.hidden = bound || !sub;
+}
+
+function identityRowElement(model) {
+  const row = document.createElement('div');
+  row.className = 'identity-row' + (model.active ? ' active' : '');
+  row.dataset.identityId = model.id || '';
+
+  const button = (action, text, cls) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = cls || 'btn-secondary';
+    b.dataset.action = action;
+    b.dataset.id = model.id || '';
+    b.textContent = text;
+    return b;
+  };
+
+  // Switching stays a visible button; the other actions sit behind the same "more actions" menu the item cards use.
+  // While Remove waits for its second click, the confirmation is shown outside the menu so it cannot be missed.
+  const menuItems = [];
+  if (!model.renaming) {
+    if (model.active && model.hasOthers) menuItems.push(button('move-all', 'Move everything\u2026'));
+    if (model.id) {
+      menuItems.push(button('rename', 'Rename'));
+      menuItems.push(button('export', 'Export\u2026'));
+      if (!model.confirmingRemove) menuItems.push(button('remove', 'Remove'));
+    }
+  }
+
+  const head = document.createElement('div');
+  head.className = 'identity-row-head';
+  const title = document.createElement('div');
+  title.className = 'identity-row-title';
+  const name = document.createElement('span');
+  name.className = 'identity-row-name';
+  name.textContent = model.label;
+  title.appendChild(name);
+  if (model.active) {
+    const tag = document.createElement('span');
+    tag.className = 'identity-row-tag';
+    tag.textContent = 'Active';
+    title.appendChild(tag);
+  }
+  head.appendChild(title);
+  if (menuItems.length) {
+    const menu = document.createElement('div');
+    menu.className = 'card-menu';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'link-btn card-menu-toggle';
+    toggle.dataset.action = 'toggle-identity-menu';
+    toggle.title = 'More actions';
+    toggle.setAttribute('aria-label', 'More actions for ' + model.label);
+    toggle.setAttribute('aria-haspopup', 'true');
+    toggle.textContent = '\u22ef';
+    const items = document.createElement('div');
+    items.className = 'card-menu-items';
+    menuItems.forEach((b) => items.appendChild(b));
+    menu.appendChild(toggle);
+    menu.appendChild(items);
+    head.appendChild(menu);
+  }
+  row.appendChild(head);
+
+  const key = document.createElement('div');
+  key.className = 'mono';
+  key.textContent = short(model.publicKey, 24);
+  row.appendChild(key);
+
+  const actions = document.createElement('div');
+  actions.className = 'identity-row-actions';
+  if (model.renaming) {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.maxLength = 40;
+    input.value = model.label;
+    input.dataset.role = 'rename-input';
+    input.setAttribute('aria-label', 'New name');
+    row.appendChild(input);
+    actions.appendChild(button('rename-save', 'Save name'));
+    actions.appendChild(button('rename-cancel', 'Cancel'));
+  } else if (model.confirmingRemove) {
+    actions.appendChild(button('remove', 'Confirm remove'));
+    actions.appendChild(button('remove-cancel', 'Cancel'));
+  } else if (!model.active) {
+    actions.appendChild(button('switch', 'Switch to this identity'));
+  }
+  if (actions.children.length) row.appendChild(actions);
+  return row;
+}
+
+async function refreshSubIdentitiesDisplay() {
+  if (!subIdentitiesSectionEl) return;
+  const account = await AtlasWallet.getAccountIdentity();
+  subIdentitiesSectionEl.hidden = !account;
+  if (!account) return;
+  if (account.mode !== 'local') {
+    subIdentitiesIntroEl.textContent = 'Extra identities need a password identity for now.';
+    identityListEl.innerHTML = '';
+    addSubIdentityFormEl.hidden = true;
+    return;
+  }
+  subIdentitiesIntroEl.textContent = 'Switch between identities under this login. Each has its own items, mail and contacts; only the selected one is shown.';
+  addSubIdentityFormEl.hidden = false;
+  let subs;
+  try {
+    subs = await AtlasWallet.listSubIdentities();
+  } catch (err) {
+    identityListEl.innerHTML = '';
+    subIdentityStatusEl.textContent = err.message;
+    return;
+  }
+  await refreshSiteIdentitiesDisplay(account, subs);
+  const mainActive = !subs.some((e) => e.active);
+  identityListEl.innerHTML = '';
+  identityListEl.appendChild(identityRowElement({ id: '', label: 'Main identity', publicKey: account.publicKey, active: mainActive, hasOthers: subs.length > 0 }));
+  subs.forEach((e) => identityListEl.appendChild(identityRowElement({
+    id: e.id, label: e.label, publicKey: e.publicKey, active: e.active, hasOthers: true,
+    renaming: renamingSubIdentityId === e.id, confirmingRemove: confirmRemoveSubIdentityId === e.id
+  })));
+}
+
+// ---------- site identities (Wallet -> Identity -> Site identities) ----------
+
+const siteIdentityListEl = document.getElementById('siteIdentityList');
+const siteIdentityStatusEl = document.getElementById('siteIdentityStatus');
+
+async function refreshSiteIdentitiesDisplay(account, subs) {
+  if (!siteIdentityListEl) return;
+  let sites = [];
+  try { sites = await AtlasWallet.listSiteIdentities(); } catch (err) { sites = []; }
+  siteIdentityListEl.innerHTML = '';
+  if (!sites.length) {
+    const none = document.createElement('div');
+    none.className = 'empty-note';
+    none.id = 'siteIdentityEmpty';
+    none.textContent = 'No sites are remembered yet.';
+    siteIdentityListEl.appendChild(none);
+    return;
+  }
+  const choices = [{ publicKey: account.publicKey, label: 'Main identity' }].concat(subs.map((e) => ({ publicKey: e.publicKey, label: e.label })));
+  sites.forEach((site) => {
+    const row = document.createElement('div');
+    row.className = 'identity-row';
+    row.dataset.origin = site.origin;
+    const name = document.createElement('div');
+    name.className = 'identity-row-name mono';
+    name.textContent = site.origin;
+    row.appendChild(name);
+    const select = document.createElement('select');
+    select.dataset.role = 'site-identity-select';
+    select.setAttribute('aria-label', 'Identity for ' + site.origin);
+    choices.forEach((c) => {
+      const o = document.createElement('option');
+      o.value = c.publicKey;
+      o.textContent = c.label;
+      if (c.publicKey === site.publicKey) o.selected = true;
+      select.appendChild(o);
+    });
+    row.appendChild(select);
+    const actions = document.createElement('div');
+    actions.className = 'identity-row-actions';
+    const forget = document.createElement('button');
+    forget.type = 'button';
+    forget.className = 'btn-secondary';
+    forget.dataset.action = 'forget-site';
+    forget.textContent = 'Forget this site';
+    actions.appendChild(forget);
+    row.appendChild(actions);
+    siteIdentityListEl.appendChild(row);
+  });
+}
+
+async function runSiteIdentityAction(fn, okMessage) {
+  siteIdentityStatusEl.textContent = '';
+  try {
+    await fn();
+    if (okMessage) siteIdentityStatusEl.textContent = okMessage;
+  } catch (err) {
+    siteIdentityStatusEl.textContent = err.message;
+  }
+  // The overlay answers for its own site, so a change to that site's binding applies to it straight away.
+  if (overlayHostOrigin) { await applySiteIdentity(); await refreshActingAsBadge(); }
+  await refreshSubIdentitiesDisplay();
+}
+
+siteIdentityListEl && siteIdentityListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-action="forget-site"]');
+  if (!btn) return;
+  const origin = btn.closest('.identity-row').dataset.origin;
+  await runSiteIdentityAction(() => AtlasWallet.forgetSiteIdentity(origin), 'Forgot ' + origin + '. It will ask again next time.');
+});
+
+siteIdentityListEl && siteIdentityListEl.addEventListener('change', async (e) => {
+  const select = e.target.closest('select[data-role="site-identity-select"]');
+  if (!select) return;
+  const origin = select.closest('.identity-row').dataset.origin;
+  await runSiteIdentityAction(() => AtlasWallet.setSiteIdentity(origin, select.value, { remember: true }), 'Saved for ' + origin + '.');
+});
+
+async function runSubIdentityAction(fn, okMessage) {
+  subIdentityStatusEl.textContent = '';
+  try {
+    await fn();
+    if (okMessage) subIdentityStatusEl.textContent = okMessage;
+  } catch (err) {
+    subIdentityStatusEl.textContent = err.message;
+  }
+  await followSiteIdentityOnAccountChange();
+  await refreshActingAsBadge();
+  await refreshSubIdentitiesDisplay();
+  await refreshViewsIfActingIdentityChanged();
+}
+
+// The views that hold per-identity data are redrawn by the session-storage listener when the selection changes. A page pinned to
+// a site's identity can change who it acts as without that value changing, so the switch handlers check the acting identity
+// themselves and redraw when it differs from the one last drawn.
+let lastDrawnActingKey = null; // set by refreshInventoryDisplay() to the identity it last drew
+
+// Social and Trade draw their data when opened, so one that is already open when the identity changes (from another extension
+// page, say) is drawn again for the new identity. The Wallet screen's own views are redrawn by the callers.
+async function refreshOpenScreenForIdentity() {
+  const on = (el) => !!(el && el.classList.contains('active'));
+  try {
+    if (on(document.getElementById('tradeScreen'))) {
+      await refreshTradingStationJoinButton();
+      await refreshRemoteTradeStationOptions();
+      await refreshTradingBuyList();
+      await refreshTradingSellOfferOptions();
+      await refreshTradingSellWantOptions();
+      await refreshTradingListingsList();
+      await refreshConvertOptions();
+    } else if (on(document.getElementById('socialScreen'))) {
+      if (on(contactsSubscreen)) await refreshFriendsDisplay();
+      else if (on(favoritesSubscreen)) await refreshFavoritesDisplay();
+      else if (on(calendarSubscreen)) await refreshCalendarDisplay();
+      else {
+        await refreshSubscribeButton();
+        await refreshPostOfficeJoinButton();
+        await refreshMyPublicKeyDisplay();
+      }
+    }
+  } catch (err) { /* the screen is drawn again the next time it is opened */ }
+}
+
+async function refreshViewsIfActingIdentityChanged() {
+  const acting = await AtlasWallet.getIdentity();
+  const key = acting ? acting.publicKey : null;
+  if (key === lastDrawnActingKey) return;
+  if (window.AtlasChainLabsTab) AtlasChainLabsTab.identityChanged().catch(() => {});
+  await refreshInventoryDisplay();
+  await refreshMailDisplay();
+  await refreshMessagingDisplay();
+  await refreshOpenScreenForIdentity();
+}
+
+identityListEl && identityListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) return;
+  const id = btn.dataset.id || null;
+  const action = btn.dataset.action;
+  if (action === 'toggle-identity-menu') {
+    const menu = btn.parentElement.querySelector('.card-menu-items');
+    const opening = menu && !menu.classList.contains('show');
+    closeAllCardMenus();
+    if (opening && menu) menu.classList.add('show');
+    return;
+  }
+  closeAllCardMenus(); // an action was chosen: close the menu it came from
+  if (action !== 'remove') confirmRemoveSubIdentityId = null;
+  if (action === 'switch') {
+    markSiteIdentityOverridden();
+    await runSubIdentityAction(() => AtlasWallet.switchIdentity(id));
+  } else if (action === 'rename') {
+    renamingSubIdentityId = id;
+    subIdentityStatusEl.textContent = '';
+    await refreshSubIdentitiesDisplay();
+    const input = identityListEl.querySelector('input[data-role="rename-input"]');
+    if (input) { input.focus(); input.select(); }
+  } else if (action === 'rename-cancel') {
+    renamingSubIdentityId = null;
+    await refreshSubIdentitiesDisplay();
+  } else if (action === 'remove-cancel') {
+    subIdentityStatusEl.textContent = '';
+    await refreshSubIdentitiesDisplay();
+  } else if (action === 'rename-save') {
+    const input = btn.closest('.identity-row').querySelector('input[data-role="rename-input"]');
+    const name = input ? input.value : '';
+    await runSubIdentityAction(async () => {
+      await AtlasWallet.renameSubIdentity(id, name);
+      renamingSubIdentityId = null;
+    }, 'Renamed.');
+  } else if (action === 'export') {
+    openSubIdentityExportPanel(id, btn.closest('.identity-row'));
+  } else if (action === 'move-all') {
+    await openSubIdentityMovePanel(id, btn.closest('.identity-row'), false);
+  } else if (action === 'remove') {
+    if (subExportPrepared && subExportTarget && subExportTarget.id === id) {
+      subIdentityStatusEl.textContent = 'This identity is being exported. Finish or keep it in the Export box first; removing it now would lose the export code.';
+      return;
+    }
+    if (confirmRemoveSubIdentityId !== id) {
+      // An identity that still holds items cannot be removed without losing them, so the move comes first.
+      let holdings = null;
+      try { holdings = await AtlasWallet.getSubIdentityHoldings(id); } catch (err) { /* the remove itself reports it */ }
+      if (holdings && holdings.state === 'held') {
+        await openSubIdentityMovePanel(id, btn.closest('.identity-row'), true);
+        return;
+      }
+      confirmRemoveSubIdentityId = id;
+      subIdentityStatusEl.textContent = 'Removing deletes this identity\u2019s key from this wallet. Press Confirm remove to continue.';
+      await refreshSubIdentitiesDisplay();
+    } else {
+      confirmRemoveSubIdentityId = null;
+      await runSubIdentityAction(() => AtlasWallet.removeSubIdentity(id), 'Removed.');
+      if (subMoveSource && subMoveSource.id === id) closeSubIdentityMovePanel();
+    }
+  }
+});
+
+identityListEl && identityListEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || !e.target.matches('input[data-role="rename-input"]')) return;
+  e.preventDefault();
+  const save = e.target.closest('.identity-row').querySelector('button[data-action="rename-save"]');
+  if (save) save.click();
+});
+
+async function addSubIdentityFromInput() {
+  const name = newSubIdentityInput.value;
+  await runSubIdentityAction(async () => {
+    const created = await AtlasWallet.createSubIdentity(name);
+    newSubIdentityInput.value = '';
+    subIdentityStatusEl.textContent = 'Added ' + created.label + '.';
+  });
+}
+addSubIdentityBtn && addSubIdentityBtn.addEventListener('click', addSubIdentityFromInput);
+newSubIdentityInput && newSubIdentityInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); addSubIdentityFromInput(); }
+});
+actingAsBackBtn && actingAsBackBtn.addEventListener('click', () => { markSiteIdentityOverridden(); return runSubIdentityAction(() => AtlasWallet.switchIdentity(null)); });
+actingAsSiteBtn && actingAsSiteBtn.addEventListener('click', async () => {
+  try {
+    const me = await AtlasWallet.getIdentity();
+    await AtlasWallet.setSiteIdentity(overlayHostOrigin, me.publicKey, { remember: true });
+    await applySiteIdentity();
+  } catch (err) {
+    subIdentityStatusEl.textContent = err.message;
+  }
+  await refreshActingAsBadge();
+  await refreshSubIdentitiesDisplay();
+});
+
+// ---------- moving everything out of one identity ----------
+//
+// Opened from "Move everything..." on the identity the wallet is acting as, and by Remove on an identity that
+// still holds items. The wallet acts as the source identity while the moves run (a move is signed by the
+// holder), so a source that is not active is switched to first.
+const subMovePanelEl = document.getElementById('subIdentityMovePanel');
+const subMoveTitleEl = document.getElementById('subIdentityMoveTitle');
+const subMoveSummaryEl = document.getElementById('subIdentityMoveSummary');
+const subMoveTargetEl = document.getElementById('subIdentityMoveTarget');
+const subMoveNoteEl = document.getElementById('subIdentityMoveNote');
+const subMoveGoBtn = document.getElementById('subIdentityMoveGoBtn');
+const subMoveCancelBtn = document.getElementById('subIdentityMoveCancelBtn');
+const subMoveStatusEl = document.getElementById('subIdentityMoveStatus');
+
+// { id, label, thenRemove } while the panel is open.
+let subMoveSource = null;
+
+function closeSubIdentityMovePanel() {
+  subMoveSource = null;
+  subMovePanelEl.hidden = true;
+  subMoveStatusEl.textContent = '';
+}
+
+function describeHoldings(h) {
+  const parts = [];
+  if (h.items) parts.push(h.items + (h.items === 1 ? ' item' : ' items'));
+  if (h.balances) parts.push(h.balances + (h.balances === 1 ? ' balance' : ' balances'));
+  return parts.length ? parts.join(' and ') : 'nothing that can be moved';
+}
+
+async function openSubIdentityMovePanel(id, rowEl, thenRemove) {
+  closeSubIdentityMovePanel();
+  const account = await AtlasWallet.getAccountIdentity();
+  const subs = await AtlasWallet.listSubIdentities();
+  const active = subs.find((e) => e.active) || null;
+  const nameEl = rowEl && rowEl.querySelector('.identity-row-name');
+  const label = nameEl ? nameEl.textContent : 'this identity';
+  const sourceKey = id ? (subs.find((e) => e.id === id) || {}).publicKey : account.publicKey;
+  let holdings;
+  try {
+    holdings = id ? await AtlasWallet.getSubIdentityHoldings(id) : await AtlasWallet.getMoveEverythingPlan();
+  } catch (err) {
+    subIdentityStatusEl.textContent = err.message;
+    return;
+  }
+  const targets = [{ label: 'Main identity', publicKey: account.publicKey }].concat(subs.map((e) => ({ label: e.label, publicKey: e.publicKey })))
+    .filter((t) => t.publicKey !== sourceKey);
+  subMoveSource = { id, label, publicKey: sourceKey, thenRemove: !!thenRemove };
+  subMoveTitleEl.textContent = 'Move everything out of ' + label;
+  subMoveSummaryEl.textContent = label + ' holds ' + describeHoldings(holdings) + '.'
+    + (holdings.bound ? ' ' + holdings.bound + ' bound to it cannot be moved.' : '')
+    + (holdings.heldBack ? ' ' + holdings.heldBack + ' are waiting on unfinished work and are left for now.' : '');
+  subMoveTargetEl.innerHTML = '';
+  targets.forEach((t) => {
+    const o = document.createElement('option');
+    o.value = t.publicKey;
+    o.textContent = t.label;
+    subMoveTargetEl.appendChild(o);
+  });
+  const isActive = id ? !!(active && active.id === id) : !active;
+  subMoveNoteEl.textContent = (isActive ? '' : 'The wallet switches to ' + label + ' while this runs, because a move is signed by the identity that holds the item. ')
+    + 'Each item moves through its issuer, so this needs the issuers to be reachable. Items that cannot move are listed and stay where they are.'
+    + (thenRemove ? ' When everything has moved you can remove ' + label + '.' : '');
+  subMoveGoBtn.textContent = thenRemove ? 'Move everything, then remove' : 'Move everything';
+  subMoveGoBtn.disabled = !targets.length || (!holdings.items && !holdings.balances);
+  subMovePanelEl.hidden = false;
+  subMoveTargetEl.focus();
+}
+
+subMoveCancelBtn && subMoveCancelBtn.addEventListener('click', closeSubIdentityMovePanel);
+
+subMoveGoBtn && subMoveGoBtn.addEventListener('click', async () => {
+  if (!subMoveSource) return;
+  const source = subMoveSource;
+  subMoveGoBtn.disabled = true;
+  subMoveStatusEl.textContent = 'Starting\u2026';
+  try {
+    if (source.id) {
+      const info = await AtlasWallet.getActiveIdentityInfo();
+      if (!info || info.id !== source.id) { markSiteIdentityOverridden(); await AtlasWallet.switchIdentity(source.id); }
+    }
+    const result = await AtlasWallet.moveEverythingToIdentity(subMoveTargetEl.value, (done, total) => {
+      subMoveStatusEl.textContent = 'Moved ' + done + ' of ' + total + '\u2026';
+    }, source.publicKey);
+    const lines = ['Moved ' + result.moved.items + (result.moved.items === 1 ? ' item' : ' items') + ' and ' + result.moved.balances + (result.moved.balances === 1 ? ' balance' : ' balances') + ' to ' + result.to.label + '.'];
+    result.failed.forEach((f) => lines.push('Could not move ' + f.name + ': ' + f.reason));
+    result.left.forEach((f) => lines.push('Left ' + f.name + ': ' + f.reason));
+    subMoveStatusEl.textContent = lines.join('\n');
+    subMoveStatusEl.style.whiteSpace = 'pre-wrap';
+    await refreshActingAsBadge();
+    await refreshInventoryDisplay();
+    if (source.thenRemove && !result.failed.length && !result.left.length && source.id) {
+      confirmRemoveSubIdentityId = source.id;
+      subIdentityStatusEl.textContent = 'Everything was moved. Press Confirm remove to remove ' + source.label + '.';
+    }
+    await refreshSubIdentitiesDisplay();
+  } catch (err) {
+    subMoveStatusEl.textContent = err.message;
+  } finally {
+    subMoveGoBtn.disabled = false;
+  }
+});
+
+// ---------- exporting one identity ----------
+//
+// The panel is separate from the identity list, which is rebuilt whenever the wallet changes, so what the
+// person has typed is not lost. The export code lives only in this state and is cleared when the panel closes.
+
+const subExportPanelEl = document.getElementById('subIdentityExportPanel');
+const subExportTitleEl = document.getElementById('subIdentityExportTitle');
+const subExportStep1El = document.getElementById('subIdentityExportStep1');
+const subExportStep2El = document.getElementById('subIdentityExportStep2');
+const subExportPasswordInput = document.getElementById('subExportPasswordInput');
+const subExportOtherPasswordCheck = document.getElementById('subExportOtherPasswordCheck');
+const subExportFilePasswordInput = document.getElementById('subExportFilePasswordInput');
+const subExportIncludeDataCheck = document.getElementById('subExportIncludeDataCheck');
+const subExportCreateBtn = document.getElementById('subExportCreateBtn');
+const subExportCancelBtn = document.getElementById('subExportCancelBtn');
+const subExportCodeText = document.getElementById('subExportCodeText');
+const subExportCopyCodeBtn = document.getElementById('subExportCopyCodeBtn');
+const subExportDownloadBtn = document.getElementById('subExportDownloadBtn');
+const subExportPasswordNote = document.getElementById('subExportPasswordNote');
+const subExportSavedCheck = document.getElementById('subExportSavedCheck');
+const subExportConfirmWordsEl = document.getElementById('subExportConfirmWords');
+const subExportConfirmStatusEl = document.getElementById('subExportConfirmStatus');
+const subExportFinishBtn = document.getElementById('subExportFinishBtn');
+const subExportKeepBtn = document.getElementById('subExportKeepBtn');
+const subExportStatusEl = document.getElementById('subIdentityExportStatus');
+
+// { id, label } while the panel is open for an identity; prepared = the result of prepareSubIdentityExport.
+let subExportTarget = null;
+let subExportPrepared = null;
+
+function downloadJsonFile(data, filename) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Removing the identity waits until the person has typed back three words of the export code, chosen at random, so an
+// identity cannot be removed by someone who never saw or kept the code. Finish also needs the file to be marked as saved.
+let subExportConfirmWords = []; // [{ position (1-based), word, input }]
+
+function subExportProofDone() {
+  return subExportConfirmWords.length > 0 && subExportConfirmWords.every((w) => w.input.value.trim().toLowerCase() === w.word);
+}
+
+function updateSubExportFinishState() {
+  const proven = subExportProofDone();
+  const typed = subExportConfirmWords.filter((w) => w.input.value.trim() !== '').length;
+  subExportConfirmStatusEl.textContent = !subExportConfirmWords.length ? ''
+    : proven ? 'These words match the code.'
+    : typed === subExportConfirmWords.length ? 'One or more words do not match the code. Check what you saved.' : '';
+  subExportFinishBtn.disabled = !(subExportSavedCheck.checked && proven);
+}
+
+function buildSubExportProof(code) {
+  const words = String(code).trim().toLowerCase().split(/\s+/);
+  const picked = new Set();
+  const buf = new Uint32Array(32);
+  crypto.getRandomValues(buf);
+  for (let i = 0; picked.size < Math.min(3, words.length) && i < buf.length; i++) picked.add(buf[i] % words.length);
+  subExportConfirmWords = [...picked].sort((a, b) => a - b).map((index) => ({ position: index + 1, word: words[index], input: null }));
+  subExportConfirmWordsEl.textContent = '';
+  subExportConfirmWords.forEach((w) => {
+    const label = document.createElement('label');
+    label.textContent = 'Word ' + w.position;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.setAttribute('autocapitalize', 'off');
+    input.setAttribute('aria-label', 'Word ' + w.position + ' of the export code');
+    input.addEventListener('input', updateSubExportFinishState);
+    label.appendChild(input);
+    subExportConfirmWordsEl.appendChild(label);
+    w.input = input;
+  });
+  updateSubExportFinishState();
+}
+
+function closeSubIdentityExportPanel() {
+  subExportConfirmWords = [];
+  subExportConfirmWordsEl.textContent = '';
+  subExportConfirmStatusEl.textContent = '';
+  subExportTarget = null;
+  subExportPrepared = null;
+  subExportPanelEl.hidden = true;
+  subExportStep1El.hidden = false;
+  subExportStep2El.hidden = true;
+  subExportPasswordInput.value = '';
+  subExportFilePasswordInput.value = '';
+  subExportFilePasswordInput.hidden = true;
+  subExportOtherPasswordCheck.checked = false;
+  subExportIncludeDataCheck.checked = true;
+  subExportCodeText.textContent = '';
+  subExportSavedCheck.checked = false;
+  subExportFinishBtn.disabled = true;
+  subExportStatusEl.textContent = '';
+}
+
+function openSubIdentityExportPanel(id, rowEl) {
+  closeSubIdentityExportPanel();
+  const nameEl = rowEl && rowEl.querySelector('.identity-row-name');
+  subExportTarget = { id, label: nameEl ? nameEl.textContent : 'identity' };
+  subExportTitleEl.textContent = 'Export ' + subExportTarget.label;
+  subExportPanelEl.hidden = false;
+  subExportPasswordInput.focus();
+  scrollSubExportPanelIntoView();
+}
+
+// The panel sits below the identity list, so it is brought into view when it opens and when the code appears.
+function scrollSubExportPanelIntoView() {
+  try { subExportPanelEl.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (err) { /* cosmetic */ }
+}
+
+subExportOtherPasswordCheck && subExportOtherPasswordCheck.addEventListener('change', () => {
+  subExportFilePasswordInput.hidden = !subExportOtherPasswordCheck.checked;
+  if (!subExportOtherPasswordCheck.checked) subExportFilePasswordInput.value = '';
+});
+
+subExportCancelBtn && subExportCancelBtn.addEventListener('click', closeSubIdentityExportPanel);
+
+subExportCreateBtn && subExportCreateBtn.addEventListener('click', async () => {
+  if (!subExportTarget) return;
+  subExportCreateBtn.disabled = true;
+  subExportStatusEl.textContent = 'Encrypting\u2026';
+  try {
+    const prepared = await AtlasWallet.prepareSubIdentityExport(subExportTarget.id, {
+      password: subExportPasswordInput.value,
+      filePassword: subExportOtherPasswordCheck.checked ? subExportFilePasswordInput.value : '',
+      includeData: subExportIncludeDataCheck.checked
+    });
+    subExportPrepared = prepared;
+    downloadJsonFile(prepared.file, prepared.filename);
+    subExportPasswordInput.value = '';
+    subExportFilePasswordInput.value = '';
+    subExportCodeText.textContent = prepared.code;
+    subExportPasswordNote.textContent = (prepared.usesWalletPassword
+      ? 'The file is protected by your wallet password as it is now.'
+      : 'The file is protected by the separate password you chose.')
+      + (prepared.includesData ? ' It includes this identity\u2019s items, mail and contacts.' : ' It holds the key only.');
+    subExportStep1El.hidden = true;
+    subExportStep2El.hidden = false;
+    buildSubExportProof(prepared.code);
+    scrollSubExportPanelIntoView();
+    subExportStatusEl.textContent = 'The file was downloaded as ' + prepared.filename + '. The identity has not been removed yet.';
+  } catch (err) {
+    subExportStatusEl.textContent = err.message;
+  } finally {
+    subExportCreateBtn.disabled = false;
+  }
+});
+
+subExportCopyCodeBtn && subExportCopyCodeBtn.addEventListener('click', async () => {
+  if (!subExportPrepared) return;
+  try {
+    await navigator.clipboard.writeText(subExportPrepared.code);
+    subExportStatusEl.textContent = 'Code copied.';
+  } catch (err) {
+    subExportStatusEl.textContent = 'Could not copy. Select the code and copy it by hand.';
+  }
+});
+
+subExportDownloadBtn && subExportDownloadBtn.addEventListener('click', () => {
+  if (subExportPrepared) downloadJsonFile(subExportPrepared.file, subExportPrepared.filename);
+});
+
+subExportSavedCheck && subExportSavedCheck.addEventListener('change', updateSubExportFinishState);
+
+subExportKeepBtn && subExportKeepBtn.addEventListener('click', () => {
+  closeSubIdentityExportPanel();
+  subIdentityStatusEl.textContent = 'Nothing was removed. The file you downloaded still opens with its password and code.';
+});
+
+subExportFinishBtn && subExportFinishBtn.addEventListener('click', async () => {
+  if (!subExportPrepared || !subExportSavedCheck.checked || !subExportProofDone()) return;
+  subExportFinishBtn.disabled = true;
+  try {
+    const done = await AtlasWallet.completeSubIdentityExport(subExportPrepared.check);
+    closeSubIdentityExportPanel();
+    subIdentityStatusEl.textContent = done.label + ' now exists only in the file you saved. Backups made before now still contain it.';
+    await refreshActingAsBadge();
+    await refreshSubIdentitiesDisplay();
+  } catch (err) {
+    subExportStatusEl.textContent = err.message;
+    updateSubExportFinishState();
+  }
+});
+
+// ---------- importing one identity ----------
+
+const subImportFileInput = document.getElementById('subImportFileInput');
+const subImportPasswordInput = document.getElementById('subImportPasswordInput');
+const subImportCodeInput = document.getElementById('subImportCodeInput');
+const subImportNameInput = document.getElementById('subImportNameInput');
+const subImportBtn = document.getElementById('subImportBtn');
+const subImportStatusEl = document.getElementById('subImportStatus');
+const SUB_IMPORT_MAX_BYTES = 50 * 1024 * 1024;
+
+subImportBtn && subImportBtn.addEventListener('click', async () => {
+  const file = subImportFileInput.files && subImportFileInput.files[0];
+  if (!file) { subImportStatusEl.textContent = 'Choose an export file first.'; return; }
+  if (file.size > SUB_IMPORT_MAX_BYTES) { subImportStatusEl.textContent = 'That file is too large to be an identity export.'; return; }
+  subImportBtn.disabled = true;
+  subImportStatusEl.textContent = 'Decrypting\u2026';
+  try {
+    let parsed;
+    try { parsed = JSON.parse(await file.text()); } catch (err) { throw new Error('That is not an Atlas identity file.'); }
+    const added = await AtlasWallet.importSubIdentity(parsed, subImportPasswordInput.value, subImportCodeInput.value, { label: subImportNameInput.value });
+    subImportFileInput.value = '';
+    subImportPasswordInput.value = '';
+    subImportCodeInput.value = '';
+    subImportNameInput.value = '';
+    subImportStatusEl.textContent = 'Imported as ' + added.label + (added.includesData ? ', with its items, mail and contacts.' : ' (key only).')
+      + ' It is now part of this wallet\u2019s backups.';
+    await refreshSubIdentitiesDisplay();
+  } catch (err) {
+    subImportStatusEl.textContent = err.message;
+  } finally {
+    subImportBtn.disabled = false;
+  }
+});
 
 // The active "self" mechanism can be either the local password identity or
 // a WebAuthn passkey identity — see wallet.js's atlasIdentityMode. This
@@ -5702,6 +6468,15 @@ function renderAssetCard(entry, container, opts) {
   if (!held && opts.fileExportEnabled && !fungible && asset.tradeScope !== 'bound') {
     actionsHtml += '<button data-action="save-file" data-id="' + entry.credential.id + '" class="btn-secondary">Save to a file…</button>';
   }
+  // Moves a unique, unbound item to another identity of this wallet through its issuer (opts.moveEnabled is
+  // set when this wallet has a second identity to move to).
+  if (!held && opts.moveEnabled && !fungible && asset.tradeScope !== 'bound') {
+    actionsHtml += '<button data-action="move-identity" data-id="' + entry.credential.id + '" class="btn-secondary">Move to another identity\u2026</button>';
+  }
+  // A balance moves in whole or in part: the dialog asks for the amount.
+  if (!held && opts.moveEnabled && fungible && asset.tradeScope !== 'bound') {
+    actionsHtml += '<button data-action="move-balance" data-id="' + entry.credential.id + '" class="btn-secondary">Move balance\u2026</button>';
+  }
   actionsHtml += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
   const menuHtml =
     '<div class="card-menu">' +
@@ -5984,7 +6759,12 @@ async function runWalletRecovery() {
   } finally { walletRecoveryRunning = false; }
 }
 
+// Each draw of the inventory belongs to one identity. A draw that is overtaken by a newer one, or whose identity is no longer
+// the acting one when its reads finish, is dropped instead of painting the previous identity's holdings over the new ones.
+let inventoryRefreshSeq = 0;
+
 async function refreshInventoryDisplay() {
+  const drawSeq = ++inventoryRefreshSeq;
   refreshPendingOpsDisplay().catch(() => {});
   const identity = await AtlasWallet.getIdentity();
   const loadout = await AtlasWallet.getLoadout();
@@ -5994,6 +6774,9 @@ async function refreshInventoryDisplay() {
   const equippedAvatarHandAssetId = await AtlasWallet.getAvatarHandAssetId();
   const risky = combatOf(currentWorld) !== 'none';
   const selfWalletAll = identity ? await AtlasWallet.getWallet(identity.publicKey) : [];
+  const actingNow = await AtlasWallet.getIdentity();
+  if (drawSeq !== inventoryRefreshSeq || (actingNow ? actingNow.publicKey : null) !== (identity ? identity.publicKey : null)) return;
+  lastDrawnActingKey = identity ? identity.publicKey : null;
 
   // Task #209: the wallet-gain chime — see playWalletGainChime()/
   // walletGainedSomething()'s own comments above for what counts and why
@@ -6026,6 +6809,8 @@ async function refreshInventoryDisplay() {
   const selfVisible = selfWalletAll.filter((e) => !e.hidden);
 
   const selfHasAny = (presentation) => selfWalletAll.some((e) => e.credential.asset.presentation === presentation);
+  let moveEnabled = false;
+  try { moveEnabled = (await AtlasWallet.listMoveTargets()).length > 0; } catch (err) { /* locked, or a passkey account: no other identities */ }
 
   // --- Collectibles ---
   const selfCollectibles = selfVisible.filter((e) => e.credential.asset.presentation === 'collectible');
@@ -6033,7 +6818,7 @@ async function refreshInventoryDisplay() {
   if (selfCollectibles.length === 0) {
     selfCollectiblesListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('collectible') ? 'Everything here is hidden or dropped somewhere — manage it below or in Settings.' : 'No collectibles yet.') + '</div>';
   } else {
-    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
+    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, moveEnabled, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
   }
 
   // --- Documents ---
@@ -6042,7 +6827,7 @@ async function refreshInventoryDisplay() {
   if (selfDocuments.length === 0) {
     selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'No documents yet.') + '</div>';
   } else {
-    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
+    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, moveEnabled, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
   }
 
   const totalHeld = selfVisible.length;
@@ -6789,7 +7574,9 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
   if (areaName === 'local' && changes.atlasIdentitySyncBackupEnabled) {
     await refreshIdentitySyncDisplay();
   }
-  if (areaName === 'session' && changes.atlasUnlockedIdentity) {
+  if (areaName === 'session' && (changes.atlasUnlockedIdentity || changes.atlasActiveSubIdentity)) {
+    // The Ledger tab holds per-identity state (the open step, the last draw), so it is reset at once, before the slower refreshes below.
+    if (window.AtlasChainLabsTab) AtlasChainLabsTab.identityChanged().catch(() => {});
     await refreshIdentityDisplay();
     // The Messaging button and window are gated behind an unlocked wallet (see
     // refreshMessagingLockGate()). Every local-mode lock and unlock path changes
@@ -6797,7 +7584,8 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
     await refreshMessagingLockGate();
     // Fetch mail and chat at once on login rather than at the periodic loop's next tick.
     // newValue is present only for a login (unlock, create, import), not for a lock.
-    if (changes.atlasUnlockedIdentity.newValue) {
+    // A switch between identities is shown the same way: the wallet is unlocked and now belongs to someone else.
+    if ((changes.atlasUnlockedIdentity && changes.atlasUnlockedIdentity.newValue) || changes.atlasActiveSubIdentity) {
       runWalletRecovery();
       // What is already stored is shown first, so the panel is usable at once even when a domain is
       // slow to answer; the network check then refreshes it.
@@ -6808,6 +7596,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
       await refreshMailDisplay();
       await refreshInventoryDisplay();
       await refreshMessagingDisplay();
+      await refreshOpenScreenForIdentity();
       refreshChatAdminDisplay();
     }
   }
@@ -8283,6 +9072,48 @@ function openAssetFileDialog(options) {
   const noteHtml = (options.notes || []).map((n) => '<div class="meta" style="margin:4px 0;">' + escapeHtml(n) + '</div>').join('');
   bridgeOfferPreviewEntry = { credential: options.credential, originLabel: options.originLabel, noteHtml };
   renderBridgeOfferPreviewContent(bridgeOfferPreviewEntry);
+  if (options.choices && options.choices.length) {
+    const row = document.createElement('div');
+    row.style.marginTop = '8px';
+    const label = document.createElement('label');
+    label.htmlFor = 'assetFileDialogChoice';
+    label.textContent = options.choiceLabel || 'Choose';
+    const select = document.createElement('select');
+    select.id = 'assetFileDialogChoice';
+    options.choices.forEach((c) => {
+      const o = document.createElement('option');
+      o.value = c.value;
+      o.textContent = c.label;
+      select.appendChild(o);
+    });
+    row.appendChild(label);
+    row.appendChild(select);
+    bridgeOfferPreviewBodyEl.appendChild(row);
+  }
+  if (options.amount) {
+    const row = document.createElement('div');
+    row.style.marginTop = '8px';
+    const label = document.createElement('label');
+    label.htmlFor = 'assetFileDialogAmount';
+    label.textContent = options.amount.label || 'Amount ';
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.id = 'assetFileDialogAmount';
+    input.min = '1';
+    input.max = String(options.amount.max);
+    input.step = '1';
+    input.value = String(options.amount.max);
+    const all = document.createElement('button');
+    all.type = 'button';
+    all.id = 'assetFileDialogAmountAll';
+    all.className = 'btn-secondary';
+    all.textContent = 'All';
+    all.addEventListener('click', () => { input.value = String(options.amount.max); });
+    row.appendChild(label);
+    row.appendChild(input);
+    row.appendChild(all);
+    bridgeOfferPreviewBodyEl.appendChild(row);
+  }
   bridgeOfferPreviewClaimBtn.textContent = options.primaryLabel || '';
   bridgeOfferPreviewClaimBtn.style.display = options.primaryLabel ? '' : 'none';
   bridgeOfferPreviewClaimBtn.disabled = false;
@@ -8298,7 +9129,9 @@ async function runAssetFileDialogPrimary() {
   bridgeOfferPreviewClaimBtn.disabled = true;
   bridgeOfferPreviewStatusEl.textContent = 'Working…';
   try {
-    await dialog.onPrimary();
+    const choice = document.getElementById('assetFileDialogChoice');
+    const amountInput = document.getElementById('assetFileDialogAmount');
+    await dialog.onPrimary(choice ? choice.value : undefined, amountInput ? Number(amountInput.value) : undefined);
   } catch (err) {
     if (assetFileDialog === dialog) {
       bridgeOfferPreviewStatusEl.textContent = err.message;
@@ -8368,6 +9201,103 @@ async function beginSaveAssetToFile(credentialId) {
       closeBridgeOfferPreview();
       await refreshInventoryDisplay();
       statusEl.textContent = 'Saved ' + credential.asset.name + ' as ' + filename + '. Keep the file safe: anyone who has it can claim the item.';
+    }
+  });
+}
+
+// Moves one item to another identity of this wallet. The issuer does the move (the item is re-signed for the
+// other identity's key), so the dialog says so and lists what it cannot do.
+async function beginMoveAssetToIdentity(credentialId) {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  const entry = (await AtlasWallet.getWallet(identity.publicKey)).find((e) => e.credential.id === credentialId);
+  if (!entry) return;
+  const credential = entry.credential;
+  let targets;
+  try { targets = await AtlasWallet.listMoveTargets(); } catch (err) { targets = []; }
+  if (!targets.length) {
+    openAssetFileDialog({ credential, originLabel: 'Move to another identity', notes: ['This wallet has no other identity to move it to.'], secondaryLabel: 'Close' });
+    return;
+  }
+  openAssetFileDialog({
+    credential,
+    originLabel: 'Move to another identity',
+    notes: [
+      'The issuer, ' + credential.issuer.domain + ', moves it: it cancels this copy and signs a new one for the identity you choose. This needs ' + credential.issuer.domain + ' to be reachable.',
+      'The issuer\u2019s records will show that the two identities are connected.',
+      'Items bound to an identity, and balances, cannot be moved this way.',
+      'If the connection drops, the wallet asks the issuer again afterwards, so the item is not lost.'
+    ],
+    choiceLabel: 'Move to ',
+    choices: targets.map((t) => ({ value: t.publicKey, label: t.label })),
+    primaryLabel: 'Move',
+    secondaryLabel: 'Cancel',
+    onPrimary: async (targetPublicKey) => {
+      let moved;
+      try {
+        moved = await AtlasWallet.moveAssetToIdentity(credentialId, targetPublicKey);
+      } catch (err) {
+        if (err.pending) {
+          closeBridgeOfferPreview();
+          await refreshInventoryDisplay();
+          statusEl.textContent = err.message;
+          return;
+        }
+        throw err;
+      }
+      closeBridgeOfferPreview();
+      await refreshInventoryDisplay();
+      statusEl.textContent = 'Moved ' + credential.asset.name + ' to ' + moved.to.label + '.';
+    }
+  });
+}
+
+// Moves all or part of a balance to another identity of this wallet. Same issuer-side route as an item move,
+// through the issuer's split.
+async function beginMoveBalanceToIdentity(credentialId) {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  const entry = (await AtlasWallet.getWallet(identity.publicKey)).find((e) => e.credential.id === credentialId);
+  if (!entry) return;
+  const credential = entry.credential;
+  let targets = [];
+  let info = null;
+  try { targets = await AtlasWallet.listMoveTargets(); } catch (err) { targets = []; }
+  try { info = await AtlasWallet.getBalanceMoveInfo(credentialId); } catch (err) { info = null; }
+  if (!targets.length || !info || info.total < 1) {
+    openAssetFileDialog({ credential, originLabel: 'Move balance', notes: [!targets.length ? 'This wallet has no other identity to move it to.' : 'Nothing in this balance can be moved right now.'], secondaryLabel: 'Close' });
+    return;
+  }
+  openAssetFileDialog({
+    credential,
+    originLabel: 'Move balance',
+    notes: [
+      'The issuer, ' + credential.issuer.domain + ', does the move: it splits this balance and signs the amount you choose for the identity you pick. This needs ' + credential.issuer.domain + ' to be reachable.',
+      'You can move all of it or part of it, in whole units. You have ' + formatMass(info.total) + ' that can be moved now.',
+      'The issuer\u2019s records will show that the two identities are connected.',
+      'If the connection drops, the wallet asks the issuer again afterwards, so nothing is lost or made twice.'
+    ],
+    choiceLabel: 'Move to ',
+    choices: targets.map((t) => ({ value: t.publicKey, label: t.label })),
+    amount: { label: 'Amount (g) ', max: info.total },
+    primaryLabel: 'Move',
+    secondaryLabel: 'Cancel',
+    onPrimary: async (targetPublicKey, amount) => {
+      let moved;
+      try {
+        moved = await AtlasWallet.moveBalanceToIdentity(credentialId, targetPublicKey, amount);
+      } catch (err) {
+        if (err.pending) {
+          closeBridgeOfferPreview();
+          await refreshInventoryDisplay();
+          statusEl.textContent = err.message;
+          return;
+        }
+        throw err;
+      }
+      closeBridgeOfferPreview();
+      await refreshInventoryDisplay();
+      statusEl.textContent = 'Moved ' + formatMass(moved.moved) + ' of ' + credential.asset.name + ' to ' + moved.to.label + '.';
     }
   });
 }
@@ -12850,6 +13780,10 @@ function assetActionHandler(listEl) {
       }
     } else if (btn.dataset.action === 'save-file') {
       await beginSaveAssetToFile(id);
+    } else if (btn.dataset.action === 'move-identity') {
+      await beginMoveAssetToIdentity(id);
+    } else if (btn.dataset.action === 'move-balance') {
+      await beginMoveBalanceToIdentity(id);
     } else if (btn.dataset.action === 'hide') {
       await AtlasWallet.hideAsset(who.publicKey, id);
       await refreshInventoryDisplay();
@@ -13220,6 +14154,7 @@ setInterval(async () => {
   if (walletPanel.classList.contains('open')) await routeWalletScreen();
 }, AUTO_LOCK_CHECK_INTERVAL_MS);
 
+const siteIdentityApplied = applySiteIdentity().then(() => followSiteIdentityOnAccountChange());
 refreshIdentityDisplay();
 refreshInventoryDisplay();
 runWalletRecovery();
@@ -13242,7 +14177,7 @@ if (start.manifest) {
   // closes that gap as a side effect — worth doing now specifically
   // because SPEC.md §3.5 is what actually starts populating start.world/
   // start.anchor from a real page link rather than leaving them unused.
-  loadManifest(start.manifest, start.world, start.anchor).then(() => {
+  siteIdentityApplied.then(() => loadManifest(start.manifest, start.world, start.anchor)).then(() => {
     requestAnimationFrame(render);
   });
 } else {

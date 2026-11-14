@@ -364,6 +364,7 @@ const AtlasWallet = (() => {
     if (mode !== 'local' && mode !== 'webauthn') throw new Error('Unknown identity mode: ' + mode);
     const exists = mode === 'local' ? await hasLocalIdentity() : await hasWebAuthnIdentity();
     if (!exists) throw new Error('Set up that identity before switching to it.');
+    await chrome.storage.session.remove(['atlasActiveSubIdentity', 'atlasSiteIdentitySession']);
     await chrome.storage.local.set({ atlasIdentityMode: mode });
   }
 
@@ -392,7 +393,31 @@ const AtlasWallet = (() => {
   // Returns null if there's nothing active yet (no identity, or a local
   // identity that hasn't been unlocked this session), so callers can check
   // state before acting on it.
+  //
+  // This is the ACTIVE identity: the main identity, or the sub-identity the person has switched to (see
+  // the sub-identities section below). Operations on the account itself (password, backup of the
+  // account) use getAccountIdentity() instead.
+  let contextIdentity = null;
+
   async function getIdentity() {
+    const account = await getAccountIdentity();
+    if (!account || account.mode !== 'local') return account;
+    // An extension page that acts for one site (the bridge confirmation) pins that site's identity for its own
+    // lifetime; the wallet window and every other page keep following the selected identity.
+    if (contextIdentity) {
+      if (contextIdentity.accountPublicKey !== account.publicKey) return null;
+      return contextIdentity.publicKey === account.publicKey ? account : { ...contextIdentity };
+    }
+    const { atlasActiveSubIdentity } = await chrome.storage.session.get('atlasActiveSubIdentity');
+    const sub = atlasActiveSubIdentity;
+    // A cached sub-identity that does not belong to the unlocked main identity (the main identity was
+    // replaced by an import or restore) is ignored, not trusted.
+    if (!sub || sub.accountPublicKey !== account.publicKey || !sub.privateKeyJwk) return account;
+    return { publicKey: sub.publicKey, privateKeyJwk: sub.privateKeyJwk, mode: 'local', subIdentityId: sub.id, accountPublicKey: account.publicKey };
+  }
+
+  // The identity the login itself unlocks, whichever identity is active.
+  async function getAccountIdentity() {
     const mode = await getIdentityMode();
     if (mode === 'webauthn') {
       const identity = await getWebAuthnIdentity();
@@ -515,8 +540,417 @@ const AtlasWallet = (() => {
 
   async function lockIdentity() {
     await endAllAdminSessions();
-    await chrome.storage.session.remove('atlasUnlockedIdentity');
+    await chrome.storage.session.remove(['atlasActiveSubIdentity', 'atlasUnlockedIdentity', 'atlasSiteIdentitySession']);
     await clearAutoBackupSessionKey();
+  }
+
+  // ---------- sub-identities ----------
+  //
+  // A password account can hold extra P-256 identities next to its main one, each with a local friendly
+  // name. They live in one vault per account (atlasSubIdentities[mainPublicKey]), encrypted at rest with a
+  // key derived from the main private key, so one login unlocks all of them. Keying the vault by the main
+  // public key matches every other store here, and means replacing the main identity can never overwrite a
+  // vault the new one cannot decrypt.
+  //
+  // The active identity is atlasActiveSubIdentity in session storage (absent = main). It holds the
+  // sub-identity's key for the session, so getIdentity() costs one extra session read and a lock, or a new
+  // browser session, always returns to the main identity. Everything that is keyed by public key follows the
+  // active identity without change. Passkey accounts have no key to derive a vault key from, so they have no
+  // sub-identities yet.
+  const SUB_IDENTITY_LIMIT = 20;
+  const SUB_IDENTITY_LABEL_MAX = 40;
+  const SUB_IDENTITY_STORE = 'subIdentities';
+
+  let subIdentityChain = Promise.resolve();
+  function withSubIdentityLock(fn) {
+    if (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.request) {
+      return navigator.locks.request('atlas-sub-identities', fn);
+    }
+    const run = subIdentityChain.then(fn, fn);
+    subIdentityChain = run.catch(() => {});
+    return run;
+  }
+
+  function normalizeSubIdentityLabel(label) {
+    const text = typeof label === 'string' ? label.trim().replace(/\s+/g, ' ') : '';
+    if (!text) throw new Error('Give this identity a name.');
+    if (text.length > SUB_IDENTITY_LABEL_MAX) throw new Error('Names can be at most ' + SUB_IDENTITY_LABEL_MAX + ' characters.');
+    return text;
+  }
+
+  // The unlocked password account, or a clear error: everything below needs the main private key.
+  async function requireSubIdentityAccount() {
+    const account = await getAccountIdentity();
+    if (!account) throw new Error('Unlock your wallet first.');
+    if (account.mode !== 'local') throw new Error('Sub-identities need a password identity for now.');
+    return account;
+  }
+
+  // A vault that exists but cannot be read is an error, never "empty": writing back over it would destroy it.
+  async function readSubIdentityVault(account) {
+    const { atlasSubIdentities } = await chrome.storage.local.get('atlasSubIdentities');
+    const stored = (atlasSubIdentities || {})[account.publicKey];
+    if (stored === undefined || stored === null) return { version: 1, identities: [] };
+    const vault = await decryptAtRest(account, SUB_IDENTITY_STORE, stored, null);
+    if (!vault || !Array.isArray(vault.identities)) throw new Error('The sub-identities vault could not be read.');
+    return vault;
+  }
+
+  async function writeSubIdentityVault(account, vault) {
+    const { atlasSubIdentities } = await chrome.storage.local.get('atlasSubIdentities');
+    const all = atlasSubIdentities || {};
+    // A site binding never outlives the identity it points to.
+    if (vault.siteBindings) {
+      for (const [site, binding] of Object.entries(vault.siteBindings)) {
+        if (!binding || (binding.identity !== 'main' && !vault.identities.some((e) => e.publicKey === binding.identity))) delete vault.siteBindings[site];
+      }
+    }
+    all[account.publicKey] = await encryptAtRest(account, SUB_IDENTITY_STORE, vault);
+    await chrome.storage.local.set({ atlasSubIdentities: all });
+    await mirrorSubIdentityVaultToSync(account, all[account.publicKey], !vault.identities.length && !Object.keys(vault.siteBindings || {}).length);
+  }
+
+  function publicSubIdentity(entry, activeId) {
+    return { id: entry.id, label: entry.label, publicKey: entry.publicKey, createdAt: entry.createdAt, active: entry.id === activeId };
+  }
+
+  // The sub-identity the wallet window has selected (kept for the browser session), or null for the main identity.
+  async function selectedSubIdentityId(account) {
+    const { atlasActiveSubIdentity } = await chrome.storage.session.get('atlasActiveSubIdentity');
+    return atlasActiveSubIdentity && atlasActiveSubIdentity.accountPublicKey === account.publicKey ? atlasActiveSubIdentity.id : null;
+  }
+
+  // The sub-identity this page acts as: the one it is pinned to for a site (see useIdentityInThisContext), else
+  // the selected one.
+  async function activeSubIdentityId(account) {
+    if (contextIdentity && contextIdentity.accountPublicKey === account.publicKey) return contextIdentity.subIdentityId || null;
+    return selectedSubIdentityId(account);
+  }
+
+  function assertUniqueSubIdentityLabel(vault, label, exceptId) {
+    const wanted = label.toLowerCase();
+    if (vault.identities.some((e) => e.id !== exceptId && e.label.toLowerCase() === wanted)) {
+      throw new Error('You already have an identity with that name.');
+    }
+  }
+
+  // Never includes a private key. `active` marks the identity the wallet is acting as now; no entry is
+  // active while the main identity is.
+  async function listSubIdentities() {
+    const account = await requireSubIdentityAccount();
+    const vault = await readSubIdentityVault(account);
+    const activeId = await activeSubIdentityId(account);
+    return vault.identities.map((e) => publicSubIdentity(e, activeId));
+  }
+
+  // Who the wallet is acting as right now: { kind: 'main' } or { kind: 'sub', id, label, publicKey }.
+  async function getActiveIdentityInfo() {
+    const account = await getAccountIdentity();
+    if (!account) return null;
+    if (account.mode !== 'local') return { kind: 'main', publicKey: account.publicKey };
+    const activeId = await activeSubIdentityId(account);
+    if (!activeId) return { kind: 'main', publicKey: account.publicKey };
+    const vault = await readSubIdentityVault(account);
+    const entry = vault.identities.find((e) => e.id === activeId);
+    if (!entry) return { kind: 'main', publicKey: account.publicKey };
+    return { kind: 'sub', id: entry.id, label: entry.label, publicKey: entry.publicKey };
+  }
+
+  async function makeSubIdentityEntry(label) {
+    const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    return {
+      id: b64urlEncode(crypto.getRandomValues(new Uint8Array(16)).buffer),
+      label,
+      publicKey: b64urlEncode(await crypto.subtle.exportKey('raw', pair.publicKey)),
+      privateKeyJwk: await crypto.subtle.exportKey('jwk', pair.privateKey),
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  async function createSubIdentity(label) {
+    const name = normalizeSubIdentityLabel(label);
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      if (vault.identities.length >= SUB_IDENTITY_LIMIT) throw new Error('You can have at most ' + SUB_IDENTITY_LIMIT + ' sub-identities.');
+      assertUniqueSubIdentityLabel(vault, name, null);
+      const entry = await makeSubIdentityEntry(name);
+      vault.identities.push(entry);
+      await writeSubIdentityVault(account, vault);
+      await logActivity('identity', 'Sub-identity created');
+      return publicSubIdentity(entry, await activeSubIdentityId(account));
+    });
+  }
+
+  async function renameSubIdentity(id, label) {
+    const name = normalizeSubIdentityLabel(label);
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      const entry = vault.identities.find((e) => e.id === id);
+      if (!entry) throw new Error('No such identity.');
+      assertUniqueSubIdentityLabel(vault, name, id);
+      entry.label = name;
+      await writeSubIdentityVault(account, vault);
+      // The active key is cached with its name; keep the two the same.
+      const { atlasActiveSubIdentity } = await chrome.storage.session.get('atlasActiveSubIdentity');
+      if (atlasActiveSubIdentity && atlasActiveSubIdentity.id === id) {
+        await chrome.storage.session.set({ atlasActiveSubIdentity: { ...atlasActiveSubIdentity, label: name } });
+      }
+      return publicSubIdentity(entry, await activeSubIdentityId(account));
+    });
+  }
+
+  // Switches who the wallet acts as: a sub-identity's id, or null for the main identity. Nothing may stay
+  // authenticated as the previous identity, so every admin session is ended first.
+  async function switchIdentity(id) {
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      // Choosing an identity here is an explicit choice, so a site pin on this page no longer applies.
+      contextIdentity = null;
+      const currentId = await selectedSubIdentityId(account);
+      const targetId = id || null;
+      if (targetId === currentId) return getActiveIdentityInfo();
+      let entry = null;
+      if (targetId) {
+        const vault = await readSubIdentityVault(account);
+        entry = vault.identities.find((e) => e.id === targetId);
+        if (!entry) throw new Error('No such identity.');
+      }
+      await endAllAdminSessions();
+      if (entry) {
+        await chrome.storage.session.set({
+          atlasActiveSubIdentity: { id: entry.id, label: entry.label, publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk, accountPublicKey: account.publicKey }
+        });
+      } else {
+        await chrome.storage.session.remove('atlasActiveSubIdentity');
+      }
+      notifyWalletChanged(entry ? entry.publicKey : account.publicKey);
+      return getActiveIdentityInfo();
+    });
+  }
+
+  // Whether any identity of this account has a move to `publicKey` that the issuer has not confirmed yet. A
+  // journal that cannot be read counts as pending: the move might be in it.
+  async function incomingMovePending(account, vault, publicKey) {
+    const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
+    const all = atlasPendingOps || {};
+    const unreadable = {};
+    const holders = [account].concat(vault.identities.map((e) => ({ mode: 'local', publicKey: e.publicKey, privateKeyJwk: e.privateKeyJwk })));
+    for (const holder of holders) {
+      if (all[holder.publicKey] === undefined || all[holder.publicKey] === null) continue;
+      const list = await decryptAtRest(holder, 'pendingOps', all[holder.publicKey], unreadable);
+      if (list === unreadable) return true;
+      if (Array.isArray(list) && list.some((e) => e && (e.kind === 'transfer' || e.kind === 'split') && e.toOwner === publicKey)) return true;
+    }
+    return false;
+  }
+
+  // 'empty', 'held' or 'unreadable' for a per-identity list stored under `storeName`. A value that cannot
+  // be read counts as something held: deleting the key would lose it for good.
+  async function storedListState(sub, storeName, stored) {
+    if (stored === undefined || stored === null) return 'empty';
+    const holder = { mode: 'local', privateKeyJwk: sub.privateKeyJwk };
+    const value = await decryptAtRest(holder, storeName, stored, undefined);
+    if (value === undefined) return 'unreadable';
+    if (Array.isArray(value)) return value.length ? 'held' : 'empty';
+    if (value && typeof value === 'object') return Object.keys(value).length ? 'held' : 'empty';
+    return 'held';
+  }
+
+  // Removes the key. Refused while the identity still holds assets or has unfinished operations: those would
+  // become unreachable. Data kept under its public key (mail, friends, ...) stays as encrypted data that
+  // nothing can read until the same key is imported again.
+  async function removeSubIdentity(id) {
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      const entry = vault.identities.find((e) => e.id === id);
+      if (!entry) throw new Error('No such identity.');
+      const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
+      const walletState = await storedListState(entry, 'wallet', (stored.atlasWallets || {})[entry.publicKey]);
+      const pendingState = await storedListState(entry, 'pendingOps', (stored.atlasPendingOps || {})[entry.publicKey]);
+      if (walletState !== 'empty') throw new Error('This identity still holds items. Move them to another identity first.');
+      if (pendingState !== 'empty') throw new Error('This identity has unfinished operations. Let them finish first.');
+      if (await incomingMovePending(account, vault, entry.publicKey)) throw new Error('A move to this identity is unfinished. Let it finish first.');
+      if (contextIdentity && contextIdentity.subIdentityId === id) contextIdentity = null;
+      if (await selectedSubIdentityId(account) === id) {
+        await endAllAdminSessions();
+        await chrome.storage.session.remove('atlasActiveSubIdentity');
+        notifyWalletChanged(account.publicKey);
+      }
+      vault.identities = vault.identities.filter((e) => e.id !== id);
+      await writeSubIdentityVault(account, vault);
+      await logActivity('identity', 'Sub-identity removed');
+      return true;
+    });
+  }
+
+  // ---------- per-site identity ----------
+  //
+  // Each site (exact origin: scheme, host and port) answers to one identity of the account. The binding is kept in
+  // the sub-identities vault (so it is encrypted with it and travels in backups) and names the identity by its
+  // public key, 'main' standing for the account's own identity. A site that has no binding asks the person once
+  // (the bridge confirmation draws that prompt) when the account has sub-identities to choose from; without any,
+  // every site simply gets the main identity. A choice made without "remember" lives in session storage until the
+  // wallet locks. None of this changes the identity the wallet window itself is acting as.
+  const SITE_BINDING_LIMIT = 500;
+
+  function normalizeSiteOrigin(origin) {
+    let parsed;
+    try { parsed = new URL(String(origin)); } catch (err) { throw new Error('That is not a site address.'); }
+    if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || parsed.origin !== String(origin)) throw new Error('That is not a site address.');
+    return parsed.origin;
+  }
+
+  function siteTarget(account, vault, identityKey) {
+    if (identityKey === 'main' || identityKey === account.publicKey) return { kind: 'main', id: null, label: 'Main identity', publicKey: account.publicKey };
+    const entry = vault.identities.find((e) => e.publicKey === identityKey);
+    return entry ? { kind: 'sub', id: entry.id, label: entry.label, publicKey: entry.publicKey } : null;
+  }
+
+  async function readSiteSession(account) {
+    const { atlasSiteIdentitySession } = await chrome.storage.session.get('atlasSiteIdentitySession');
+    const all = atlasSiteIdentitySession || {};
+    return { all, mine: all[account.publicKey] || {} };
+  }
+
+  // Which identity answers `origin`: { state: 'bound', ...identity, remembered } when a choice exists,
+  // { state: 'default', ...main } when there is nothing to choose between, { state: 'ask' } when the person has
+  // to choose first, { state: 'locked' } when the wallet is locked.
+  async function getSiteIdentity(origin) {
+    const site = normalizeSiteOrigin(origin);
+    const account = await getAccountIdentity();
+    if (!account) return { state: 'locked', publicKey: null };
+    const main = { kind: 'main', id: null, label: 'Main identity', publicKey: account.publicKey };
+    if (account.mode !== 'local') return { state: 'default', ...main };
+    const vault = await readSubIdentityVault(account);
+    const bound = vault.siteBindings && vault.siteBindings[site];
+    if (bound) {
+      const target = siteTarget(account, vault, bound.identity);
+      if (target) return { state: 'bound', remembered: true, ...target };
+    }
+    const { mine } = await readSiteSession(account);
+    if (mine[site]) {
+      const target = siteTarget(account, vault, mine[site]);
+      if (target) return { state: 'bound', remembered: false, ...target };
+    }
+    if (!vault.identities.length) return { state: 'default', ...main };
+    return { state: 'ask', publicKey: null };
+  }
+
+  // Chooses the identity for a site. `identityPublicKey` is the account's own key or a sub-identity's.
+  // `remember` false keeps the choice only until the wallet locks.
+  async function setSiteIdentity(origin, identityPublicKey, opts) {
+    const site = normalizeSiteOrigin(origin);
+    const remember = !opts || opts.remember !== false;
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      const target = siteTarget(account, vault, identityPublicKey);
+      if (!target) throw new Error('No such identity.');
+      await storeSiteBinding(account, vault, site, target, remember);
+      return { state: 'bound', remembered: remember, ...target };
+    });
+  }
+
+  async function storeSiteBinding(account, vault, site, target, remember) {
+    const key = target.kind === 'main' ? 'main' : target.publicKey;
+    if (remember) {
+      vault.siteBindings = vault.siteBindings || {};
+      if (!vault.siteBindings[site] && Object.keys(vault.siteBindings).length >= SITE_BINDING_LIMIT) throw new Error('Too many sites are remembered. Forget some first.');
+      vault.siteBindings[site] = { identity: key, boundAt: new Date().toISOString() };
+      await writeSubIdentityVault(account, vault);
+    }
+    const { all, mine } = await readSiteSession(account);
+    if (remember) {
+      delete mine[site];
+    } else {
+      if (vault.siteBindings && vault.siteBindings[site]) { delete vault.siteBindings[site]; await writeSubIdentityVault(account, vault); }
+      mine[site] = key;
+    }
+    all[account.publicKey] = mine;
+    await chrome.storage.session.set({ atlasSiteIdentitySession: all });
+  }
+
+  // Makes a new identity named after the site and binds the site to it.
+  async function createSiteIdentity(origin, opts) {
+    const site = normalizeSiteOrigin(origin);
+    const remember = !opts || opts.remember !== false;
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      if (vault.identities.length >= SUB_IDENTITY_LIMIT) throw new Error('You can have at most ' + SUB_IDENTITY_LIMIT + ' sub-identities.');
+      const entry = await makeSubIdentityEntry(restoredSubIdentityLabel(vault, new URL(site).host.slice(0, SUB_IDENTITY_LABEL_MAX)));
+      vault.identities.push(entry);
+      await writeSubIdentityVault(account, vault);
+      await storeSiteBinding(account, vault, site, { kind: 'sub', id: entry.id, label: entry.label, publicKey: entry.publicKey }, remember);
+      await logActivity('identity', 'Sub-identity created for a site');
+      return { state: 'bound', remembered: remember, kind: 'sub', id: entry.id, label: entry.label, publicKey: entry.publicKey };
+    });
+  }
+
+  async function forgetSiteIdentity(origin) {
+    const site = normalizeSiteOrigin(origin);
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const vault = await readSubIdentityVault(account);
+      if (vault.siteBindings && vault.siteBindings[site]) {
+        delete vault.siteBindings[site];
+        await writeSubIdentityVault(account, vault);
+      }
+      const { all, mine } = await readSiteSession(account);
+      if (mine[site]) {
+        delete mine[site];
+        all[account.publicKey] = mine;
+        await chrome.storage.session.set({ atlasSiteIdentitySession: all });
+      }
+      return true;
+    });
+  }
+
+  // The remembered sites, each with the identity it answers as. No keys.
+  async function listSiteIdentities() {
+    const account = await requireSubIdentityAccount();
+    const vault = await readSubIdentityVault(account);
+    const out = [];
+    for (const [site, binding] of Object.entries(vault.siteBindings || {})) {
+      const target = binding && siteTarget(account, vault, binding.identity);
+      if (target) out.push({ origin: site, boundAt: binding.boundAt || null, ...target });
+    }
+    return out.sort((a, b) => a.origin.localeCompare(b.origin));
+  }
+
+  // For the rest of this page's life, every wallet call here acts as `publicKey` instead of the selected
+  // identity. Used by the bridge confirmation, which runs in its own page, so the wallet window is untouched.
+  async function useIdentityInThisContext(publicKey) {
+    const account = await getAccountIdentity();
+    if (!account) throw new Error('Unlock your wallet first.');
+    if (account.mode !== 'local') { contextIdentity = null; return; }
+    // The main identity is pinned too: a page that answers for a site bound to it keeps acting as it while the
+    // wallet window has a sub-identity selected.
+    if (publicKey === account.publicKey) { contextIdentity = { publicKey: account.publicKey, accountPublicKey: account.publicKey, mode: 'local', subIdentityId: null }; return; }
+    const vault = await readSubIdentityVault(account);
+    const entry = vault.identities.find((e) => e.publicKey === publicKey);
+    if (!entry) throw new Error('No such identity.');
+    contextIdentity = { publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk, mode: 'local', subIdentityId: entry.id, accountPublicKey: account.publicKey };
+  }
+
+  // Back to following the identity the wallet window has selected.
+  function releaseIdentityContext() {
+    contextIdentity = null;
+  }
+
+  // For the in-page world overlay: acts as the identity this site is bound to (pinned for this page), and as the
+  // selected identity when the site has no binding yet. Returns what the page should show about it.
+  async function followSiteIdentity(origin) {
+    const site = await getSiteIdentity(origin);
+    if (site.state === 'bound') {
+      await useIdentityInThisContext(site.publicKey);
+      return { state: 'bound', kind: site.kind, label: site.label, publicKey: site.publicKey, remembered: site.remembered };
+    }
+    if (site.state !== 'locked') releaseIdentityContext();
+    return { state: site.state };
   }
 
   // Same trust rule as exportIdentity below: re-derives from the LOCAL
@@ -542,7 +976,6 @@ const AtlasWallet = (() => {
       throw new Error('Incorrect current password.');
     }
     if (newPassword === currentPassword) throw new Error('New password must be different from the current one.');
-
     const newSalt = crypto.getRandomValues(new Uint8Array(16));
     const newIv = crypto.getRandomValues(new Uint8Array(12));
     const newKey = await deriveAesKey([newPassword], newSalt);
@@ -576,7 +1009,7 @@ const AtlasWallet = (() => {
     try {
       const settings = await getAutoBackupSettings();
       if (settings && settings.enabled) {
-        const identity = await getIdentity();
+        const identity = await getAccountIdentity();
         const blob = await buildAutoBackupBlob(identity, newPassword); // mints a fresh salt
         await setAutoBackupSettings({ salt: blob.salt, kdfIterations: blob.kdfIterations });
         await cacheAutoBackupSessionKey(newPassword);
@@ -792,6 +1225,9 @@ const AtlasWallet = (() => {
   // locally under the password alone (the everyday unlock scheme) and
   // unlocks it for this session.
   async function importIdentity(fileData, password, seedPhrase) {
+    if (fileData && fileData.format === SUB_IDENTITY_EXPORT_FORMAT) {
+      throw new Error('This file holds a sub-identity. Import it from Wallet > Identity > Identities inside a wallet.');
+    }
     if (!fileData || fileData.format !== 'atlas-identity-export/1.0') throw new Error('Not an Atlas identity file.');
     const salt = new Uint8Array(b64urlDecode(fileData.salt));
     const iv = new Uint8Array(b64urlDecode(fileData.iv));
@@ -1021,8 +1457,8 @@ const AtlasWallet = (() => {
   const WALLET_LOCKED_MESSAGE = 'The wallet is locked. Unlock it to make changes; nothing was changed.';
   const WALLET_UNREADABLE_MESSAGE = 'The stored wallet data could not be read or decrypted, so nothing was changed and the stored data was left as it is.';
 
-  async function readStoredListForWrite(storeName, stored) {
-    const identity = await getIdentity();
+  async function readStoredListForWrite(storeName, stored, identityArg) {
+    const identity = identityArg || await getIdentity();
     if (!identity && (await getIdentityMode()) !== null) throw storageError('wallet-locked', WALLET_LOCKED_MESSAGE);
     if (stored === undefined || stored === null) return { identity, list: [] };
     if (Array.isArray(stored)) return { identity, list: stored };
@@ -1044,8 +1480,29 @@ const AtlasWallet = (() => {
   // The wallet list for a change that will be written back (see above); throws instead of returning [].
   async function getWalletStrict(ownerPublicKey) {
     const { atlasWallets } = await chrome.storage.local.get('atlasWallets');
-    const { list } = await readStoredListForWrite('wallet', (atlasWallets || {})[ownerPublicKey]);
+    const { list } = await readStoredListForWrite('wallet', (atlasWallets || {})[ownerPublicKey], (await localIdentityFor(ownerPublicKey)) || undefined);
     return list.filter(isPostMergeAssetCredential);
+  }
+
+  // The unlocked identity that holds `ownerPublicKey` in this wallet: the active one, the account's main
+  // identity, or one of its sub-identities. Its keys are what that owner's stores are encrypted under. Null
+  // for a key this wallet does not hold.
+  async function localIdentityFor(ownerPublicKey) {
+    const active = await getIdentity();
+    if (active && active.publicKey === ownerPublicKey) return active;
+    const account = await getAccountIdentity();
+    if (!account || account.mode !== 'local' || !account.privateKeyJwk) return null;
+    if (account.publicKey === ownerPublicKey) return account;
+    let vault;
+    try { vault = await readSubIdentityVault(account); } catch (err) { return null; }
+    const entry = vault.identities.find((e) => e.publicKey === ownerPublicKey);
+    return entry ? { mode: 'local', publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk } : null;
+  }
+
+  // The identity whose keys protect `ownerPublicKey`'s stores: that owner when this wallet holds it, otherwise
+  // the active identity (which keeps a store for a key this wallet does not hold unreadable).
+  async function holderFor(ownerPublicKey) {
+    return (await localIdentityFor(ownerPublicKey)) || (await getIdentity());
   }
 
   // Checked before anything is sent to an issuer that would have to be stored afterwards.
@@ -1068,32 +1525,28 @@ const AtlasWallet = (() => {
   async function getWallet(ownerPublicKey) {
     const { atlasWallets, atlasResourceWallets } = await chrome.storage.local.get(['atlasWallets', 'atlasResourceWallets']);
     const wallets = atlasWallets || {};
-    const identity = await getIdentity();
+    const identity = await holderFor(ownerPublicKey);
     const stored = wallets[ownerPublicKey];
     // A stored value that is neither a list nor an encrypted envelope is shown as empty and left exactly as it is.
     if (stored !== undefined && stored !== null && !Array.isArray(stored) && !(typeof stored === 'object' && stored.__atlasEncrypted)) return [];
     const entries = await decryptAtRestAndMigrate(identity, 'wallet', wallets[ownerPublicKey], [], async (v) => {
-      wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', v);
+      wallets[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'wallet', v);
       await chrome.storage.local.set({ atlasWallets: wallets });
     });
     if (!Array.isArray(entries)) return [];
     const cleaned = entries.filter(isPostMergeAssetCredential);
     if (cleaned.length !== entries.length) {
-      wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', cleaned);
+      wallets[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'wallet', cleaned);
       await chrome.storage.local.set({ atlasWallets: wallets });
     }
     if (atlasResourceWallets) await chrome.storage.local.remove('atlasResourceWallets'); // fully orphaned since the merge — nothing valid to salvage, nothing else reads it
     return markUnresolved(cleaned, await readPendingOps(ownerPublicKey));
   }
 
-  // Task #137's activity-tracking design needs to know "did THIS wallet's
-  // holdings just change" without wallet.js knowing anything at all about
-  // presence, worlds, or connections — those are viewer.js's concern
-  // entirely. saveWallet() is the one choke point essentially every
-  // mutation already runs through (mint, split, consolidate, trade
-  // settle/claim, mail-gift claim — 14 call sites as of this
-  // writing), so a listener registered here fires for all of them without
-  // wallet.js needing a matching call added at each individual UI action.
+  // Lets a caller learn that a wallet's holdings changed without wallet.js knowing anything about presence,
+  // worlds or connections (viewer.js's concern). saveWallet() is the one choke point essentially every mutation
+  // runs through (mint, split, consolidate, trade settle/claim, mail-gift claim), so a listener registered
+  // here fires for all of them without a matching call at each UI action.
   // Deliberately fire-and-forget: a listener throwing is caught and
   // dropped rather than allowed to break the save it's just observing.
   const walletChangeListeners = [];
@@ -1120,22 +1573,23 @@ const AtlasWallet = (() => {
 
   // Replaces the stored list. Refuses when what is stored now cannot be read (locked, corrupted,
   // undecryptable). `replaceUnreadable` is for restoring a backup only: the unreadable value is
-  // first copied to atlasWalletQuarantine so it is not destroyed.
+  // first copied to atlasWalletQuarantine so it is not destroyed. `opts.identity` writes for an identity
+  // other than the active one (a restore of a sub-identity); it must be the owner's own identity.
   async function saveWallet(ownerPublicKey, entries, opts) {
     const { atlasWallets } = await chrome.storage.local.get('atlasWallets');
     const wallets = atlasWallets || {};
     let identity;
     try {
-      ({ identity } = await readStoredListForWrite('wallet', wallets[ownerPublicKey]));
+      ({ identity } = await readStoredListForWrite('wallet', wallets[ownerPublicKey], opts && opts.identity));
     } catch (err) {
       if (!(opts && opts.replaceUnreadable) || err.code !== 'wallet-unreadable') throw err;
-      identity = await getIdentity();
+      identity = (opts && opts.identity) || await getIdentity();
       const { atlasWalletQuarantine } = await chrome.storage.local.get('atlasWalletQuarantine');
       const quarantine = atlasWalletQuarantine || {};
       quarantine[ownerPublicKey] = (quarantine[ownerPublicKey] || []).concat([{ savedAt: new Date().toISOString(), store: 'wallet', blob: wallets[ownerPublicKey] }]).slice(-3);
       await chrome.storage.local.set({ atlasWalletQuarantine: quarantine });
     }
-    wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', Array.isArray(entries) ? entries.map(withoutUnresolvedMark) : entries);
+    wallets[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'wallet', Array.isArray(entries) ? entries.map(withoutUnresolvedMark) : entries);
     // `opts.extraWrites(identity)` returns more storage keys to write in the SAME storage write.
     const extra = opts && opts.extraWrites ? await opts.extraWrites(identity) : {};
     await chrome.storage.local.set(Object.assign({}, extra, { atlasWallets: wallets }));
@@ -1237,6 +1691,7 @@ const AtlasWallet = (() => {
     if (entry.kind === 'purchase') return 'purchase';
     if (entry.kind === 'claim') return 'trade-claim';
     if (entry.kind === 'open-chest') return 'open-chest';
+    if (entry.kind === 'transfer') return 'transfer';
     if (entry.kind === 'mint' && entry.body && entry.body.quantity === undefined) return 'issue-unique';
     return null;
   }
@@ -1247,7 +1702,7 @@ const AtlasWallet = (() => {
 
   async function readPendingOps(ownerPublicKey) {
     const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
-    const identity = await getIdentity();
+    const identity = await holderFor(ownerPublicKey);
     const list = await decryptAtRest(identity, 'pendingOps', (atlasPendingOps || {})[ownerPublicKey], []);
     return Array.isArray(list) ? list : [];
   }
@@ -1327,7 +1782,7 @@ const AtlasWallet = (() => {
       const all = atlasPendingOps || {};
       const { identity, list } = await readStoredListForWrite('pendingOps', all[ownerPublicKey]);
       list.push(entry);
-      all[ownerPublicKey] = await encryptAtRest(identity, 'pendingOps', list);
+      all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'pendingOps', list);
       await chrome.storage.local.set({ atlasPendingOps: all });
     });
   }
@@ -1341,7 +1796,7 @@ const AtlasWallet = (() => {
       if (!entry) return false;
       if (patch === null) list.splice(list.indexOf(entry), 1);
       else Object.assign(entry, patch);
-      all[ownerPublicKey] = await encryptAtRest(identity, 'pendingOps', list);
+      all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'pendingOps', list);
       await chrome.storage.local.set({ atlasPendingOps: all });
       return true;
     });
@@ -1357,13 +1812,18 @@ const AtlasWallet = (() => {
     return withWalletLock(async () => {
       const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
       const wallets = stored.atlasWallets || {};
-      let identity = null;
+      // Each owner's list is read and written under that owner's own keys, so a change for another identity
+      // of this wallet (a move between identities) lands readable by it.
+      const holders = new Map();
+      const holderOf = async (owner) => {
+        if (!holders.has(owner)) holders.set(owner, (await localIdentityFor(owner)) || (await getIdentity()));
+        return holders.get(owner);
+      };
       const next = new Map();
       for (const change of changes) {
         let base = next.get(change.owner);
         if (!base) {
-          const read = await readStoredListForWrite('wallet', wallets[change.owner]);
-          identity = read.identity;
+          const read = await readStoredListForWrite('wallet', wallets[change.owner], await holderOf(change.owner));
           base = read.list.filter(isPostMergeAssetCredential);
         }
         const drop = new Set(change.remove || []);
@@ -1375,14 +1835,15 @@ const AtlasWallet = (() => {
       }
       const pendingAll = stored.atlasPendingOps || {};
       if (requestId) {
-        const pending = (await readStoredListForWrite('pendingOps', pendingAll[journalOwner])).list;
+        const journalHolder = await holderOf(journalOwner);
+        const pending = (await readStoredListForWrite('pendingOps', pendingAll[journalOwner], journalHolder)).list;
         const index = pending.findIndex((e) => e && e.requestId === requestId);
         if (index < 0) return false;
         if (patch) Object.assign(pending[index], patch);
         else pending.splice(index, 1);
-        pendingAll[journalOwner] = await encryptAtRest(identity, 'pendingOps', pending);
+        pendingAll[journalOwner] = await encryptAtRestFor(journalHolder, journalOwner, 'pendingOps', pending);
       }
-      for (const [owner, list] of next) wallets[owner] = await encryptAtRest(identity, 'wallet', list);
+      for (const [owner, list] of next) wallets[owner] = await encryptAtRest(await holderOf(owner), 'wallet', list);
       await chrome.storage.local.set(requestId ? { atlasWallets: wallets, atlasPendingOps: pendingAll } : { atlasWallets: wallets });
       for (const owner of next.keys()) notifyWalletChanged(owner);
       return true;
@@ -1418,6 +1879,9 @@ const AtlasWallet = (() => {
     if (entry.kind === 'open-chest') {
       return [{ owner: entry.owner, remove: entry.predecessors, add: [entryOf(data.reward)] }];
     }
+    if (entry.kind === 'transfer') {
+      return [{ owner: entry.owner, remove: entry.predecessors }, { owner: entry.toOwner, add: [entryOf(data.credential)] }];
+    }
     throw new Error('unknown operation kind: ' + entry.kind);
   }
 
@@ -1440,6 +1904,12 @@ const AtlasWallet = (() => {
     if (entry.kind === 'convert') return good(data.received, entry.owner) && (!data.remainder || good(data.remainder, entry.owner));
     if (entry.kind === 'purchase') {
       return good(data.purchased, entry.owner) && data.purchased.asset.class === body.purchasedClass && (!data.balance || good(data.balance, entry.owner));
+    }
+    if (entry.kind === 'transfer') {
+      const sent = body.credential || {};
+      return data.status === 'transferred' && good(data.credential, entry.toOwner) && !!sent.asset
+        && data.credential.asset.class === sent.asset.class && data.credential.asset.fungible === false
+        && data.credential.issuer.domain === entry.domain && data.credential.supersedes === sent.id;
     }
     if (entry.kind === 'open-chest') {
       const spent = body.credential && body.credential.id;
@@ -1536,6 +2006,12 @@ const AtlasWallet = (() => {
       const changes = changesForAnswer(entry, data);
       for (const change of changes) {
         for (const add of change.add || []) add.lastVerdict = await verifyCredential(add.credential);
+      }
+      // A move is applied to two identities of this wallet. If the receiving one is gone the result is kept
+      // in the journal (the issuer keeps its answer) rather than written under the wrong keys.
+      if ((entry.kind === 'transfer' || (entry.kind === 'split' && entry.toOwner && entry.toOwner !== entry.owner)) && !(await localIdentityFor(entry.toOwner))) {
+        await retryLater('the receiving identity is not in this wallet');
+        throw operationError(entry.label, 0, 'the issuer completed this move but the receiving identity is not in this wallet; it is kept and will be applied once it is', null, { pending: true, requestId: entry.requestId });
       }
       let applied;
       try {
@@ -1874,16 +2350,17 @@ const AtlasWallet = (() => {
   const PENDING_OPS_BACKUP_FORMAT = 'atlas-pending-ops/1.0';
   const JOURNAL_PATHS = {
     mint: '/atlas/asset/issue', split: '/atlas/asset/split', consolidate: '/atlas/asset/consolidate', convert: '/atlas/convert',
-    purchase: '/atlas/asset/purchase', claim: '/atlas/trade/claim', 'open-chest': '/atlas/asset/open-chest'
+    purchase: '/atlas/asset/purchase', claim: '/atlas/trade/claim', 'open-chest': '/atlas/asset/open-chest',
+    transfer: '/atlas/asset/transfer'
   };
 
   // The wallet list and the journal for one owner, from ONE storage read, so they describe the same
   // instant: every write that changes both (applying an answer) is a single storage write. Reads
   // strictly: a locked, unreadable or corrupted store throws instead of being captured as empty.
-  async function snapshotWalletAndJournal(ownerPublicKey) {
+  async function snapshotWalletAndJournal(ownerPublicKey, identityArg) {
     const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
-    const wallet = (await readStoredListForWrite('wallet', (stored.atlasWallets || {})[ownerPublicKey])).list.filter(isPostMergeAssetCredential);
-    const journal = (await readStoredListForWrite('pendingOps', (stored.atlasPendingOps || {})[ownerPublicKey])).list;
+    const wallet = (await readStoredListForWrite('wallet', (stored.atlasWallets || {})[ownerPublicKey], identityArg)).list.filter(isPostMergeAssetCredential);
+    const journal = (await readStoredListForWrite('pendingOps', (stored.atlasPendingOps || {})[ownerPublicKey], identityArg)).list;
     return { wallet, journal };
   }
 
@@ -1892,7 +2369,8 @@ const AtlasWallet = (() => {
   function journalEntryProblem(entry, owner) {
     if (!usablePendingEntry(entry)) return 'unusable';
     if (entry.owner !== owner) return 'wrong-owner';
-    if (entry.toOwner !== undefined && entry.toOwner !== null && entry.toOwner !== owner) return 'wrong-owner';
+    if (entry.toOwner !== undefined && entry.toOwner !== null && entry.toOwner !== owner
+        && !((entry.kind === 'transfer' || entry.kind === 'split') && typeof entry.toOwner === 'string' && entry.toOwner !== '')) return 'wrong-owner';
     if (!Object.prototype.hasOwnProperty.call(JOURNAL_PATHS, entry.kind) || JOURNAL_PATHS[entry.kind] !== entry.path) return 'unknown-operation';
     if (!/^[A-Za-z0-9.\-:\[\]]{1,255}$/.test(entry.domain)) return 'malformed';
     if (entry.state !== undefined && entry.state !== 'pending' && entry.state !== 'needs-attention') return 'malformed';
@@ -1993,7 +2471,7 @@ const AtlasWallet = (() => {
     let local = [];
     let localUnreadable = false;
     try {
-      local = (await readStoredListForWrite('pendingOps', journalAll[owner])).list;
+      local = (await readStoredListForWrite('pendingOps', journalAll[owner], identity)).list;
     } catch (err) {
       if (!err || err.code !== 'wallet-unreadable') throw err;
       localUnreadable = true;
@@ -2007,16 +2485,16 @@ const AtlasWallet = (() => {
     const summary = Object.assign({}, merged.summary, localUnreadable ? { localJournalUnreadable: true } : {});
     const writes = {};
     if (localUnreadable || canonicalize(merged.list) !== canonicalize(local)) {
-      journalAll[owner] = await encryptAtRest(identity, 'pendingOps', merged.list);
+      journalAll[owner] = await encryptAtRestFor(identity, owner, 'pendingOps', merged.list);
       writes.atlasPendingOps = journalAll;
     }
     if (aside.length) {
-      const existing = (await readStoredListForWrite('pendingOpsQuarantine', quarantineAll[owner])).list;
+      const existing = (await readStoredListForWrite('pendingOpsQuarantine', quarantineAll[owner], identity)).list;
       const known = new Set(existing.map((q) => canonicalize({ reason: q.reason, source: q.source, value: q.value })));
       const fresh = aside.filter((q) => !known.has(canonicalize({ reason: q.reason, source: q.source, value: q.value })))
         .map((q) => Object.assign({ at: new Date().toISOString() }, q));
       if (fresh.length) {
-        quarantineAll[owner] = await encryptAtRest(identity, 'pendingOpsQuarantine', existing.concat(fresh));
+        quarantineAll[owner] = await encryptAtRestFor(identity, owner, 'pendingOpsQuarantine', existing.concat(fresh));
         writes.atlasPendingOpsQuarantine = quarantineAll;
       }
     }
@@ -2531,6 +3009,231 @@ const AtlasWallet = (() => {
     return { sent, remainder };
   }
 
+  // ---------- moving an asset between this wallet's identities ----------
+  //
+  // A credential names its owner's public key and carries the issuer's signature, so an asset cannot change
+  // identity by being filed under another one: only the issuer can. A move therefore goes through the
+  // issuer's direct transfer (SPEC.md §5.6): the acting identity signs a transfer intent for the other
+  // identity's public key, the issuer revokes the credential and signs a new one for that key, and the
+  // wallet writes the new credential into the other identity's wallet. It runs through the journalled
+  // operation path, so an answer that does not arrive is asked for again with the same request id.
+  // Items that are bound to their owner are not moved this way. A fungible balance moves through the issuer's
+  // split instead (moveBalanceToIdentity below).
+
+  // The identities a move can go to: every identity of this account except the acting one.
+  async function listMoveTargets() {
+    const account = await requireSubIdentityAccount();
+    const active = await getIdentity();
+    const vault = await readSubIdentityVault(account);
+    return [{ id: null, label: 'Main identity', publicKey: account.publicKey }]
+      .concat(vault.identities.map((e) => ({ id: e.id, label: e.label, publicKey: e.publicKey })))
+      .filter((t) => !active || t.publicKey !== active.publicKey);
+  }
+
+  async function moveAssetToIdentity(credentialId, targetPublicKey) {
+    const sender = await getIdentity();
+    if (!sender) throw new Error('Unlock your wallet first.');
+    const target = (await listMoveTargets()).find((t) => t.publicKey === targetPublicKey);
+    if (!target) throw new Error('That identity is not in this wallet.');
+    const entry = (await getWalletStrict(sender.publicKey)).find((e) => e.credential.id === credentialId);
+    if (!entry) throw new Error('This item is not in the identity you are acting as.');
+    const credential = entry.credential;
+    if (credential.asset.tradeScope === 'bound') throw new Error('This item is bound to this identity and cannot be moved.');
+    if (credential.asset.fungible !== false) throw new Error('This is a balance. Use Move balance\u2026 to choose how much to move.');
+    const done = await runIssuerOperation({
+      owner: sender.publicKey, toOwner: target.publicKey, kind: 'transfer', label: 'Move',
+      domain: credential.issuer.domain, path: '/atlas/asset/transfer',
+      predecessors: [credential.id],
+      body: async (requestId) => {
+        const payload = { action: 'transfer', credentialId: credential.id, recipientPublicKey: target.publicKey, requestId };
+        return { credential, recipientPublicKey: target.publicKey, intent: { payload, proof: await signWithSelf(payload) } };
+      }
+    });
+    await unloadItem(credential.id);
+    await logActivity('asset', 'Moved ' + credential.asset.class + ' to another identity in this wallet');
+    return { credential: done.data.credential, to: target };
+  }
+
+  // The balances a move of `credentialId`'s class can draw on: this issuer's stacks of the same class held by
+  // the acting identity that are not bound and not held back by unfinished work, largest first.
+  async function movableBalance(sender, credentialId) {
+    const wallet = await getWallet(sender.publicKey);
+    const entry = wallet.find((e) => e.credential.id === credentialId);
+    if (!entry) throw new Error('This balance is not in the identity you are acting as.');
+    const asset = entry.credential.asset;
+    if (asset.fungible !== true) throw new Error('This is a unique item, not a balance.');
+    if (asset.tradeScope === 'bound') throw new Error('This balance is bound to this identity and cannot be moved.');
+    const stacks = wallet
+      .filter((e) => e.credential.asset.fungible === true && e.credential.asset.tradeScope !== 'bound' && !isHeldBack(e)
+        && e.credential.asset.class === asset.class && e.credential.issuer.domain === entry.credential.issuer.domain)
+      .map((e) => e.credential)
+      .sort((a, b) => b.quantity - a.quantity);
+    return { asset, domain: entry.credential.issuer.domain, stacks, total: stacks.reduce((n, c) => n + c.quantity, 0) };
+  }
+
+  // What can be moved for the balance shown on a card: its class, issuer and the total available.
+  async function getBalanceMoveInfo(credentialId) {
+    const sender = await getIdentity();
+    if (!sender) throw new Error('Unlock your wallet first.');
+    const { asset, domain, stacks, total } = await movableBalance(sender, credentialId);
+    return { assetClass: asset.class, name: asset.name, domain, total, stacks: stacks.length };
+  }
+
+  // Moves `amount` of a balance (the whole of it, or part) from the acting identity to another identity of this
+  // account. It is the issuer's split with the other identity's key as the recipient (SPEC.md section 5.4): the
+  // receiving identity gets a credential for the amount and the acting identity keeps the rest. A request that
+  // needs more than one stack takes whole stacks first, largest first, and splits only the last; each is its
+  // own journalled operation, so a failure part-way leaves what was already moved moved.
+  async function moveBalanceToIdentity(credentialId, targetPublicKey, amount) {
+    const sender = await getIdentity();
+    if (!sender) throw new Error('Unlock your wallet first.');
+    const target = (await listMoveTargets()).find((t) => t.publicKey === targetPublicKey);
+    if (!target) throw new Error('That identity is not in this wallet.');
+    if (!Number.isInteger(amount) || amount < 1) throw new Error('Enter a whole amount of at least 1.');
+    const { asset, domain, stacks, total } = await movableBalance(sender, credentialId);
+    if (amount > total) throw new Error('Only ' + total + ' of this balance can be moved now.');
+    const plan = [];
+    let left = amount;
+    for (const stack of stacks) {
+      if (left <= 0) break;
+      const send = Math.min(left, stack.quantity);
+      plan.push({ stack, send });
+      left -= send;
+    }
+    let moved = 0;
+    try {
+      for (const { stack, send } of plan) {
+        await runIssuerOperation({
+          owner: sender.publicKey, toOwner: target.publicKey, kind: 'split', label: 'Move',
+          domain, path: '/atlas/asset/split',
+          predecessors: [stack.id],
+          body: async (requestId) => {
+            const payload = { action: 'split', credentialId: stack.id, sendAmount: send, toPublicKey: target.publicKey, requestId, domain };
+            return { credential: stack, sendAmount: send, toPublicKey: target.publicKey, intent: { payload, proof: await signWithSelf(payload) } };
+          }
+        });
+        moved += send;
+      }
+    } catch (err) {
+      if (moved > 0 && err && typeof err.message === 'string') err.message += ' (' + moved + ' of ' + amount + ' was moved before this stopped.)';
+      throw err;
+    }
+    // Merging signs as the acting identity, so only its own leftovers are merged here; the receiving
+    // identity merges when it is next the acting identity.
+    await autoConsolidateAssetWallet(sender.publicKey);
+    await logActivity('asset', 'Moved ' + asset.class + ' to another identity in this wallet');
+    return { moved, to: target, steps: plan.length };
+  }
+
+  // ---------- moving everything an identity holds ----------
+  //
+  // The plan for one identity: each unique item on its own, and each balance (one class from one issuer) as a
+  // single move of everything that can be moved now. Bound items and anything held back by unfinished work stay
+  // where they are and are listed, so the person sees what is left behind.
+  async function buildMoveEverythingPlan(holder) {
+    const wallet = await getWalletStrict(holder.publicKey);
+    const plan = { items: [], balances: [], bound: [], heldBack: [], other: [] };
+    const groups = new Map();
+    for (const e of wallet) {
+      const c = e.credential;
+      const a = c.asset;
+      const brief = { credentialId: c.id, name: a.name || a.class, class: a.class, domain: c.issuer.domain };
+      if (a.tradeScope === 'bound') { plan.bound.push(brief); continue; }
+      if (isHeldBack(e)) { plan.heldBack.push(brief); continue; }
+      if (a.fungible === false) { plan.items.push(brief); continue; }
+      if (a.fungible !== true) { plan.other.push(brief); continue; }
+      const key = a.class + '\n' + c.issuer.domain;
+      let group = groups.get(key);
+      if (!group) {
+        group = Object.assign({}, brief, { total: 0, stacks: 0, largest: 0 });
+        groups.set(key, group);
+        plan.balances.push(group);
+      }
+      group.total += c.quantity;
+      group.stacks++;
+      if (c.quantity > group.largest) { group.largest = c.quantity; group.credentialId = c.id; }
+    }
+    plan.balances.forEach((g) => { delete g.largest; });
+    return plan;
+  }
+
+  function summarizeMoveEverythingPlan(plan) {
+    return {
+      items: plan.items.length,
+      balances: plan.balances.length,
+      bound: plan.bound.length,
+      heldBack: plan.heldBack.length + plan.other.length,
+      names: plan.items.map((x) => x.name).concat(plan.balances.map((x) => x.name + ' x' + x.total)).slice(0, 50)
+    };
+  }
+
+  // What moving everything would do for the identity the wallet is acting as.
+  async function getMoveEverythingPlan() {
+    const holder = await getIdentity();
+    if (!holder) throw new Error('Unlock your wallet first.');
+    return summarizeMoveEverythingPlan(await buildMoveEverythingPlan(holder));
+  }
+
+  // What a sub-identity holds, for deciding whether it can be removed and what has to move first. `state` is
+  // 'empty', 'held' (it holds items or balances) or 'unreadable'; `unfinished` is true while it has operations in
+  // progress or a move to it is on the way.
+  async function getSubIdentityHoldings(id) {
+    const account = await requireSubIdentityAccount();
+    const vault = await readSubIdentityVault(account);
+    const entry = vault.identities.find((e) => e.id === id);
+    if (!entry) throw new Error('No such identity.');
+    const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
+    const state = await storedListState(entry, 'wallet', (stored.atlasWallets || {})[entry.publicKey]);
+    const pendingState = await storedListState(entry, 'pendingOps', (stored.atlasPendingOps || {})[entry.publicKey]);
+    const unfinished = pendingState !== 'empty' || await incomingMovePending(account, vault, entry.publicKey);
+    const empty = { items: 0, balances: 0, bound: 0, heldBack: 0, names: [] };
+    if (state !== 'held') return Object.assign({ state, unfinished }, empty);
+    const holder = { mode: 'local', publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk };
+    return Object.assign({ state, unfinished }, summarizeMoveEverythingPlan(await buildMoveEverythingPlan(holder)));
+  }
+
+  // Moves everything that can be moved from the acting identity to another identity of this account, one move at
+  // a time through the issuer. It does not stop at the first problem: each item that could not move is listed with
+  // its reason, and a domain that did not answer is left for later rather than asked again for every item. What
+  // already moved stays moved. `onProgress(done, total)` is called after each step.
+  async function moveEverythingToIdentity(targetPublicKey, onProgress, expectedSourcePublicKey) {
+    const sender = await getIdentity();
+    if (!sender) throw new Error('Unlock your wallet first.');
+    if (expectedSourcePublicKey && sender.publicKey !== expectedSourcePublicKey) throw new Error('The wallet is acting as a different identity now, so nothing was moved.');
+    const target = (await listMoveTargets()).find((t) => t.publicKey === targetPublicKey);
+    if (!target) throw new Error('That identity is not in this wallet.');
+    const plan = await buildMoveEverythingPlan(sender);
+    const steps = plan.items.map((x) => ({ kind: 'item', x })).concat(plan.balances.map((x) => ({ kind: 'balance', x })));
+    const result = {
+      to: target,
+      moved: { items: 0, balances: 0 },
+      failed: [],
+      left: plan.bound.map((x) => ({ name: x.name, reason: 'bound to this identity' }))
+        .concat(plan.heldBack.concat(plan.other).map((x) => ({ name: x.name, reason: 'waiting on unfinished work' })))
+    };
+    const stalled = new Set();
+    let done = 0;
+    for (const step of steps) {
+      const x = step.x;
+      if (stalled.has(x.domain)) {
+        result.failed.push({ name: x.name, reason: x.domain + ' did not answer earlier, so this was not tried' });
+      } else {
+        try {
+          if (step.kind === 'item') await moveAssetToIdentity(x.credentialId, target.publicKey);
+          else await moveBalanceToIdentity(x.credentialId, target.publicKey, x.total);
+          result.moved[step.kind === 'item' ? 'items' : 'balances']++;
+        } catch (err) {
+          if (err && err.pending) stalled.add(x.domain);
+          result.failed.push({ name: x.name, reason: String(err && err.message || err) });
+        }
+      }
+      done++;
+      if (typeof onProgress === 'function') { try { onProgress(done, steps.length); } catch (err) { /* display only */ } }
+    }
+    await logActivity('asset', 'Moved everything it could to another identity in this wallet');
+    return result;
+  }
+
   // Merges up to 20 balances of the same class AND issuer into one - the
   // inverse of splitAsset. Unlike deleteAsset above, this genuinely changes
   // what's owned (N credentials become 1 with the summed quantity), so it has
@@ -2751,7 +3454,7 @@ const AtlasWallet = (() => {
     const { atlasAvatarLook } = await chrome.storage.local.get('atlasAvatarLook');
     const all = atlasAvatarLook || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarLook', assetId);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'avatarLook', assetId);
     await chrome.storage.local.set({ atlasAvatarLook: all });
   }
 
@@ -2810,7 +3513,7 @@ const AtlasWallet = (() => {
     const { atlasAvatarHat } = await chrome.storage.local.get('atlasAvatarHat');
     const all = atlasAvatarHat || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarHat', assetId);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'avatarHat', assetId);
     await chrome.storage.local.set({ atlasAvatarHat: all });
   }
 
@@ -2867,7 +3570,7 @@ const AtlasWallet = (() => {
     const { atlasAvatarShoes } = await chrome.storage.local.get('atlasAvatarShoes');
     const all = atlasAvatarShoes || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarShoes', assetId);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'avatarShoes', assetId);
     await chrome.storage.local.set({ atlasAvatarShoes: all });
   }
 
@@ -2957,7 +3660,7 @@ const AtlasWallet = (() => {
     const { atlasAvatarHand } = await chrome.storage.local.get('atlasAvatarHand');
     const all = atlasAvatarHand || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarHand', assetId);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'avatarHand', assetId);
     await chrome.storage.local.set({ atlasAvatarHand: all });
   }
 
@@ -3163,7 +3866,7 @@ const AtlasWallet = (() => {
     const { atlasAvatarSlots } = await chrome.storage.local.get('atlasAvatarSlots');
     const all = atlasAvatarSlots || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarSlots', map);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'avatarSlots', map);
     await chrome.storage.local.set({ atlasAvatarSlots: all });
   }
 
@@ -3780,7 +4483,7 @@ const AtlasWallet = (() => {
     const { atlasSubmittedTrades } = await chrome.storage.local.get('atlasSubmittedTrades');
     const all = atlasSubmittedTrades || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'submittedTrades', records);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'submittedTrades', records);
     await chrome.storage.local.set({ atlasSubmittedTrades: all });
   }
 
@@ -3905,7 +4608,7 @@ const AtlasWallet = (() => {
     const { atlasAliases } = await chrome.storage.local.get('atlasAliases');
     const all = isLegacyFlatAliases(atlasAliases) ? {} : (atlasAliases || {});
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'aliases', aliasesForOwner);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'aliases', aliasesForOwner);
     await chrome.storage.local.set({ atlasAliases: all });
   }
 
@@ -3955,7 +4658,7 @@ const AtlasWallet = (() => {
     const { atlasRecentWorlds } = await chrome.storage.local.get('atlasRecentWorlds');
     const all = (atlasRecentWorlds && !Array.isArray(atlasRecentWorlds)) ? atlasRecentWorlds : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'recentWorlds', list);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'recentWorlds', list);
     await chrome.storage.local.set({ atlasRecentWorlds: all });
   }
 
@@ -4035,7 +4738,7 @@ const AtlasWallet = (() => {
     const { atlasFriends } = await chrome.storage.local.get('atlasFriends');
     const all = (atlasFriends && !Array.isArray(atlasFriends)) ? atlasFriends : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'friends', friends);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'friends', friends);
     await chrome.storage.local.set({ atlasFriends: all });
     scheduleFriendsSync();
   }
@@ -4165,7 +4868,7 @@ const AtlasWallet = (() => {
     const { atlasContactGroups } = await chrome.storage.local.get('atlasContactGroups');
     const all = (atlasContactGroups && !Array.isArray(atlasContactGroups)) ? atlasContactGroups : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'contactGroups', groups);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'contactGroups', groups);
     await chrome.storage.local.set({ atlasContactGroups: all });
   }
 
@@ -4284,7 +4987,7 @@ const AtlasWallet = (() => {
     const { atlasMutedChatUsers } = await chrome.storage.local.get('atlasMutedChatUsers');
     const all = (atlasMutedChatUsers && !Array.isArray(atlasMutedChatUsers)) ? atlasMutedChatUsers : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'mutedChatUsers', muted);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'mutedChatUsers', muted);
     await chrome.storage.local.set({ atlasMutedChatUsers: all });
   }
 
@@ -4322,7 +5025,7 @@ const AtlasWallet = (() => {
     const { atlasBlockedChatUsers } = await chrome.storage.local.get('atlasBlockedChatUsers');
     const all = (atlasBlockedChatUsers && !Array.isArray(atlasBlockedChatUsers)) ? atlasBlockedChatUsers : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'blockedChatUsers', blocked);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'blockedChatUsers', blocked);
     await chrome.storage.local.set({ atlasBlockedChatUsers: all });
   }
 
@@ -4377,7 +5080,7 @@ const AtlasWallet = (() => {
     const { atlasFavoriteDomains } = await chrome.storage.local.get('atlasFavoriteDomains');
     const all = (atlasFavoriteDomains && !Array.isArray(atlasFavoriteDomains)) ? atlasFavoriteDomains : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'favoriteDomains', favorites);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'favoriteDomains', favorites);
     await chrome.storage.local.set({ atlasFavoriteDomains: all });
   }
 
@@ -4467,7 +5170,7 @@ const AtlasWallet = (() => {
     const { atlasCalendarEvents } = await chrome.storage.local.get('atlasCalendarEvents');
     const all = (atlasCalendarEvents && !Array.isArray(atlasCalendarEvents)) ? atlasCalendarEvents : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'calendarEvents', events);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'calendarEvents', events);
     await chrome.storage.local.set({ atlasCalendarEvents: all });
   }
 
@@ -4971,7 +5674,7 @@ const AtlasWallet = (() => {
     const { atlasAssetFiles } = await chrome.storage.local.get('atlasAssetFiles');
     const all = atlasAssetFiles || {};
     const { identity } = await readStoredListForWrite('assetFiles', all[ownerPublicKey]);
-    all[ownerPublicKey] = await encryptAtRest(identity, 'assetFiles', records.slice(0, ASSET_FILE_LEDGER_MAX));
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'assetFiles', records.slice(0, ASSET_FILE_LEDGER_MAX));
     await chrome.storage.local.set({ atlasAssetFiles: all });
   }
 
@@ -5733,7 +6436,11 @@ const AtlasWallet = (() => {
   // the SAME getX() getters the UI already uses (see this section's
   // original comment above for why), except the wallet and its pending
   // journal, which are read together and strictly (snapshotWalletAndJournal).
-  async function buildBackupPayload(identity) {
+  async function buildActiveBackupPayload(identity) {
+    // Every store below is read through the active identity, so this is only for the identity the wallet is
+    // acting as. Any other identity goes through buildInactiveBackupPayload().
+    const active = await getIdentity();
+    if (!active || active.publicKey !== identity.publicKey) throw new Error('Switch to this identity to read its data this way.');
     const owner = identity.publicKey;
     // The wallet and its pending journal are captured from one storage read and strictly: a backup is
     // never made from a store that cannot be read, and never from two different moments.
@@ -5784,15 +6491,13 @@ const AtlasWallet = (() => {
     // Device-level UI preferences — not identity-scoped at all, but
     // carried along so restoring onto a fresh device feels like picking
     // this one back up rather than starting cold on settings too.
-    const settingsRaw = await chrome.storage.local.get([
-      'atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings',
-      'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasCameraDistance', 'atlasAutoLockMinutes',
-      'atlasInventoryFilterSettings'
-    ]);
+    const settingsRaw = await chrome.storage.local.get(BACKUP_SETTING_KEYS);
+    const explicitFamilies = await readBackupFamilies(identity, BACKUP_EXPLICIT_FIELDS);
 
     return {
       identity: { publicKey: identity.publicKey, privateKeyJwk: identity.privateKeyJwk },
       data: {
+        ...explicitFamilies,
         wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
         friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
         mutedChatUsers, blockedChatUsers, loadout, chatMessages,
@@ -5807,6 +6512,473 @@ const AtlasWallet = (() => {
       },
       settings: settingsRaw
     };
+  }
+
+  // ---------- backing up and restoring an identity that is not the active one ----------
+  //
+  // The getters above read through the active identity. A backup also has to carry the sub-identities (keys,
+  // names, data), and the main identity's own data while a sub-identity is active, so the per-identity stores
+  // are also read and written here with the identity passed in explicitly. Nothing in this path touches the
+  // active identity, so a backup never changes who the wallet is acting as. BACKUP_FAMILIES mirrors the
+  // `data` fields buildActiveBackupPayload() assembles; the sub-identity test checks the two paths agree.
+  const BACKUP_SETTING_KEYS = [
+    'atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings',
+    'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasCameraDistance', 'atlasAutoLockMinutes',
+    'atlasInventoryFilterSettings'
+  ];
+  // store: the at-rest store name (null = kept as is under the owner key); fallback: the value when none is stored.
+  const BACKUP_FAMILIES = [
+    { field: 'mail', key: 'atlasMail', store: 'mail', fallback: () => [] },
+    { field: 'sentMail', key: 'atlasSentMail', store: 'sentMail', fallback: () => [] },
+    { field: 'submittedTrades', key: 'atlasSubmittedTrades', store: 'submittedTrades', fallback: () => [] },
+    { field: 'assetUpdateNotices', key: 'atlasAssetUpdateNotices', store: 'assetUpdateNotices', fallback: () => [] },
+    { field: 'friends', key: 'atlasFriends', store: 'friends', fallback: () => [] },
+    { field: 'contactGroups', key: 'atlasContactGroups', store: 'contactGroups', fallback: () => [] },
+    { field: 'aliases', key: 'atlasAliases', store: 'aliases', fallback: () => ({}) },
+    { field: 'recentWorlds', key: 'atlasRecentWorlds', store: 'recentWorlds', fallback: () => [] },
+    { field: 'favoriteDomains', key: 'atlasFavoriteDomains', store: 'favoriteDomains', fallback: () => [] },
+    { field: 'calendarEvents', key: 'atlasCalendarEvents', store: 'calendarEvents', fallback: () => [] },
+    { field: 'mutedChatUsers', key: 'atlasMutedChatUsers', store: 'mutedChatUsers', fallback: () => [] },
+    { field: 'blockedChatUsers', key: 'atlasBlockedChatUsers', store: 'blockedChatUsers', fallback: () => [] },
+    { field: 'loadout', key: 'atlasLoadout', store: 'loadout', fallback: () => [] },
+    { field: 'chatMessages', key: 'atlasChatMessages', store: null, fallback: () => [] },
+    { field: 'chatE2eeKeyPair', key: 'atlasChatE2eeKeypairs', store: 'chatE2eeKeypair', fallback: () => null },
+    { field: 'chatE2eePeerKeys', key: 'atlasChatE2eePeerKeys', store: 'chatE2eePeerKeys', fallback: () => ({}) },
+    { field: 'activityLog', key: 'atlasActivityLog', store: 'activityLog', fallback: () => [] },
+    { field: 'assetFiles', key: 'atlasAssetFiles', store: 'assetFiles', fallback: () => [] },
+    { field: 'friendRequests', key: 'atlasFriendRequests', store: 'friendRequests', fallback: () => null, normalize: normalizeFriendRequestState },
+    { field: 'deletedMailIds', key: 'atlasDeletedMailIds', store: null, fallback: () => [] },
+    { field: 'deletedChatIds', key: 'atlasDeletedChatIds', store: null, fallback: () => [] },
+    { field: 'lastChatSendDomain', key: 'atlasLastChatSendDomain', store: null, fallback: () => null },
+    { field: 'lastPostOfficeSendDomain', key: 'atlasLastPostOfficeSendDomain', store: null, fallback: () => null },
+    { field: 'lastPostOfficeSettingsDomain', key: 'atlasLastPostOfficeSettingsDomain', store: null, fallback: () => null },
+    { field: 'chainLabsDomains', key: 'atlasChainLabsDomains', store: null, fallback: () => [] },
+    // Equipped avatar choices, the offers waiting from live pages, and the sites trusted to skip the offer prompt.
+    // They are read and written through the explicit-identity path for every identity, the main one included.
+    { field: 'avatarLook', key: 'atlasAvatarLook', store: 'avatarLook', fallback: () => null, skipNull: true },
+    { field: 'avatarHat', key: 'atlasAvatarHat', store: 'avatarHat', fallback: () => null, skipNull: true },
+    { field: 'avatarShoes', key: 'atlasAvatarShoes', store: 'avatarShoes', fallback: () => null, skipNull: true },
+    { field: 'avatarHand', key: 'atlasAvatarHand', store: 'avatarHand', fallback: () => null, skipNull: true },
+    { field: 'avatarSlots', key: 'atlasAvatarSlots', store: 'avatarSlots', fallback: () => ({}) },
+    { field: 'bridgeOffers', key: 'atlasBridgeOffers', store: 'bridgeOffers', fallback: () => [] },
+    { field: 'trustedBridgeDomains', key: 'atlasTrustedBridgeDomains', store: 'trustedBridgeDomains', fallback: () => [] }
+  ];
+  // The families the active-identity payload does not assemble from its own getters.
+  const BACKUP_EXPLICIT_FIELDS = ['avatarLook', 'avatarHat', 'avatarShoes', 'avatarHand', 'avatarSlots', 'bridgeOffers', 'trustedBridgeDomains'];
+  const BACKUP_UNREADABLE = {};
+
+  function perOwnerMap(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  }
+
+  // Every family for `identity`. A stored value that exists but cannot be read is an error, never an empty
+  // family: a backup made from it would silently drop that data.
+  async function readBackupFamilies(identity, onlyFields) {
+    const owner = identity.publicKey;
+    const families = onlyFields ? BACKUP_FAMILIES.filter((f) => onlyFields.includes(f.field)) : BACKUP_FAMILIES;
+    const stored = await chrome.storage.local.get(families.map((f) => f.key));
+    const out = {};
+    for (const f of families) {
+      const raw = perOwnerMap(stored[f.key])[owner];
+      let value;
+      if (raw === undefined || raw === null) value = f.fallback();
+      else if (!f.store) value = raw;
+      else {
+        value = await decryptAtRest(identity, f.store, raw, BACKUP_UNREADABLE);
+        if (value === BACKUP_UNREADABLE) throw new Error('Part of this identity’s data could not be read, so it was not backed up (' + f.field + ').');
+      }
+      out[f.field] = f.normalize ? f.normalize(value) : value;
+    }
+    return out;
+  }
+
+  // Writes the families a backup carried for `identity`; a family the backup did not carry is left alone.
+  async function writeBackupFamilies(identity, d, onlyFields) {
+    const owner = identity.publicKey;
+    for (const f of BACKUP_FAMILIES) {
+      if (onlyFields && !onlyFields.includes(f.field)) continue;
+      let value = d[f.field];
+      if (value === undefined || (value === null && (f.field === 'chatE2eeKeyPair' || f.skipNull))) continue;
+      if (f.normalize) value = f.normalize(value);
+      const got = await chrome.storage.local.get(f.key);
+      const all = perOwnerMap(got[f.key]);
+      all[owner] = f.store ? await encryptAtRest(identity, f.store, value) : value;
+      await chrome.storage.local.set({ [f.key]: all });
+    }
+  }
+
+  async function buildBackupDataExplicit(identity) {
+    const owner = identity.publicKey;
+    const snapshot = await snapshotWalletAndJournal(owner, identity);
+    const families = await readBackupFamilies(identity);
+    return Object.assign({ wallet: snapshot.wallet }, families, {
+      pendingOps: { format: PENDING_OPS_BACKUP_FORMAT, owner, entries: snapshot.journal }
+    });
+  }
+
+  async function buildInactiveBackupPayload(identity) {
+    return {
+      identity: { publicKey: identity.publicKey, privateKeyJwk: identity.privateKeyJwk },
+      data: await buildBackupDataExplicit(identity),
+      settings: await chrome.storage.local.get(BACKUP_SETTING_KEYS)
+    };
+  }
+
+  // The sub-identities of `account` with their data, for the backup file.
+  async function buildSubIdentityBackup(account) {
+    const vault = await readSubIdentityVault(account);
+    const out = [];
+    for (const e of vault.identities) {
+      const holder = { mode: 'local', publicKey: e.publicKey, privateKeyJwk: e.privateKeyJwk };
+      out.push({ id: e.id, label: e.label, publicKey: e.publicKey, privateKeyJwk: e.privateKeyJwk, createdAt: e.createdAt, data: await buildBackupDataExplicit(holder) });
+    }
+    return out;
+  }
+
+  // The remembered site bindings, naming each identity by public key (ids are reassigned on restore).
+  async function buildSiteIdentityBackup(account) {
+    const vault = await readSubIdentityVault(account);
+    return Object.entries(vault.siteBindings || {})
+      .filter(([, b]) => b && typeof b.identity === 'string')
+      .map(([origin, b]) => ({ origin, identity: b.identity === 'main' ? 'main' : b.identity, boundAt: b.boundAt || null }));
+  }
+
+  // Merges backed-up bindings into the vault: a site that already has a binding keeps it, and a binding whose
+  // identity is not in the vault is skipped.
+  async function restoreSiteIdentities(account, entries) {
+    let restored = 0;
+    await withSubIdentityLock(async () => {
+      const vault = await readSubIdentityVault(account);
+      vault.siteBindings = vault.siteBindings || {};
+      for (const e of entries) {
+        if (!e || typeof e.origin !== 'string' || typeof e.identity !== 'string') continue;
+        let site;
+        try { site = normalizeSiteOrigin(e.origin); } catch (err) { continue; }
+        if (vault.siteBindings[site] || Object.keys(vault.siteBindings).length >= SITE_BINDING_LIMIT) continue;
+        if (!siteTarget(account, vault, e.identity)) continue;
+        vault.siteBindings[site] = { identity: e.identity === account.publicKey ? 'main' : e.identity, boundAt: typeof e.boundAt === 'string' ? e.boundAt : new Date().toISOString() };
+        restored++;
+      }
+      if (restored) await writeSubIdentityVault(account, vault);
+    });
+    return restored;
+  }
+
+  async function buildBackupPayload(identity) {
+    const active = await getIdentity();
+    const payload = active && active.publicKey === identity.publicKey
+      ? await buildActiveBackupPayload(identity)
+      : await buildInactiveBackupPayload(identity);
+    if (identity.mode === 'local' && identity.privateKeyJwk) {
+      const subIdentities = await buildSubIdentityBackup(identity);
+      if (subIdentities.length) payload.subIdentities = subIdentities;
+      const siteIdentities = await buildSiteIdentityBackup(identity);
+      if (siteIdentities.length) payload.siteIdentities = siteIdentities;
+    }
+    return payload;
+  }
+
+  // Why a backed-up sub-identity key cannot be used, or null: malformed, a public key that is not the one
+  // the private key belongs to, or a key that does not sign.
+  async function subIdentityKeyProblem(entry) {
+    const jwk = entry && entry.privateKeyJwk;
+    if (!entry || typeof entry.publicKey !== 'string' || !jwk || jwk.kty !== 'EC' || jwk.crv !== 'P-256'
+        || typeof jwk.d !== 'string' || typeof jwk.x !== 'string' || typeof jwk.y !== 'string') return 'malformed';
+    try {
+      const x = new Uint8Array(b64urlDecode(jwk.x));
+      const y = new Uint8Array(b64urlDecode(jwk.y));
+      if (x.length !== 32 || y.length !== 32) return 'malformed';
+      const raw = new Uint8Array(65);
+      raw[0] = 4;
+      raw.set(x, 1);
+      raw.set(y, 33);
+      if (b64urlEncode(raw.buffer) !== entry.publicKey) return 'key-mismatch';
+      const priv = await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+      const pub = await crypto.subtle.importKey('raw', raw, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+      const probe = new TextEncoder().encode('atlas.sub-identity.restore-check');
+      const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, priv, probe);
+      return (await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, sig, probe)) ? null : 'key-mismatch';
+    } catch (err) {
+      return 'malformed';
+    }
+  }
+
+  function restoredSubIdentityLabel(vault, wanted) {
+    let base;
+    try { base = normalizeSubIdentityLabel(wanted); } catch (err) { base = 'Restored identity'; }
+    let label = base;
+    for (let n = 2; vault.identities.some((e) => e.label.toLowerCase() === label.toLowerCase()); n++) {
+      const suffix = ' (' + n + ')';
+      label = base.slice(0, SUB_IDENTITY_LABEL_MAX - suffix.length) + suffix;
+    }
+    return label;
+  }
+
+  // Adds the backup's sub-identities to the vault of the restored account and restores their data. The vault
+  // is merged, never replaced: a sub-identity made after the backup stays. An entry already in the vault
+  // (same public key) keeps its id and name and gets the backup's data, as the main identity does.
+  async function restoreSubIdentities(account, entries) {
+    const summary = { restored: 0, kept: 0, skipped: 0, problem: null };
+    return withSubIdentityLock(async () => {
+      let vault;
+      try {
+        vault = await readSubIdentityVault(account);
+      } catch (err) {
+        summary.problem = 'vault-unreadable';
+        summary.skipped = entries.length;
+        return summary;
+      }
+      for (const e of entries) {
+        if (!e || e.publicKey === account.publicKey || await subIdentityKeyProblem(e)) { summary.skipped++; continue; }
+        const existing = vault.identities.find((x) => x.publicKey === e.publicKey);
+        if (existing) {
+          summary.kept++;
+        } else {
+          if (vault.identities.length >= SUB_IDENTITY_LIMIT) { summary.skipped++; continue; }
+          const takenIds = new Set(vault.identities.map((x) => x.id));
+          vault.identities.push({
+            id: typeof e.id === 'string' && e.id && !takenIds.has(e.id) ? e.id : b64urlEncode(crypto.getRandomValues(new Uint8Array(16)).buffer),
+            label: restoredSubIdentityLabel(vault, e.label),
+            publicKey: e.publicKey,
+            privateKeyJwk: e.privateKeyJwk,
+            createdAt: typeof e.createdAt === 'string' ? e.createdAt : new Date().toISOString()
+          });
+          summary.restored++;
+          // The key is saved before its data, so a failure while restoring data never loses a key.
+          await writeSubIdentityVault(account, vault);
+        }
+        try {
+          await restoreSubIdentityData(e);
+        } catch (err) {
+          summary.problem = 'data-incomplete';
+        }
+      }
+      return summary;
+    });
+  }
+
+  // Writes a sub-identity's data (as carried by a backup or an export file) under its own key.
+  async function restoreSubIdentityData(entry) {
+    const holder = { mode: 'local', publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk };
+    const d = entry.data && typeof entry.data === 'object' ? entry.data : {};
+    await withWalletLock(() => saveWallet(holder.publicKey, d.wallet || [], {
+      identity: holder,
+      replaceUnreadable: true,
+      extraWrites: async (restoredIdentity) => (await planJournalRestore(restoredIdentity, holder.publicKey, d.pendingOps)).writes
+    }));
+    await withMessageLock(() => writeBackupFamilies(holder, d));
+  }
+
+  // ---------- exporting and importing one sub-identity ----------
+  //
+  // Export moves an identity out of the wallet into a file. It is two steps so nothing is removed before the
+  // person has the file and the code: prepareSubIdentityExport() builds and verifies the file and shows the
+  // code, completeSubIdentityExport() removes the identity afterwards. The file is encrypted under the
+  // wallet password (or a different file password) combined with a fresh code that is returned once and never
+  // stored, the same two-secret model as the main identity export, so one import path opens both.
+  const SUB_IDENTITY_EXPORT_FORMAT = 'atlas-sub-identity-export/1.0';
+  const LEGACY_IDENTITY_EXPORT_FORMAT = 'atlas-identity-export/1.0';
+  const SUB_IDENTITY_FILE_PASSWORD_MIN = 8;
+
+  async function sha256Hex(text) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // Re-derives from the local encrypted blob, so an unlocked wallet left open does not let someone export
+  // without the password (same rule as exportIdentity).
+  async function verifyWalletPassword(password) {
+    const { atlasIdentity } = await chrome.storage.local.get('atlasIdentity');
+    if (!atlasIdentity) throw new Error('No identity set up on this device yet.');
+    const key = await deriveAesKey([password], new Uint8Array(b64urlDecode(atlasIdentity.salt)), atlasIdentity.kdfIterations || KDF_ITERATIONS_LEGACY);
+    try {
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(b64urlDecode(atlasIdentity.iv)) }, key, b64urlDecode(atlasIdentity.ciphertext));
+    } catch (err) {
+      throw new Error('Incorrect password.');
+    }
+  }
+
+  async function sealSubIdentityExport(payload, filePassword, code) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveAesKey([filePassword, normalizeSeedPhrase(code)], salt, KDF_ITERATIONS_CURRENT);
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(payload)));
+    return {
+      format: SUB_IDENTITY_EXPORT_FORMAT,
+      salt: b64urlEncode(salt.buffer),
+      iv: b64urlEncode(iv.buffer),
+      ciphertext: b64urlEncode(ciphertext),
+      kdfIterations: KDF_ITERATIONS_CURRENT,
+      exportedAt: new Date().toISOString()
+    };
+  }
+
+  // Opens an export file (this format or the main identity's) with the file password and code. One generic
+  // error for any wrong secret or damaged file, and the contents are checked before they are used.
+  async function openIdentityExportFile(file, filePassword, code) {
+    if (!file || (file.format !== SUB_IDENTITY_EXPORT_FORMAT && file.format !== LEGACY_IDENTITY_EXPORT_FORMAT)) {
+      throw new Error('Not an Atlas identity file.');
+    }
+    if (!normalizeSeedPhrase(code)) throw new Error('Enter the export code.');
+    let parsed;
+    try {
+      const key = await deriveAesKey([filePassword, normalizeSeedPhrase(code)], new Uint8Array(b64urlDecode(file.salt)), file.kdfIterations || KDF_ITERATIONS_LEGACY);
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(b64urlDecode(file.iv)) }, key, b64urlDecode(file.ciphertext));
+      parsed = JSON.parse(new TextDecoder().decode(plaintext));
+    } catch (err) {
+      throw new Error('Incorrect password or code, or the file is damaged.');
+    }
+    if (!parsed || typeof parsed !== 'object' || (file.format === SUB_IDENTITY_EXPORT_FORMAT && parsed.version !== 1)) {
+      throw new Error('This identity file is not in a format this wallet understands.');
+    }
+    const jwk = parsed.privateKeyJwk || {};
+    const entry = {
+      publicKey: parsed.publicKey,
+      privateKeyJwk: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, d: jwk.d, ext: true, key_ops: ['sign'] }
+    };
+    if (await subIdentityKeyProblem(entry)) throw new Error('This file does not contain a usable identity key.');
+    entry.label = typeof parsed.label === 'string' ? parsed.label : '';
+    entry.createdAt = typeof parsed.createdAt === 'string' ? parsed.createdAt : null;
+    entry.data = parsed.data && typeof parsed.data === 'object' ? parsed.data : null;
+    return entry;
+  }
+
+  function exportFileName(label) {
+    const slug = String(label || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+    return 'atlas-identity-' + (slug || 'sub') + '-' + new Date().toISOString().slice(0, 10) + '.json';
+  }
+
+  // The identity must be one the wallet is not acting as: its data is then stable between making the file and
+  // removing the identity, and the wallet window is never left acting as an identity that is leaving.
+  async function subIdentityForExport(account, id) {
+    const vault = await readSubIdentityVault(account);
+    const entry = vault.identities.find((e) => e.id === id);
+    if (!entry) throw new Error('No such identity.');
+    if (await selectedSubIdentityId(account) === id || await activeSubIdentityId(account) === id) throw new Error('Switch back to your main identity before exporting this one.');
+    const holder = { mode: 'local', publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk };
+    const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
+    const walletState = await storedListState(entry, 'wallet', (stored.atlasWallets || {})[entry.publicKey]);
+    let pendingState = await storedListState(entry, 'pendingOps', (stored.atlasPendingOps || {})[entry.publicKey]);
+    if (pendingState === 'empty' && await incomingMovePending(account, vault, entry.publicKey)) pendingState = 'held';
+    return { entry, holder, walletState, pendingState };
+  }
+
+  // Builds the export file and the code. Removes nothing. `check` is passed back to
+  // completeSubIdentityExport(); it ties the removal to exactly the data the file holds.
+  async function prepareSubIdentityExport(id, opts) {
+    const options = opts || {};
+    const includeData = options.includeData !== false;
+    const useOtherPassword = typeof options.filePassword === 'string' && options.filePassword !== '';
+    if (useOtherPassword && options.filePassword.length < SUB_IDENTITY_FILE_PASSWORD_MIN) {
+      throw new Error('The file password must be at least ' + SUB_IDENTITY_FILE_PASSWORD_MIN + ' characters.');
+    }
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      await verifyWalletPassword(options.password);
+      const { entry, holder, walletState, pendingState } = await subIdentityForExport(account, id);
+      if (pendingState !== 'empty') throw new Error('This identity has unfinished operations. Let them finish first.');
+      if (!includeData && walletState !== 'empty') {
+        throw new Error('This identity still holds items, and a key-only export would leave them behind. Export it with its data, or move the items first.');
+      }
+      const data = includeData ? await buildBackupDataExplicit(holder) : null;
+      const code = generateSeedPhrase();
+      const payload = { version: 1, label: entry.label, createdAt: entry.createdAt, publicKey: entry.publicKey, privateKeyJwk: entry.privateKeyJwk };
+      if (data) payload.data = data;
+      const filePassword = useOtherPassword ? options.filePassword : options.password;
+      const file = await sealSubIdentityExport(payload, filePassword, code);
+      // Read the serialized file back through the import path before anything is removed.
+      const reread = await openIdentityExportFile(JSON.parse(JSON.stringify(file)), filePassword, code);
+      if (reread.publicKey !== entry.publicKey || reread.privateKeyJwk.d !== entry.privateKeyJwk.d || (includeData && !reread.data)) {
+        throw new Error('The export file did not read back correctly, so nothing was removed. Try again.');
+      }
+      return {
+        file,
+        code,
+        filename: exportFileName(entry.label),
+        label: entry.label,
+        includesData: includeData,
+        usesWalletPassword: !useOtherPassword,
+        check: { id: entry.id, publicKey: entry.publicKey, includesData: includeData, digest: data ? await sha256Hex(JSON.stringify(data)) : null }
+      };
+    });
+  }
+
+  // Removes every per-identity value stored under `publicKey` (the stores are maps keyed by public key).
+  async function purgeOwnerStorage(publicKey) {
+    const all = await chrome.storage.local.get(null);
+    const changes = {};
+    for (const [key, value] of Object.entries(all)) {
+      if (key === 'atlasSubIdentities') continue;
+      if (value && typeof value === 'object' && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, publicKey)) {
+        const copy = { ...value };
+        delete copy[publicKey];
+        changes[key] = copy;
+      }
+    }
+    if (Object.keys(changes).length) await chrome.storage.local.set(changes);
+  }
+
+  // Second step: the person has the file and the code. Removes the identity from the vault, and its data
+  // when the file carried it, so the identity exists in one place only. A key-only export leaves the data as
+  // unreadable ciphertext, the same as deleting (it comes back if the same key is imported again).
+  async function completeSubIdentityExport(check) {
+    if (!check || typeof check.id !== 'string' || typeof check.publicKey !== 'string') throw new Error('Nothing to finish.');
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const { entry, holder, walletState, pendingState } = await subIdentityForExport(account, check.id);
+      if (entry.publicKey !== check.publicKey) throw new Error('This identity changed since the file was made. Export it again.');
+      if (pendingState !== 'empty') throw new Error('This identity has unfinished operations. Let them finish first.');
+      if (check.includesData) {
+        const digest = await sha256Hex(JSON.stringify(await buildBackupDataExplicit(holder)));
+        if (digest !== check.digest) throw new Error('This identity’s data changed after the file was made, so it was not removed. Export it again.');
+      } else if (walletState !== 'empty') {
+        throw new Error('This identity now holds items, so it was not removed. Export it again.');
+      }
+      const vault = await readSubIdentityVault(account);
+      vault.identities = vault.identities.filter((e) => e.id !== entry.id);
+      await writeSubIdentityVault(account, vault);
+      if (check.includesData) {
+        await withWalletLock(() => withMessageLock(() => purgeOwnerStorage(entry.publicKey)));
+      }
+      await logActivity('identity', 'Sub-identity exported to a file and removed');
+      return { removed: true, label: entry.label };
+    });
+  }
+
+  // Adds an exported identity (this format, or a main identity export file) to the vault. `filePassword` is
+  // whatever protected the file: the wallet password it was made under, or the different one chosen then.
+  async function importSubIdentity(file, filePassword, code, opts) {
+    const options = opts || {};
+    return withSubIdentityLock(async () => {
+      const account = await requireSubIdentityAccount();
+      const entry = await openIdentityExportFile(file, filePassword, code);
+      const vault = await readSubIdentityVault(account);
+      if (entry.publicKey === account.publicKey || vault.identities.some((e) => e.publicKey === entry.publicKey)) {
+        throw new Error('This identity is already in your wallet.');
+      }
+      if (vault.identities.length >= SUB_IDENTITY_LIMIT) throw new Error('You can have at most ' + SUB_IDENTITY_LIMIT + ' sub-identities.');
+      const wanted = typeof options.label === 'string' && options.label.trim() ? options.label : (entry.label || 'Imported identity');
+      const added = {
+        id: b64urlEncode(crypto.getRandomValues(new Uint8Array(16)).buffer),
+        label: restoredSubIdentityLabel(vault, wanted),
+        publicKey: entry.publicKey,
+        privateKeyJwk: entry.privateKeyJwk,
+        createdAt: entry.createdAt || new Date().toISOString()
+      };
+      vault.identities.push(added);
+      await writeSubIdentityVault(account, vault);
+      if (entry.data) {
+        try {
+          await restoreSubIdentityData(entry);
+        } catch (err) {
+          vault.identities = vault.identities.filter((e) => e.id !== added.id);
+          await writeSubIdentityVault(account, vault);
+          throw new Error('The identity’s data could not be restored, so nothing was added. Try again.');
+        }
+      }
+      await logActivity('identity', 'Sub-identity imported from a file');
+      return { ...publicSubIdentity(added, await activeSubIdentityId(account)), includesData: !!entry.data };
+    });
   }
 
   // The counterpart to buildBackupPayload() above — restores every family
@@ -5917,6 +7089,8 @@ const AtlasWallet = (() => {
       withMessageLock(() => saveFriendRequestState(owner, d.friendRequests))
     ]);
 
+    await withMessageLock(() => writeBackupFamilies(identity, d, BACKUP_EXPLICIT_FIELDS));
+
     // Low-sensitivity bookkeeping — restored as a raw per-owner slot
     // merge, exactly matching how each of these keys is written elsewhere
     // in this file (see e.g. addDeletedChatIds/setLastChatSendDomain
@@ -5944,22 +7118,31 @@ const AtlasWallet = (() => {
     // about.
     const s = payload.settings || {};
     const settingsToSet = {};
-    ['atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings', 'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasCameraDistance', 'atlasAutoLockMinutes', 'atlasInventoryFilterSettings']
+    BACKUP_SETTING_KEYS
       .forEach((k) => { if (s[k] !== undefined) settingsToSet[k] = s[k]; });
     if (Object.keys(settingsToSet).length) await chrome.storage.local.set(settingsToSet);
 
     // Logged AFTER the activity log itself was just overwritten by the
     // restore above (d.activityLog), so this becomes the newest entry on
     // top of the restored history rather than being wiped by it.
+    // The sub-identities come last: the main identity and its data are already restored, and a problem here
+    // is reported rather than undoing that.
+    let subIdentitySummary = null;
+    if (Array.isArray(payload.subIdentities) && payload.subIdentities.length) {
+      subIdentitySummary = await restoreSubIdentities(identity, payload.subIdentities);
+    }
+    if (Array.isArray(payload.siteIdentities) && payload.siteIdentities.length) {
+      try { await restoreSiteIdentities(identity, payload.siteIdentities); } catch (err) { /* the sites ask again */ }
+    }
     const journalNote = journalSummary && journalSummary.status !== 'absent'
       ? ' (pending operations: ' + journalSummary.added + ' added, ' + journalSummary.merged + ' merged, ' + journalSummary.quarantined + ' set aside)'
       : '';
     await logActivity('backup', 'Restored full wallet backup from ' + (restoreSourceLabel || 'a backup file') + journalNote);
-    return { publicKey, pendingOps: journalSummary };
+    return { publicKey, pendingOps: journalSummary, subIdentities: subIdentitySummary };
   }
 
   async function exportFullBackup(password, seedPhrase) {
-    const identity = await getIdentity();
+    const identity = await getAccountIdentity();
     if (!identity || identity.mode !== 'local') {
       throw new Error('Unlock a local password identity first — a WebAuthn identity’s private key never leaves the authenticator, so it can’t be included in a backup.');
     }
@@ -6263,7 +7446,7 @@ const AtlasWallet = (() => {
   // gets immediate confirmation it worked, rather than waiting for the
   // debounce timer on whatever change happens to come next.
   async function setUpAutoBackup(fileHandle, password) {
-    const identity = await getIdentity();
+    const identity = await getAccountIdentity();
     if (!identity || identity.mode !== 'local') {
       throw new Error('Unlock a local password identity first — a WebAuthn identity’s private key never leaves the authenticator, so it can’t be included in a backup.');
     }
@@ -6340,9 +7523,9 @@ const AtlasWallet = (() => {
       const settings = await getAutoBackupSettings();
       if (!settings || !settings.enabled) return { skipped: true, reason: 'not enabled' };
 
-      const identity = await getIdentity();
+      const identity = await getAccountIdentity();
       if (!identity || identity.mode !== 'local' || identity.publicKey !== settings.ownerPublicKey) {
-        // Locked, or a different identity is active than the one this
+        // Locked, or a different account is unlocked than the one this
         // device's auto-backup was set up for — nothing safe to write.
         return { skipped: true, reason: 'wallet locked or a different identity is active' };
       }
@@ -6524,7 +7707,7 @@ const AtlasWallet = (() => {
   //      Google's own sync infrastructure, encrypted the same way, but on
   //      infrastructure the person doesn't run themselves — worth being
   //      opt-in for that reason alone, never on by default.
-  //   3. Restoring it only ever recovers the identity, not any data —
+  //   3. Restoring it only ever recovers the identity (and the sub-identity keys, see below), not any data —
   //      the exact same scope importIdentity() already has (see its own
   //      comment). A full data restore still means the file-based
   //      backup/restore above, or exportFullBackup/importFullBackup.
@@ -6538,6 +7721,96 @@ const AtlasWallet = (() => {
   // changePassword, importIdentity, applyBackupPayload) so the synced
   // copy always reflects whichever identity + password is actually
   // active on this device, whenever the person has opted in.
+  // ---------- sub-identity keys in the Chrome sync backup ----------
+  //
+  // The synced identity blob recovers the main key only. When sync is on, the sub-identities vault is mirrored
+  // too, as the same ciphertext it has in local storage (sealed under a key derived from the main private key,
+  // which the password-protected synced blob in turn protects), split into parts that fit one sync item each.
+  // Only the keys and names come back, never their data, the same scope as the main identity.
+  const SYNC_SUBKEYS_META = 'atlasIdentitySyncSubKeys';
+  const SYNC_SUBKEYS_PART = 'atlasIdentitySyncSubKeys.';
+  const SYNC_SUBKEYS_CHUNK = 6000;
+
+  async function removeSyncedSubIdentityKeys() {
+    const all = await chrome.storage.sync.get(null);
+    const keys = Object.keys(all).filter((k) => k === SYNC_SUBKEYS_META || k.startsWith(SYNC_SUBKEYS_PART));
+    if (keys.length) await chrome.storage.sync.remove(keys);
+  }
+
+  // Best-effort: a sync problem never blocks the vault write that triggered it. Mirrors nothing when sync is off
+  // or is keeping a different identity.
+  async function mirrorSubIdentityVaultToSync(account, encryptedVault, vaultIsEmpty) {
+    try {
+      const { atlasIdentitySyncBackupEnabled } = await chrome.storage.local.get('atlasIdentitySyncBackupEnabled');
+      if (!atlasIdentitySyncBackupEnabled) return;
+      const { atlasIdentitySyncBackup } = await chrome.storage.sync.get('atlasIdentitySyncBackup');
+      if (!atlasIdentitySyncBackup || atlasIdentitySyncBackup.publicKey !== account.publicKey) return;
+      if (vaultIsEmpty || !encryptedVault) { await removeSyncedSubIdentityKeys(); return; }
+      const text = JSON.stringify(encryptedVault);
+      const parts = [];
+      for (let i = 0; i < text.length; i += SYNC_SUBKEYS_CHUNK) parts.push(text.slice(i, i + SYNC_SUBKEYS_CHUNK));
+      const items = { [SYNC_SUBKEYS_META]: { publicKey: account.publicKey, parts: parts.length, length: text.length, updatedAt: new Date().toISOString() } };
+      parts.forEach((part, i) => { items[SYNC_SUBKEYS_PART + i] = part; });
+      await chrome.storage.sync.set(items);
+      const all = await chrome.storage.sync.get(null);
+      const stale = Object.keys(all).filter((k) => k.startsWith(SYNC_SUBKEYS_PART) && Number(k.slice(SYNC_SUBKEYS_PART.length)) >= parts.length);
+      if (stale.length) await chrome.storage.sync.remove(stale);
+    } catch (err) {
+      // best-effort
+    }
+  }
+
+  // Adds the synced sub-identity keys to this device's vault after the main identity was restored from sync. A
+  // sub-identity or site binding already on this device is kept as it is.
+  async function restoreSubIdentityKeysFromSync(account) {
+    const none = { restored: 0, problem: null };
+    try {
+      const got = await chrome.storage.sync.get(SYNC_SUBKEYS_META);
+      const meta = got[SYNC_SUBKEYS_META];
+      if (!meta || meta.publicKey !== account.publicKey || !(meta.parts > 0)) return none;
+      const names = [];
+      for (let i = 0; i < meta.parts; i++) names.push(SYNC_SUBKEYS_PART + i);
+      const partsGot = await chrome.storage.sync.get(names);
+      let text = '';
+      for (const name of names) {
+        if (typeof partsGot[name] !== 'string') return { restored: 0, problem: 'incomplete' };
+        text += partsGot[name];
+      }
+      if (text.length !== meta.length) return { restored: 0, problem: 'incomplete' };
+      const synced = await decryptAtRest(account, SUB_IDENTITY_STORE, JSON.parse(text), null);
+      if (!synced || !Array.isArray(synced.identities)) return { restored: 0, problem: 'unreadable' };
+      return await withSubIdentityLock(async () => {
+        let local;
+        try { local = await readSubIdentityVault(account); } catch (err) { return { restored: 0, problem: 'vault-unreadable' }; }
+        let restored = 0;
+        for (const e of synced.identities) {
+          if (!e || local.identities.some((x) => x.publicKey === e.publicKey) || local.identities.length >= SUB_IDENTITY_LIMIT || await subIdentityKeyProblem(e)) continue;
+          const takenIds = new Set(local.identities.map((x) => x.id));
+          local.identities.push({
+            id: typeof e.id === 'string' && e.id && !takenIds.has(e.id) ? e.id : b64urlEncode(crypto.getRandomValues(new Uint8Array(16)).buffer),
+            label: restoredSubIdentityLabel(local, e.label),
+            publicKey: e.publicKey,
+            privateKeyJwk: e.privateKeyJwk,
+            createdAt: typeof e.createdAt === 'string' ? e.createdAt : new Date().toISOString()
+          });
+          restored++;
+        }
+        let bound = 0;
+        local.siteBindings = local.siteBindings || {};
+        for (const [site, b] of Object.entries(synced.siteBindings || {})) {
+          if (local.siteBindings[site] || !b || typeof b.identity !== 'string' || Object.keys(local.siteBindings).length >= SITE_BINDING_LIMIT) continue;
+          if (b.identity !== 'main' && !local.identities.some((x) => x.publicKey === b.identity)) continue;
+          local.siteBindings[site] = b;
+          bound++;
+        }
+        if (restored || bound) await writeSubIdentityVault(account, local);
+        return { restored, problem: null };
+      });
+    } catch (err) {
+      return { restored: 0, problem: 'failed' };
+    }
+  }
+
   async function mirrorIdentityToSyncBackup(atlasIdentityBlob) {
     try {
       const { atlasIdentitySyncBackupEnabled } = await chrome.storage.local.get('atlasIdentitySyncBackupEnabled');
@@ -6608,6 +7881,14 @@ const AtlasWallet = (() => {
     }
     await chrome.storage.local.set({ atlasIdentitySyncBackupEnabled: true });
     await chrome.storage.sync.set({ atlasIdentitySyncBackup: atlasIdentity });
+    try {
+      const account = await getAccountIdentity();
+      if (account && account.mode === 'local' && account.publicKey === atlasIdentity.publicKey) {
+        const { atlasSubIdentities } = await chrome.storage.local.get('atlasSubIdentities');
+        const vault = await readSubIdentityVault(account);
+        await mirrorSubIdentityVaultToSync(account, (atlasSubIdentities || {})[account.publicKey], !vault.identities.length && !Object.keys(vault.siteBindings || {}).length);
+      }
+    } catch (err) { /* the vault is mirrored again on its next change */ }
     await logActivity('backup', 'Identity sync turned on (Chrome sync)');
     return { ok: true };
   }
@@ -6624,6 +7905,7 @@ const AtlasWallet = (() => {
   async function disableIdentitySyncBackup(skipLog) {
     await chrome.storage.local.set({ atlasIdentitySyncBackupEnabled: false });
     try { await chrome.storage.sync.remove('atlasIdentitySyncBackup'); } catch (err) { /* best-effort */ }
+    try { await removeSyncedSubIdentityKeys(); } catch (err) { /* best-effort */ }
     if (!skipLog) await logActivity('backup', 'Identity sync turned off');
   }
 
@@ -6669,8 +7951,9 @@ const AtlasWallet = (() => {
     });
     await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
     await cacheAutoBackupSessionKey(password);
-    await logActivity('identity', 'Identity restored from Chrome sync');
-    return { publicKey };
+    const subIdentities = await restoreSubIdentityKeysFromSync({ mode: 'local', publicKey, privateKeyJwk });
+    await logActivity('identity', 'Identity restored from Chrome sync' + (subIdentities.restored ? ' with ' + subIdentities.restored + ' sub-identit' + (subIdentities.restored === 1 ? 'y' : 'ies') : ''));
+    return { publicKey, subIdentities };
   }
 
   // ---------- wallet activity log ----------
@@ -6707,7 +7990,7 @@ const AtlasWallet = (() => {
     const { atlasActivityLog } = await chrome.storage.local.get('atlasActivityLog');
     const all = (atlasActivityLog && typeof atlasActivityLog === 'object' && !Array.isArray(atlasActivityLog)) ? atlasActivityLog : {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'activityLog', list);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'activityLog', list);
     await chrome.storage.local.set({ atlasActivityLog: all });
   }
 
@@ -6821,7 +8104,7 @@ const AtlasWallet = (() => {
     const { atlasMail } = await chrome.storage.local.get('atlasMail');
     const all = atlasMail || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'mail', entries);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'mail', entries);
     await chrome.storage.local.set({ atlasMail: all });
   }
 
@@ -7144,6 +8427,17 @@ const AtlasWallet = (() => {
     return { __atlasEncrypted: true, iv: b64urlEncode(iv), ciphertext: b64urlEncode(new Uint8Array(ciphertext)) };
   }
 
+  // Encrypts for one owner and refuses when the identity doing it is someone else. A save is built for one
+  // owner but reads the active identity when it runs; if the wallet switched identity in between, writing
+  // would encrypt the owner's data under the other identity's key and make it unreadable. Failing leaves the
+  // stored data as it was.
+  async function encryptAtRestFor(identity, ownerPublicKey, storeName, value) {
+    if (identity && identity.mode === 'local' && identity.privateKeyJwk && identity.publicKey !== ownerPublicKey) {
+      throw storageError('identity-changed', 'The active identity changed while this was saving, so nothing was saved. Try again.');
+    }
+    return encryptAtRest(identity, storeName, value);
+  }
+
   async function decryptAtRest(identity, storeName, stored, fallback) {
     if (stored === undefined || stored === null) return fallback;
     if (!stored || typeof stored !== 'object' || !stored.__atlasEncrypted) return stored; // legacy plaintext (pre-encryption data), or a shape encryptAtRest never produced
@@ -7332,7 +8626,7 @@ const AtlasWallet = (() => {
     const { atlasChatE2eeKeypairs } = await chrome.storage.local.get('atlasChatE2eeKeypairs');
     const all = atlasChatE2eeKeypairs || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'chatE2eeKeypair', pair);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'chatE2eeKeypair', pair);
     await chrome.storage.local.set({ atlasChatE2eeKeypairs: all });
   }
 
@@ -7371,7 +8665,7 @@ const AtlasWallet = (() => {
     const { atlasChatE2eePeerKeys } = await chrome.storage.local.get('atlasChatE2eePeerKeys');
     const all = atlasChatE2eePeerKeys || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'chatE2eePeerKeys', peerKeys);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'chatE2eePeerKeys', peerKeys);
     await chrome.storage.local.set({ atlasChatE2eePeerKeys: all });
   }
 
@@ -7868,7 +9162,7 @@ const AtlasWallet = (() => {
     const { atlasSentMail } = await chrome.storage.local.get('atlasSentMail');
     const all = atlasSentMail || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'sentMail', entries);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'sentMail', entries);
     await chrome.storage.local.set({ atlasSentMail: all });
   }
 
@@ -8303,15 +9597,15 @@ const AtlasWallet = (() => {
   // one-time upgrade path every other store here already pays for.
   async function getBridgeOffers(ownerPublicKey) {
     const { atlasBridgeOffers } = await chrome.storage.local.get('atlasBridgeOffers');
-    const identity = await getIdentity();
+    const identity = await holderFor(ownerPublicKey);
     return decryptAtRestAndMigrate(identity, 'bridgeOffers', (atlasBridgeOffers || {})[ownerPublicKey], [], (v) => saveBridgeOffers(ownerPublicKey, v));
   }
 
   async function saveBridgeOffers(ownerPublicKey, entries) {
     const { atlasBridgeOffers } = await chrome.storage.local.get('atlasBridgeOffers');
     const all = atlasBridgeOffers || {};
-    const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'bridgeOffers', entries);
+    const identity = await holderFor(ownerPublicKey);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'bridgeOffers', entries);
     await chrome.storage.local.set({ atlasBridgeOffers: all });
   }
 
@@ -8370,7 +9664,10 @@ const AtlasWallet = (() => {
     if (!verdict.valid) throw new Error(verdictBlockMessage(verdict, 'this offer') || ('offer credential does not check out: ' + verdict.reason));
 
     await commitOperation(ownerPublicKey, null, [{ owner: ownerPublicKey, add: [{ credential, lastVerdict: verdict }] }]);
-    await autoConsolidateAssetWallet(ownerPublicKey);
+    // Merging signs as the acting identity, so it only runs for that one; another identity's stacks are merged
+    // when it is next the acting identity.
+    const acting = await getIdentity();
+    if (acting && acting.publicKey === ownerPublicKey) await autoConsolidateAssetWallet(ownerPublicKey);
 
     entry.claimed = true;
     await saveBridgeOffers(ownerPublicKey, entries);
@@ -8406,15 +9703,15 @@ const AtlasWallet = (() => {
   // this file.
   async function getTrustedBridgeDomains(ownerPublicKey) {
     const { atlasTrustedBridgeDomains } = await chrome.storage.local.get('atlasTrustedBridgeDomains');
-    const identity = await getIdentity();
+    const identity = await holderFor(ownerPublicKey);
     return decryptAtRestAndMigrate(identity, 'trustedBridgeDomains', (atlasTrustedBridgeDomains || {})[ownerPublicKey], [], (v) => saveTrustedBridgeDomains(ownerPublicKey, v));
   }
 
   async function saveTrustedBridgeDomains(ownerPublicKey, entries) {
     const { atlasTrustedBridgeDomains } = await chrome.storage.local.get('atlasTrustedBridgeDomains');
     const all = atlasTrustedBridgeDomains || {};
-    const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'trustedBridgeDomains', entries);
+    const identity = await holderFor(ownerPublicKey);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'trustedBridgeDomains', entries);
     await chrome.storage.local.set({ atlasTrustedBridgeDomains: all });
   }
 
@@ -8548,7 +9845,7 @@ const AtlasWallet = (() => {
     const { atlasFriendRequests } = await chrome.storage.local.get('atlasFriendRequests');
     const all = atlasFriendRequests || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'friendRequests', normalizeFriendRequestState(state));
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'friendRequests', normalizeFriendRequestState(state));
     await chrome.storage.local.set({ atlasFriendRequests: all });
     scheduleFriendsSync();
   }
@@ -8857,7 +10154,7 @@ const AtlasWallet = (() => {
     const { atlasAssetUpdateNotices } = await chrome.storage.local.get('atlasAssetUpdateNotices');
     const all = atlasAssetUpdateNotices || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'assetUpdateNotices', notices);
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'assetUpdateNotices', notices);
     await chrome.storage.local.set({ atlasAssetUpdateNotices: all });
   }
 
@@ -9499,7 +10796,7 @@ const AtlasWallet = (() => {
     const { atlasCallState } = await chrome.storage.local.get('atlasCallState');
     const all = atlasCallState || {};
     const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'callState', normalizeCallState(state));
+    all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'callState', normalizeCallState(state));
     await chrome.storage.local.set({ atlasCallState: all });
   }
 
@@ -9873,9 +11170,11 @@ const AtlasWallet = (() => {
     return name ? decryptAtRest(who.identity, name, stored, fallback) : stored;
   }
 
-  async function chainLabsWrite(storeKey, name, value) {
+  // expectedKey: the key the write was prepared for; a switch of identity in between refuses it rather than writing to the new one.
+  async function chainLabsWrite(storeKey, name, value, expectedKey) {
     const who = await chainLabsOwner();
     if (!who) throw storageError('wallet-locked', WALLET_LOCKED_MESSAGE);
+    if (expectedKey && who.key !== expectedKey) throw Object.assign(new Error('The wallet is acting as a different identity now.'), { code: 'identity-changed' });
     const got = await chrome.storage.local.get(storeKey);
     const all = got[storeKey] || {};
     all[who.key] = name ? await encryptAtRest(who.identity, name, value) : value;
@@ -9946,7 +11245,7 @@ const AtlasWallet = (() => {
         loadDomains: () => chainLabsRead(CHAIN_LABS_DOMAINS_KEY, null, []),
         saveDomains: (list) => chainLabsWrite(CHAIN_LABS_DOMAINS_KEY, null, list),
         loadCache: () => chainLabsRead(CHAIN_LABS_CACHE_KEY, 'chainLabsCache', {}),
-        saveCache: (cache) => chainLabsWrite(CHAIN_LABS_CACHE_KEY, 'chainLabsCache', cache),
+        saveCache: (cache, expectedKey) => chainLabsWrite(CHAIN_LABS_CACHE_KEY, 'chainLabsCache', cache, expectedKey),
         afterPurchase: (prepared, balance) => adoptChainLabsGoldRemainder(prepared.credential, balance)
       });
     }
@@ -9954,6 +11253,9 @@ const AtlasWallet = (() => {
   }
 
   return {
+    getAccountIdentity, listSubIdentities, getActiveIdentityInfo, createSubIdentity, renameSubIdentity, switchIdentity, removeSubIdentity,
+    getSiteIdentity, setSiteIdentity, createSiteIdentity, forgetSiteIdentity, listSiteIdentities, useIdentityInThisContext, releaseIdentityContext, followSiteIdentity,
+    prepareSubIdentityExport, completeSubIdentityExport, importSubIdentity, listMoveTargets, moveAssetToIdentity, getBalanceMoveInfo, getMoveEverythingPlan, moveEverythingToIdentity, getSubIdentityHoldings, moveBalanceToIdentity,
     hasIdentity, isUnlocked, getIdentity, createIdentity, unlockIdentity, lockIdentity, changePassword,
     exportIdentity, importIdentity, presentIdentity, recordVisit,
     // SPEC.md §3.8.1 — exported so confirm-bridge.js (the wallet-bridge

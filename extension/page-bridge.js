@@ -18,16 +18,24 @@
   if (window.atlasWallet) return; // already injected — never double-wrap
 
   let nextRequestId = 1;
-  const pending = new Map(); // requestId -> {resolve, reject}
+  const pending = new Map(); // requestId -> { acked, finish(result) }
+
+  // The content script that answers these requests attaches after the page's own scripts may already have run, so a
+  // request is sent again until it is acknowledged, and one that is never acknowledged ends as "not available" after a
+  // few seconds. Once acknowledged it waits as long as the request needs (the visitor may be choosing an identity).
+  const NO_ACK_MS = 4000;
+  const RESEND_MS = 300;
 
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.origin !== location.origin) return;
     const data = event.data;
-    if (!data || data.__atlasBridge !== true || data.direction !== 'to-page') return;
+    if (!data || data.__atlasBridge !== true) return;
     const waiter = pending.get(data.requestId);
     if (!waiter) return;
+    if (data.direction === 'ack') { waiter.acked = true; return; }
+    if (data.direction !== 'to-page') return;
     pending.delete(data.requestId);
-    waiter.resolve(data.result);
+    waiter.finish(data.result);
   });
 
   // A request content.js never answers (extension reloaded mid-flight, a
@@ -35,9 +43,9 @@
   // still resolve rather than hang a caller's await forever — same
   // "fail to the closed/denied state, never to a silent stall" posture
   // the rest of this bridge already takes. timeoutMs/defaultResult are
-  // per-action: getIdentity is a quick, no-human-involved read (a short
-  // timeout is enough), while requestSignature can legitimately sit
-  // waiting on a visitor's own decision for a while — its timeout here is
+  // per-action: getIdentity is normally a quick read, but the first one
+  // from a site with no remembered identity waits on the visitor's choice
+  // like requestSignature does, so both get the long timeout — it is
   // deliberately longer than content.js's own confirmation-overlay
   // timeouts (see that file's requestBridgeConfirmation()/
   // openBridgeConfirmOverlay() comments), so under normal conditions the
@@ -45,13 +53,25 @@
   function sendBridgeRequest(action, payload, timeoutMs, defaultResult) {
     const requestId = nextRequestId++;
     return new Promise((resolve) => {
-      pending.set(requestId, { resolve });
-      window.postMessage({ __atlasBridge: true, direction: 'to-content', requestId, action, payload }, location.origin);
-      setTimeout(() => {
+      const timers = [];
+      const waiter = {
+        acked: false,
+        finish(result) { timers.forEach((t) => { clearTimeout(t); clearInterval(t); }); resolve(result); }
+      };
+      pending.set(requestId, waiter);
+      const post = () => window.postMessage({ __atlasBridge: true, direction: 'to-content', requestId, action, payload }, location.origin);
+      post();
+      timers.push(setInterval(() => { if (waiter.acked || !pending.has(requestId)) return; post(); }, RESEND_MS));
+      timers.push(setTimeout(() => {
+        if (waiter.acked || !pending.has(requestId)) return;
+        pending.delete(requestId);
+        waiter.finish(defaultResult);
+      }, NO_ACK_MS));
+      timers.push(setTimeout(() => {
         if (!pending.has(requestId)) return;
         pending.delete(requestId);
-        resolve(defaultResult);
-      }, timeoutMs);
+        waiter.finish(defaultResult);
+      }, timeoutMs));
     });
   }
 
@@ -64,7 +84,7 @@
     // currently active. Never throws — a page checking "is Domain Atlas
     // usable here" shouldn't need a try/catch to find out.
     async getIdentity() {
-      const result = await sendBridgeRequest('getIdentity', undefined, 4000, { allowed: false, publicKey: null });
+      const result = await sendBridgeRequest('getIdentity', undefined, 180000, { allowed: false, publicKey: null });
       return (result && typeof result === 'object') ? result : { allowed: false, publicKey: null };
     },
 
