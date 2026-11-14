@@ -200,20 +200,19 @@ by exporting it with its data (section 13) or by redeeming them (SPEC.md §5.7).
 5. Transfers between identities. Built for a single unique asset and for a fungible balance, all or part
    (section 8); move-everything is not.
 6. Per-site binding and the untrusted-site prompt. Built (section 7).
-7. Passkey accounts (section 10).
+7. Passkey accounts: designed in `unlock-methods.md`, not built.
 
 ## 10. Passkey accounts
 
-A passkey private key never leaves the authenticator, so there is nothing to derive a vault key from, and
-passkey mode does not currently encrypt stored data at rest or take part in the automatic backup. Until a
-vault key exists, sub-identities are unavailable while the passkey identity is the active mode.
+Passkey support is designed in `unlock-methods.md`: the identity key stays a normal portable key, and the
+wallet can be unlocked by a password or by a passkey (through the WebAuthn PRF extension), changing from one
+to the other without changing the identity. Everything in this note, including sub-identities, site identities,
+backups, export and import and moves, then works for a passkey-unlocked wallet unchanged, because it only
+needs the unlocked key.
 
-The plan is for a new passkey account to create a portable default identity at setup, so the passkey is only
-the lock on the account and the identity people live in can be backed up, exported and moved to a password
-account. That trades the hardware-bound guarantee for recovery and portability, so it is offered as the
-default with a device-bound-only option, and an existing passkey identity stays as it is. The vault key
-comes from the WebAuthn PRF extension where the authenticator supports it, otherwise from a vault
-passphrase chosen at setup that also protects the backup.
+The device-bound passkey identity that exists today (`atlasWebAuthnIdentity`, mode `webauthn`, key inside the
+authenticator) is unchanged. It does not encrypt stored data at rest, does not take part in backups, and
+sub-identities stay unavailable while it is the active mode. No migration of such wallets is planned.
 
 ## 11. Security notes
 
