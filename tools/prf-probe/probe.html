@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PRF probe</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, sans-serif; background: #141e24; color: #e7edef; margin: 0; padding: 24px; max-width: 760px; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  p { font-size: 13px; line-height: 1.5; color: #c9d3d6; }
+  label { font-size: 13px; }
+  select, button { font: inherit; font-size: 13px; padding: 8px 12px; border-radius: 6px; border: 1px solid #2c3c44; background: #0e161b; color: #e7edef; }
+  button.primary { background: #1f6b3a; border-color: #1f6b3a; color: #eafff1; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; }
+  pre { background: #0e161b; border: 1px solid #22303a; border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+</style>
+</head>
+<body>
+  <h1>WebAuthn PRF probe</h1>
+  <p>This page checks whether this browser and authenticator can derive a secret from a passkey (the WebAuthn PRF extension). It creates one disposable passkey named "Domain Atlas PRF probe" and asks it for a few values. It stores nothing, reads no wallet and contacts no site. Each step may show a Windows Hello or security key prompt. Delete the passkey afterwards in Windows Settings &gt; Accounts &gt; Passkeys if you wish.</p>
+  <div class="row">
+    <label for="attachment">Authenticator</label>
+    <select id="attachment">
+      <option value="">Any (browser chooses)</option>
+      <option value="platform">This device (Windows Hello, Touch ID)</option>
+      <option value="cross-platform">Security key</option>
+    </select>
+    <button id="run" class="primary" type="button">Run probe</button>
+    <button id="copy" type="button" disabled>Copy results</button>
+  </div>
+  <pre id="out">Not run yet.</pre>
+  <script src="probe.js"></script>
+</body>
+</html>

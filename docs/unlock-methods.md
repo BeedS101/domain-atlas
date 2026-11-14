@@ -214,3 +214,24 @@ All tests use scratch Chromium profiles and throw-away identities. No live site,
   "passkey check plus passphrase" mode.
 - Whether the backup rehearsal during conversion is required (proposed) or only strongly encouraged.
 - Whether the old record is kept until the next successful unlock (proposed) or for a fixed time.
+
+## 12. Phase 1 results
+
+The probe is `tools/prf-probe` (a separate throw-away extension that stores nothing and reads no wallet) and
+`test/manual-prf-probe.js` runs it in the sandbox.
+
+Chromium 141 with Chrome's virtual authenticator (PRF enabled), from an extension page:
+
+- A passkey created with the `prf` extension reports `enabled: true`. Evaluating PRF at unlock returns 32 bytes.
+  The same salt gives the same output twice and a different salt gives a different output. With user
+  verification required the verified flag is set in the authenticator data.
+- The result is the same for a platform-style (internal) authenticator, a roaming (usb) authenticator, and a
+  plain localhost web page, so the extension origin makes no difference in this browser.
+- An authenticator without PRF is detectable: `prf.enabled` is false and no output is returned, so the wallet
+  can decide to offer only the password. `PublicKeyCredential.getClientCapabilities()` reports
+  `extension:prf: true` for the browser even then, so it is not a sufficient check; the per-credential probe
+  at set-up is.
+- A user verification that is required and not given fails with `NotAllowedError` and nothing is derived.
+
+Real hardware: see the next section when it has been run.
+
