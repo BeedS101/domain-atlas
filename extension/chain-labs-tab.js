@@ -6,7 +6,7 @@
   'use strict';
 
   let busy = false;       // a step the person started is running
-  let refreshing = false; // the domains are being asked again; the person can still act meanwhile
+  let refreshing = null; // the key whose domains are being asked again; the person can still act meanwhile
   let notice = '';
   let panel = null; // the step in progress: { kind: 'add' | 'send' | 'buy', ... }
   let renderSeq = 0;
@@ -22,6 +22,7 @@
   }
 
   function chain() { return AtlasWallet.getChainLabs(); }
+  async function whoKey() { const identity = await AtlasWallet.getIdentity(); return identity ? identity.publicKey : null; }
   function root() { return document.getElementById('chainLabsSection'); }
 
   function say(text) { notice = text || ''; const n = document.getElementById('chainLabsStatus'); if (n) n.textContent = notice; }
@@ -253,16 +254,28 @@
     const host = root();
     if (!host) return;
     const seq = ++renderSeq;
+    // A draw belongs to the identity it started for. If the wallet switches meanwhile, what was read is dropped and the
+    // redraw that the switch triggers shows the new identity instead.
+    const startedFor = await whoKey();
+    const current = async () => seq === renderSeq && (await whoKey()) === startedFor;
     let view;
-    try { view = await chain().rows(); } catch (err) { host.textContent = ''; host.appendChild(el('div', { className: 'ledger-problem', role: 'status', textContent: 'Chain labs coins could not be loaded: ' + (err && err.message) })); return; }
-    if (seq !== renderSeq) return;
+    try { view = await chain().rows(); } catch (err) {
+      if (err && err.code === 'identity-changed') return;
+      if (seq !== renderSeq) return;
+      host.textContent = ''; host.appendChild(el('div', { className: 'ledger-problem', role: 'status', textContent: 'Chain labs coins could not be loaded: ' + (err && err.message) })); return;
+    }
+    if (!(await current())) return;
     offers = new Map();
     await Promise.all(view.domains.flatMap((d) => d.coins.filter((c) => c.state === 'active').map(async (c) => { offers.set(d.domain + '/' + c.coinId, await chain().offerState(d.domain, c.coinId)); })));
-    if (seq !== renderSeq) return;
+    if (!(await current())) return;
     let stepEl = null;
     if (panel && panel.kind === 'send') stepEl = await sendPanel();
     else if (panel && panel.kind === 'buy') stepEl = await buyPanel();
-    if (seq !== renderSeq) return;
+    if (!(await current())) return;
+    // What was typed into the add box survives a redraw that happens while the person is typing.
+    const typedBox = document.getElementById('chainLabsAddInput');
+    const typed = typedBox ? typedBox.value : '';
+    const hadFocus = !!typedBox && document.activeElement === typedBox;
     host.textContent = '';
     host.appendChild(el('div', { className: 'subhead', id: 'chainLabsHeading', textContent: 'Chain labs coins' }));
     host.appendChild(el('p', { className: 'meta', textContent: 'These coins are kept by the domains below, not by this wallet. Each domain you list is asked what your key holds and signs its answer; the wallet shows that answer with its time. Adding a domain is your permission to ask it.' }));
@@ -280,25 +293,42 @@
     view.domains.forEach((d) => host.appendChild(domainCard(d)));
     host.appendChild(pendingList(view));
     const addRow = el('div', { className: 'btn-row', style: 'margin-top:8px;' });
-    addRow.appendChild(el('input', { type: 'text', id: 'chainLabsAddInput', 'aria-label': 'Domain to add', placeholder: 'Domain to ask, e.g. example.com', autocomplete: 'off' }));
+    const addInput = el('input', { type: 'text', id: 'chainLabsAddInput', 'aria-label': 'Domain to add', placeholder: 'Domain to ask, e.g. example.com', autocomplete: 'off' });
+    addInput.value = typed;
+    addRow.appendChild(addInput);
     addRow.appendChild(button('Add…', () => {
       const d = AtlasChainLabs.normalizeDomain(document.getElementById('chainLabsAddInput').value);
       if (!d) { say('That is not a domain name.'); return; }
       panel = { kind: 'add', domain: d };
+      document.getElementById('chainLabsAddInput').value = '';
       render();
     }));
     host.appendChild(addRow);
+    if (hadFocus) addInput.focus();
     if (view.domains.length) host.appendChild(el('div', { className: 'btn-row', style: 'margin-top:6px;' }, [button('Ask all domains again', () => act(() => chain().refresh().then(() => null)))]));
   }
 
   // Opening the tab draws the last answers at once, then asks every listed domain again.
   async function open() {
+    const key = await whoKey();
     await render();
-    if (refreshing) return;
-    refreshing = true;
+    if (refreshing === key) return;
+    refreshing = key;
     try { await chain().refresh(); } catch (err) { /* each domain reports its own problem */ }
-    refreshing = false;
-    await render();
+    if (refreshing === key) refreshing = null;
+    // A step the person is in the middle of is not redrawn under their hands; it draws the new answers when it finishes.
+    if (!panel) await render();
+  }
+
+  // The wallet now acts as another identity: whatever step was open belonged to the previous one, so it is dropped, any
+  // draw still in flight is invalidated, and an open tab is drawn again for the new identity and asks its domains.
+  function identityChanged() {
+    panel = null;
+    notice = '';
+    renderSeq++;
+    const host = root();
+    if (!host || !host.offsetParent) return Promise.resolve();
+    return open();
   }
 
   // A purchase approved in the page prompt changes the cache from another extension page; the open tab redraws so the new
@@ -310,5 +340,5 @@
     });
   }
 
-  window.AtlasChainLabsTab = { open, render };
+  window.AtlasChainLabsTab = { open, render, identityChanged };
 })();

@@ -287,11 +287,18 @@
       return run;
     }
 
-    function mutateCache(fn) {
+    // `ownerKey`, when given, names the identity the change is for. The cache belongs to whichever identity is active when it is
+    // read and written, so a change begun for one identity is refused rather than applied to another after a switch.
+    function identityChanged() {
+      return Object.assign(new Error('The wallet is acting as a different identity now.'), { code: 'identity-changed' });
+    }
+
+    function mutateCache(fn, ownerKey) {
       return serial(async () => {
+        if (ownerKey && (await env.ownerKey()) !== ownerKey) throw identityChanged();
         const c = await cache();
         const out = await fn(c);
-        await env.saveCache(c);
+        await env.saveCache(c, ownerKey);
         return out;
       });
     }
@@ -361,7 +368,8 @@
       if (!key) throw Object.assign(new Error('Unlock your wallet first.'), { code: 'locked' });
       let got = await lookupOnce(record, key, true);
       if (!got.ok && got.reason === 'proof-unsupported') got = await lookupOnce(record, key, false);
-      // A domain taken off the list while it was being asked is not put back by its answer.
+      // A domain taken off the list while it was being asked is not put back by its answer, and an answer for a key the
+      // wallet has since stopped acting as is dropped instead of being stored under the identity that is active now.
       const answer = await mutateCache(async (c) => {
         if (!(await domains()).some((d) => d.domain === record.domain)) return null;
         const prior = c.answers[record.domain];
@@ -369,7 +377,7 @@
           ? { asOf: got.asOf, proven: got.proven, coins: got.coins, fetchedAt: nowMs(), problem: null }
           : Object.assign({}, prior || { asOf: null, proven: false, coins: [], fetchedAt: null }, { problem: got.reason });
         return c.answers[record.domain];
-      });
+      }, key).catch((err) => { if (err && err.code === 'identity-changed') return null; throw err; });
       return { ok: got.ok, reason: got.reason, answer };
     }
 
@@ -382,8 +390,11 @@
     }
 
     async function rows() {
+      // The list and the cache are separate reads; both must be the same identity's.
+      const readFor = await env.ownerKey();
       const list = await domains();
       const c = await cache();
+      if ((await env.ownerKey()) !== readFor) throw identityChanged();
       const out = [];
       for (const d of list) {
         const a = c.answers[d.domain];
@@ -456,7 +467,7 @@
         }
         if (r.status === 201) throw Object.assign(new Error('The domain\'s receipt does not match what you signed, so it was not accepted.'), { code: 'bad-receipt' });
         if (r.status === 202 && j.proposal && HASH_RE.test(j.proposal.digest || '')) {
-          await mutateCache((c) => { c.pendingSends = c.pendingSends.filter((p) => p.digest !== j.proposal.digest).concat([{ domain: record.domain, coinId: prepared.coinId, digest: j.proposal.digest, to: prepared.to, amount: prepared.amount, from: prepared.from, symbol: prepared.symbol, decimals: prepared.decimals, private: prepared.private, createdAt: nowMs() }]).slice(-MAX_PENDING); });
+          await mutateCache((c) => { c.pendingSends = c.pendingSends.filter((p) => p.digest !== j.proposal.digest).concat([{ domain: record.domain, coinId: prepared.coinId, digest: j.proposal.digest, to: prepared.to, amount: prepared.amount, from: prepared.from, symbol: prepared.symbol, decimals: prepared.decimals, private: prepared.private, createdAt: nowMs() }]).slice(-MAX_PENDING); }, prepared.from);
           return { status: 'waiting', digest: j.proposal.digest, note: j.note || '' };
         }
         if (r.status === 409 && j.code === 'stale' && attempt === 0) continue;

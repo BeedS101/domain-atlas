@@ -4095,6 +4095,49 @@ async function runSubIdentityAction(fn, okMessage) {
   await followSiteIdentityOnAccountChange();
   await refreshActingAsBadge();
   await refreshSubIdentitiesDisplay();
+  await refreshViewsIfActingIdentityChanged();
+}
+
+// The views that hold per-identity data are redrawn by the session-storage listener when the selection changes. A page pinned to
+// a site's identity can change who it acts as without that value changing, so the switch handlers check the acting identity
+// themselves and redraw when it differs from the one last drawn.
+let lastDrawnActingKey = null; // set by refreshInventoryDisplay() to the identity it last drew
+
+// Social and Trade draw their data when opened, so one that is already open when the identity changes (from another extension
+// page, say) is drawn again for the new identity. The Wallet screen's own views are redrawn by the callers.
+async function refreshOpenScreenForIdentity() {
+  const on = (el) => !!(el && el.classList.contains('active'));
+  try {
+    if (on(document.getElementById('tradeScreen'))) {
+      await refreshTradingStationJoinButton();
+      await refreshRemoteTradeStationOptions();
+      await refreshTradingBuyList();
+      await refreshTradingSellOfferOptions();
+      await refreshTradingSellWantOptions();
+      await refreshTradingListingsList();
+      await refreshConvertOptions();
+    } else if (on(document.getElementById('socialScreen'))) {
+      if (on(contactsSubscreen)) await refreshFriendsDisplay();
+      else if (on(favoritesSubscreen)) await refreshFavoritesDisplay();
+      else if (on(calendarSubscreen)) await refreshCalendarDisplay();
+      else {
+        await refreshSubscribeButton();
+        await refreshPostOfficeJoinButton();
+        await refreshMyPublicKeyDisplay();
+      }
+    }
+  } catch (err) { /* the screen is drawn again the next time it is opened */ }
+}
+
+async function refreshViewsIfActingIdentityChanged() {
+  const acting = await AtlasWallet.getIdentity();
+  const key = acting ? acting.publicKey : null;
+  if (key === lastDrawnActingKey) return;
+  if (window.AtlasChainLabsTab) AtlasChainLabsTab.identityChanged().catch(() => {});
+  await refreshInventoryDisplay();
+  await refreshMailDisplay();
+  await refreshMessagingDisplay();
+  await refreshOpenScreenForIdentity();
 }
 
 identityListEl && identityListEl.addEventListener('click', async (e) => {
@@ -6619,7 +6662,12 @@ async function runWalletRecovery() {
   } finally { walletRecoveryRunning = false; }
 }
 
+// Each draw of the inventory belongs to one identity. A draw that is overtaken by a newer one, or whose identity is no longer
+// the acting one when its reads finish, is dropped instead of painting the previous identity's holdings over the new ones.
+let inventoryRefreshSeq = 0;
+
 async function refreshInventoryDisplay() {
+  const drawSeq = ++inventoryRefreshSeq;
   refreshPendingOpsDisplay().catch(() => {});
   const identity = await AtlasWallet.getIdentity();
   const loadout = await AtlasWallet.getLoadout();
@@ -6629,6 +6677,9 @@ async function refreshInventoryDisplay() {
   const equippedAvatarHandAssetId = await AtlasWallet.getAvatarHandAssetId();
   const risky = combatOf(currentWorld) !== 'none';
   const selfWalletAll = identity ? await AtlasWallet.getWallet(identity.publicKey) : [];
+  const actingNow = await AtlasWallet.getIdentity();
+  if (drawSeq !== inventoryRefreshSeq || (actingNow ? actingNow.publicKey : null) !== (identity ? identity.publicKey : null)) return;
+  lastDrawnActingKey = identity ? identity.publicKey : null;
 
   // Task #209: the wallet-gain chime — see playWalletGainChime()/
   // walletGainedSomething()'s own comments above for what counts and why
@@ -7427,6 +7478,8 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
     await refreshIdentitySyncDisplay();
   }
   if (areaName === 'session' && (changes.atlasUnlockedIdentity || changes.atlasActiveSubIdentity)) {
+    // The Ledger tab holds per-identity state (the open step, the last draw), so it is reset at once, before the slower refreshes below.
+    if (window.AtlasChainLabsTab) AtlasChainLabsTab.identityChanged().catch(() => {});
     await refreshIdentityDisplay();
     // The Messaging button and window are gated behind an unlocked wallet (see
     // refreshMessagingLockGate()). Every local-mode lock and unlock path changes
@@ -7446,6 +7499,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
       await refreshMailDisplay();
       await refreshInventoryDisplay();
       await refreshMessagingDisplay();
+      await refreshOpenScreenForIdentity();
       refreshChatAdminDisplay();
     }
   }

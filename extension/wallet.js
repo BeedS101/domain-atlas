@@ -11170,9 +11170,11 @@ const AtlasWallet = (() => {
     return name ? decryptAtRest(who.identity, name, stored, fallback) : stored;
   }
 
-  async function chainLabsWrite(storeKey, name, value) {
+  // expectedKey: the key the write was prepared for; a switch of identity in between refuses it rather than writing to the new one.
+  async function chainLabsWrite(storeKey, name, value, expectedKey) {
     const who = await chainLabsOwner();
     if (!who) throw storageError('wallet-locked', WALLET_LOCKED_MESSAGE);
+    if (expectedKey && who.key !== expectedKey) throw Object.assign(new Error('The wallet is acting as a different identity now.'), { code: 'identity-changed' });
     const got = await chrome.storage.local.get(storeKey);
     const all = got[storeKey] || {};
     all[who.key] = name ? await encryptAtRest(who.identity, name, value) : value;
@@ -11243,7 +11245,7 @@ const AtlasWallet = (() => {
         loadDomains: () => chainLabsRead(CHAIN_LABS_DOMAINS_KEY, null, []),
         saveDomains: (list) => chainLabsWrite(CHAIN_LABS_DOMAINS_KEY, null, list),
         loadCache: () => chainLabsRead(CHAIN_LABS_CACHE_KEY, 'chainLabsCache', {}),
-        saveCache: (cache) => chainLabsWrite(CHAIN_LABS_CACHE_KEY, 'chainLabsCache', cache),
+        saveCache: (cache, expectedKey) => chainLabsWrite(CHAIN_LABS_CACHE_KEY, 'chainLabsCache', cache, expectedKey),
         afterPurchase: (prepared, balance) => adoptChainLabsGoldRemainder(prepared.credential, balance)
       });
     }

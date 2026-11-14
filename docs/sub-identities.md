@@ -66,6 +66,18 @@ between, the data would be encrypted under the other identity's key and become u
 save therefore goes through `encryptAtRestFor()`, which refuses when the identity doing the write is not the
 owner. The operation fails and the stored data is left as it was.
 
+What is on screen follows the switch. The viewer's session-storage listener redraws the inventory, mail and
+messaging, the Ledger tab, and whichever Social or Trade screen is open. A page pinned to a site's identity can
+change who it acts as without the stored selection changing, so the switch handlers compare the acting
+identity with the one last drawn and redraw when it differs. Draws are tied to an identity: an inventory or
+Ledger draw that is overtaken, or whose identity is no longer the acting one when its reads finish, is dropped.
+The Ledger tab also drops an open Send or Buy step on a switch.
+
+The chain labs cache is stored per key but read and written under the identity that is active at that moment.
+A holdings lookup therefore saves with the key it asked for, and `chainLabsWrite` refuses the write when the
+wallet has since switched, so an answer for one identity is never stored for another. `rows()` refuses a read
+that straddles a switch for the same reason.
+
 ## 5. Backup and export are different things
 
 - **Backup** copies everything, sub-identities and their data included, into an encrypted file protected by
