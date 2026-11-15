@@ -5067,7 +5067,7 @@ function formatMass(grams) {
 // opening it doesn't disturb anything else on the card, and it resets
 // closed the next time the list re-renders, same as every other
 // per-card DOM detail in this file.
-// ---------- Asset Viewer hover panel (task #150) ----------
+// ---------- Asset Viewer hover panel ----------
 //
 // Hovering an asset card in either Inventory list (Collectibles or
 // Documents — both rendered by renderAssetCard() below, whichever
@@ -5111,6 +5111,8 @@ let assetViewerModelLoadToken = 0; // bumped on every dispose/re-open so a slow 
 let assetViewerThumbnailLoadToken = 0; // same pattern as assetViewerModelLoadToken, but for the thumbnail fetch/blob-URL swap in loadAssetViewerThumbnail()
 let assetViewerThumbnailBlobUrl = null; // the blob: URL currently backing the shown thumbnail <img>, if any — must be revoked before being replaced or left behind
 let assetViewerDragActive = false; // true for the duration of a resize drag — suspends the close timer entirely (see its own comment below)
+let tradePreviewOwner = null; // the Trading Station card side the panel was opened from, while it shows a trade preview
+let tradePreviewPinned = false; // opened by key or tap: stays until Escape or a tap elsewhere, instead of following the pointer
 
 function applyAssetViewerSettings(settings) {
   assetViewerSettingsCache = settings;
@@ -5143,10 +5145,7 @@ function positionAssetViewer(cardEl) {
   assetViewerWidgetEl.style.top = top + 'px';
 }
 
-// Full, non-toggled properties list — deliberately NOT renderPropertiesToggle()
-// (below): the card's own inline version is a click-to-expand toggle to
-// save space on a small card; this panel has the room to just show
-// everything directly, per task #150.
+// Full properties list, not the click-to-expand toggle of renderPropertiesToggle(): this panel has room to show everything.
 function renderAssetViewerProperties(properties) {
   if (!properties || typeof properties !== 'object') return '';
   const entries = Object.entries(properties);
@@ -5157,6 +5156,7 @@ function renderAssetViewerProperties(properties) {
 }
 
 function renderAssetViewerContent(entry) {
+  if (entry.preview) { renderAssetViewerPreviewContent(entry); return; }
   const asset = entry.credential.asset;
   const fungible = !!asset.fungible;
   let html =
@@ -5184,25 +5184,43 @@ function renderAssetViewerContent(entry) {
   }
 }
 
-// Task #210 — Bruno found that replacing a thumbnail .png on a live site
-// didn't reliably show up for visitors: a plain <img src="..."> (what
-// this used to be) leaves staleness entirely up to the browser's own
-// HTTP cache, which — same "never trust a shared host to be configured
-// helpfully" posture issuer-php/lib/crypto.php's own comments already
-// established — can keep serving an old cached copy for a while even
-// after the file's actually been replaced on the server. Every OTHER
-// dynamic fetch in this file already avoids exactly this
-// (manifest/scene fetches above, showAssetViewerModel()'s own .glb fetch
-// just below) via `cache: 'no-store'`; the thumbnail `<img>` was the one
-// plain browser-cached image left. Fetches the bytes fresh every time
-// instead and hands the panel a same-session blob: URL, revoked and
-// replaced the same way showAssetViewerModel() disposes its own preview.
-// Token-guarded exactly like that function too, for the same reason: a
-// slow fetch for a card the visitor already hovered away from must never
-// clobber whatever the panel has since moved on to show. Creates the
-// <img> element only once real bytes are in hand — never a broken-image
-// icon, and no CSS-hidden placeholder to keep in sync with the fetch's
-// outcome.
+// A Trading Station card side has no wallet credential, so its preview entry carries the same credential.asset
+// fields plus `preview` {exact, label, note, propertiesLabel, classLookup}. Exact previews show the listed item's own
+// recorded description; class previews show the class only and always say so. Only name, class, issuer, image,
+// model and properties are ever shown, never ids or keys.
+function renderAssetViewerPreviewDetails(entry) {
+  const asset = entry.credential.asset;
+  let html = '';
+  const properties = asset.properties && typeof asset.properties === 'object' ? Object.fromEntries(Object.entries(asset.properties).slice(0, 40)) : null;
+  const list = renderAssetViewerProperties(properties);
+  if (list) html += (entry.preview.propertiesLabel ? '<div class="asset-viewer-note">' + escapeHtml(entry.preview.propertiesLabel) + '</div>' : '') + list;
+  if (asset.model) html += '<button type="button" id="assetViewerShowModelBtn" data-model="' + escapeHtml(asset.model) + '">Show model</button>';
+  html += '<div id="assetViewerModelArea"></div>';
+  return html;
+}
+
+function renderAssetViewerPreviewContent(entry) {
+  const asset = entry.credential.asset;
+  const p = entry.preview;
+  const fungible = asset.fungible === true;
+  let html =
+    '<div class="asset-viewer-kind" data-kind="' + (p.exact ? 'exact' : 'class') + '">' + escapeHtml(p.label) + '</div>' +
+    '<div class="name">' + escapeHtml(asset.name) + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</div>' +
+    '<div class="meta">' + escapeHtml(asset.class) + ' · issued by ' + escapeHtml(entry.credential.issuer.domain || 'an unknown issuer') + '</div>' +
+    '<div class="asset-viewer-note">' + escapeHtml(p.note) + '</div>';
+  if (asset.thumbnail) html += '<div id="assetViewerThumbnailArea"></div>';
+  html += '<div id="assetViewerPreviewDetails">' + renderAssetViewerPreviewDetails(entry) + '</div>';
+  assetViewerBodyEl.innerHTML = html;
+  if (asset.thumbnail) {
+    const areaEl = assetViewerBodyEl.querySelector('#assetViewerThumbnailArea');
+    if (areaEl) loadAssetViewerThumbnail(asset.thumbnail, areaEl);
+  }
+}
+
+// Fetches the thumbnail bytes itself and hands the panel a same-session blob: URL, instead of a plain <img src>, so a
+// replaced image is never hidden by a stale HTTP cache (every other dynamic fetch here uses `cache: 'no-store'` too).
+// Token-guarded like showAssetViewerModel(): a slow fetch for a card the pointer has left must not overwrite what the
+// panel shows now. The <img> is only created once real bytes arrive, so there is never a broken-image icon.
 async function loadAssetViewerThumbnail(url, areaEl) {
   const token = assetViewerThumbnailLoadToken;
   try {
@@ -5223,15 +5241,9 @@ async function loadAssetViewerThumbnail(url, areaEl) {
   }
 }
 
-// Only ever one live preview context at a time (task #150 point 2's
-// WebGL-lifecycle requirement) — called before starting a new one AND on
-// every path that ends the panel's current one (switching to a different
-// asset, or closing the panel outright). Despite the name, this is also the
-// shared choke point for invalidating the thumbnail load: every caller of
-// this function (showAssetViewerModel, closeAssetViewer, openAssetViewer
-// switching cards) is exactly the moment a stale thumbnail fetch/blob for
-// the previous card also needs to be dropped, so there's no reason to keep
-// a second near-identical function around just for that.
+// Only one live preview context at a time: called before starting a new one and on every path that ends the panel's
+// current one (switching asset, closing). It is also the shared point where a stale thumbnail fetch and its blob URL
+// are dropped.
 function disposeAssetViewerModelPreview() {
   assetViewerModelLoadToken++; // invalidates any fetch/parse still in flight for whatever this was previewing
   if (assetViewerModelPreview) {
@@ -5245,14 +5257,9 @@ function disposeAssetViewerModelPreview() {
   }
 }
 
-// Lazy, click-triggered only (task #150 point 2 — never automatic): fetches
-// the .glb via plain fetch()+arrayBuffer(), same `cache: 'no-store'`
-// convention every other binary/JSON fetch in this file already uses (see
-// e.g. the manifest/scene fetches above), then hands the raw bytes to
-// window.MiniGLTF.previewModel() (gltf-mini.js) to parse and render — NOT
-// window.MiniGLTF.init(), which is the full first-person world renderer and
-// would drag in camera controls, a floor, a character, and input handling
-// this small preview has no use for.
+// Lazy, click-triggered only: fetches the .glb with `cache: 'no-store'` and hands the bytes to
+// window.MiniGLTF.previewModel() (gltf-mini.js), the small preview renderer, not the full first-person world renderer
+// (MiniGLTF.init) with its camera controls, floor, character and input handling.
 async function showAssetViewerModel(url, areaEl) {
   disposeAssetViewerModelPreview();
   const token = assetViewerModelLoadToken;
@@ -5295,22 +5302,19 @@ function cancelAssetViewerCloseTimer() {
 function closeAssetViewer() {
   cancelAssetViewerCloseTimer();
   assetViewerCurrentEntry = null;
+  tradePreviewOwner = null;
+  tradePreviewPinned = false;
   disposeAssetViewerModelPreview();
   if (assetViewerBodyEl) assetViewerBodyEl.innerHTML = '';
   if (assetViewerWidgetEl) assetViewerWidgetEl.hidden = true;
   if (assetViewerSettingsPopoverEl) assetViewerSettingsPopoverEl.hidden = true;
 }
 
-// Starts (or restarts) the short close-timer the sticky hover bridge relies
-// on — called on the card's mouseleave AND the panel's own mouseleave.
-// Task #150 point 5's real edge case: while a resize drag is in progress,
-// this is suspended ENTIRELY (never started, and any already-pending timer
-// stays cancelled) — a drag naturally carries the cursor outside the
-// panel's current bounds, and that must never read as "the user is done
-// with this panel." See the resize-drag mouseup handler below for how
-// normal hover tracking resumes the moment the drag actually ends.
+// Starts (or restarts) the short close timer the sticky hover bridge relies on, from the card's mouseleave and the
+// panel's own mouseleave. Suspended entirely during a resize drag (the cursor legitimately leaves the panel's bounds;
+// the drag's mouseup resumes normal tracking) and while a preview is pinned by key or tap.
 function scheduleAssetViewerClose() {
-  if (assetViewerDragActive) return;
+  if (assetViewerDragActive || tradePreviewPinned) return;
   cancelAssetViewerCloseTimer();
   assetViewerCloseTimer = setTimeout(() => {
     assetViewerCloseTimer = null;
@@ -5331,7 +5335,8 @@ function openAssetViewer(entry, cardEl) {
   // wallet instead of beside it. Nothing here makes it useful at that
   // size anyway, so it's simplest to just not open it rather than try
   // to make a 3D-model preview panel responsive down to a popup.
-  if (!currentManifest) return;
+  // A trade preview opens beside its card, so it needs a viewport wide enough to have room there.
+  if (!currentManifest && !(entry.preview && window.innerWidth >= 560)) return;
   cancelAssetViewerCloseTimer();
   if (assetViewerCurrentEntry === entry) return; // already showing this exact card — leave its (possibly live) model preview alone
   disposeAssetViewerModelPreview(); // switching assets — never leave the PREVIOUS card's preview context running
@@ -11419,12 +11424,16 @@ function tradeThumbHtml(url) {
 }
 
 // `info` is what is known about the item: {name, thumbnail, fungible, issuer}; any of it may be missing.
-function tradeSideHtml(label, side, info) {
+function tradeSideHtml(label, side, info, previewKey) {
   info = info || {};
   const unique = info.fungible === false;
   const amount = unique ? 'Unique item' : formatMass(side.quantity);
-  return '<div class="trade-side">' +
-    '<div class="trade-side-label">' + escapeHtml(label) + '</div>' +
+  const previewAttrs = previewKey
+    ? ' data-preview="' + escapeHtml(previewKey) + '" tabindex="0" role="button" aria-haspopup="dialog" aria-label="' +
+      escapeHtml('Preview ' + (info.name || side.class) + '. Press Enter to open.') + '"'
+    : '';
+  return '<div class="trade-side"' + previewAttrs + '>' +
+    '<div class="trade-side-label"><span>' + escapeHtml(label) + '</span>' + (previewKey ? '<span class="trade-side-info" aria-hidden="true">ⓘ</span>' : '') + '</div>' +
     '<div class="trade-side-body">' + tradeThumbHtml(info.thumbnail) +
     '<div class="trade-side-text">' +
     (info.name ? '<div class="trade-name">' + escapeHtml(info.name) + '</div>' : '') +
@@ -11438,8 +11447,173 @@ function tradeInfoFromCatalog(catalogByClass, cls) {
   return entry ? { name: entry.name, thumbnail: entry.thumbnail, fungible: entry.fungible } : {};
 }
 
+// ---------- Trading Station card previews ----------
+// Hovering, focusing or tapping a card side opens the floating Asset Viewer beside it (openAssetViewer). A fungible side
+// is described by its class; a unique side is shown as the exact listed item only when a listing snapshot is
+// available (the station's offerAsset on Buy, the wallet's own record on Listings), otherwise as a labelled class
+// preview. Model files load only when "Show model" is pressed, as for inventory.
+const tradePreviewEntries = new Map(); // key -> viewer entry, rebuilt with each card render
+let tradePreviewLastTouch = 0; // time of the last touch pointer; the mouse events a tap also produces are ignored
+let tradePreviewRefocusing = false; // true while focus is handed back to a card side after Escape, which must not reopen it
+
+function tradePreviewHttpUrl(u) {
+  return typeof u === 'string' && u.length <= 512 && /^https?:\/\//i.test(u) ? u : null;
+}
+
+function buildTradePreviewEntry(role, side, info, snapshot, domain, exactNote) {
+  info = info || {};
+  const exact = !!(snapshot && snapshot.fungible === false && snapshot.class === side.class);
+  const asset = exact
+    ? {
+        name: String(snapshot.name || side.class).slice(0, 120), class: side.class, fungible: false,
+        thumbnail: tradePreviewHttpUrl(snapshot.thumbnail), model: tradePreviewHttpUrl(snapshot.model),
+        properties: snapshot.properties && typeof snapshot.properties === 'object' && !Array.isArray(snapshot.properties) ? snapshot.properties : null
+      }
+    : {
+        name: String(info.name || side.class).slice(0, 120), class: side.class, fungible: typeof info.fungible === 'boolean' ? info.fungible : undefined,
+        thumbnail: tradePreviewHttpUrl(info.thumbnail), model: null, properties: null
+      };
+  const unique = asset.fungible === false;
+  let label, note, propertiesLabel = '';
+  if (exact) {
+    label = 'Exact listed item';
+    note = exactNote;
+  } else if (unique) {
+    label = 'Class preview · not this exact item';
+    note = role === 'want'
+      ? 'The listing asks for an item of this class, not one specific item.'
+      : 'This listing does not include the item’s own details, so its properties may differ from the class defaults.';
+    propertiesLabel = 'Class defaults';
+  } else {
+    label = 'Class preview';
+    note = 'Class information from ' + domain + (asset.fungible ? '; every unit of this class shares it.' : '.');
+    propertiesLabel = 'Class properties';
+  }
+  return {
+    preview: { exact, label, note, propertiesLabel, classLookup: exact ? null : { domain, class: side.class, started: false } },
+    credential: { quantity: side.quantity, issuer: { domain: exact ? (snapshot.issuerDomain || null) : domain }, asset }
+  };
+}
+
+// Registers the preview for one card side and returns the key tradeSideHtml() puts on it.
+function registerTradePreview(scope, cardId, role, side, info, snapshot, domain, exactNote) {
+  const key = scope + ':' + cardId + ':' + role;
+  tradePreviewEntries.set(key, buildTradePreviewEntry(role, side, info, snapshot, domain, exactNote));
+  return key;
+}
+
+function clearTradePreviews(scope) {
+  Array.from(tradePreviewEntries.keys()).forEach((k) => { if (k.startsWith(scope + ':')) tradePreviewEntries.delete(k); });
+}
+
+// A card the panel was opened from no longer exists after a re-render.
+function dropStaleTradePreview() {
+  if (assetViewerCurrentEntry && assetViewerCurrentEntry.preview && !(tradePreviewOwner && tradePreviewOwner.isConnected)) closeAssetViewer();
+}
+
+// A class preview adds the class's model and properties once the issuer's class description arrives (cached by the
+// wallet); nothing is fetched until a preview is opened, and a model is only fetched on "Show model".
+function backfillTradePreviewFromClass(entry) {
+  const lookup = entry.preview.classLookup;
+  if (!lookup || lookup.started) return;
+  lookup.started = true;
+  AtlasWallet.fetchAssetClassInfo(lookup.domain, lookup.class).then((info) => {
+    if (!info) return;
+    const asset = entry.credential.asset;
+    if (!asset.model) asset.model = tradePreviewHttpUrl(info.model);
+    if (!asset.properties && info.properties && typeof info.properties === 'object' && !Array.isArray(info.properties)) asset.properties = info.properties;
+    if (assetViewerCurrentEntry !== entry) return;
+    const detailsEl = assetViewerBodyEl.querySelector('#assetViewerPreviewDetails');
+    // Leave the details alone if a model is already showing or loading.
+    if (detailsEl && !detailsEl.querySelector('.asset-viewer-model-canvas, .asset-viewer-model-status')) detailsEl.innerHTML = renderAssetViewerPreviewDetails(entry);
+  }).catch(() => { lookup.started = false; });
+}
+
+function showTradePreview(sideEl, pinned) {
+  const entry = tradePreviewEntries.get(sideEl.dataset.preview);
+  if (!entry) return;
+  if (tradePreviewPinned && !pinned) return; // a pinned preview stays until dismissed
+  openAssetViewer(entry, sideEl);
+  if (assetViewerCurrentEntry !== entry) return; // the viewer declined to open (too narrow)
+  tradePreviewOwner = sideEl;
+  if (pinned) tradePreviewPinned = true;
+  backfillTradePreviewFromClass(entry);
+}
+
+function wireTradeCardPreviews(listEl) {
+  if (!listEl) return;
+  const sideOf = (t) => (t && t.closest ? t.closest('.trade-side[data-preview]') : null);
+  listEl.addEventListener('pointerdown', (e) => { if (e.pointerType === 'touch') tradePreviewLastTouch = Date.now(); });
+  listEl.addEventListener('mouseover', (e) => {
+    if (Date.now() - tradePreviewLastTouch < 800) return;
+    const side = sideOf(e.target);
+    if (side) showTradePreview(side, false);
+  });
+  listEl.addEventListener('mouseout', (e) => {
+    const side = sideOf(e.target);
+    if (!side || side.contains(e.relatedTarget) || !(assetViewerCurrentEntry && assetViewerCurrentEntry.preview)) return;
+    scheduleAssetViewerClose();
+  });
+  listEl.addEventListener('focusin', (e) => {
+    if (tradePreviewRefocusing || Date.now() - tradePreviewLastTouch < 800) return;
+    if (e.target.matches && e.target.matches('.trade-side[data-preview]')) showTradePreview(e.target, false);
+  });
+  listEl.addEventListener('focusout', (e) => {
+    if (!sideOf(e.target) || !(assetViewerCurrentEntry && assetViewerCurrentEntry.preview)) return;
+    if (e.relatedTarget && assetViewerWidgetEl.contains(e.relatedTarget)) return;
+    if (assetViewerWidgetEl.matches(':hover')) return; // the pointer is on the panel (e.g. clicking its text)
+    // Focus moving to the card's own buttons or another side must not leave a stale panel behind.
+    if (sideOf(e.relatedTarget) && sideOf(e.relatedTarget) !== sideOf(e.target)) return;
+    closeAssetViewer();
+  });
+  // A tap pins the preview; tapping the same side again dismisses it.
+  listEl.addEventListener('click', (e) => {
+    const side = sideOf(e.target);
+    if (!side || Date.now() - tradePreviewLastTouch > 800) return;
+    const entry = tradePreviewEntries.get(side.dataset.preview);
+    if (entry && assetViewerCurrentEntry === entry && tradePreviewPinned) { closeAssetViewer(); return; }
+    tradePreviewPinned = false;
+    showTradePreview(side, true);
+  });
+  listEl.addEventListener('keydown', (e) => {
+    const side = sideOf(e.target);
+    // Escape closes the preview only; the wallet panel's own Escape handler must not also fire.
+    if (e.key === 'Escape' && assetViewerCurrentEntry && assetViewerCurrentEntry.preview) { e.stopPropagation(); closeAssetViewer(); return; }
+    if (!side || e.target !== side || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    showTradePreview(side, true);
+    const modelBtn = assetViewerBodyEl.querySelector('#assetViewerShowModelBtn');
+    if (modelBtn) modelBtn.focus(); // Enter again on it loads the model; Escape returns here
+  });
+}
+
+wireTradeCardPreviews(tradingBuyListEl);
+wireTradeCardPreviews(tradingListingsListEl);
+// The panel sits beside the card it was opened from, so scrolling anything else closes it (the pointer's next move
+// reopens it for whatever is now under it).
+document.addEventListener('scroll', (e) => {
+  if (assetViewerCurrentEntry && assetViewerCurrentEntry.preview && !assetViewerWidgetEl.contains(e.target)) closeAssetViewer();
+}, true);
+document.addEventListener('pointerdown', (e) => {
+  if (!tradePreviewPinned) return;
+  if (assetViewerWidgetEl.contains(e.target) || (tradePreviewOwner && tradePreviewOwner.contains(e.target))) return;
+  closeAssetViewer();
+});
+assetViewerWidgetEl && assetViewerWidgetEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !(assetViewerCurrentEntry && assetViewerCurrentEntry.preview)) return;
+  e.stopPropagation();
+  const owner = tradePreviewOwner;
+  closeAssetViewer();
+  if (owner && owner.isConnected) { tradePreviewRefocusing = true; owner.focus(); tradePreviewRefocusing = false; }
+});
+
 async function refreshTradingBuyList() {
+  try { await renderTradingBuyList(); } finally { dropStaleTradePreview(); }
+}
+
+async function renderTradingBuyList() {
   if (!tradingBuyListEl) return;
+  clearTradePreviews('buy');
   const domain = remoteTradeStationDomainSelect && remoteTradeStationDomainSelect.value;
   if (!domain) {
     tradingBuyListEl.innerHTML = '<div class="empty-note">No Trading Station selected.</div>';
@@ -11464,12 +11638,18 @@ async function refreshTradingBuyList() {
   try {
     (await AtlasWallet.fetchTradableClasses(domain) || []).forEach((c) => catalogByClass.set(c.class, c));
   } catch (err) { /* cards fall back to the class id */ }
-  tradingBuyListEl.innerHTML = listings.map((l) => `
+  tradingBuyListEl.innerHTML = listings.map((l) => {
+    const wantInfo = tradeInfoFromCatalog(catalogByClass, l.want.class);
+    const offerInfo = tradeInfoFromCatalog(catalogByClass, l.offer.class);
+    const wantKey = registerTradePreview('buy', l.pendingId, 'want', l.want, wantInfo, null, domain);
+    const offerKey = registerTradePreview('buy', l.pendingId, 'offer', l.offer, offerInfo, l.offerAsset, domain,
+      'The item as ' + domain + ' recorded it when it was listed.');
+    return `
     <div class="wallet-item trade-card" data-pending-id="${escapeHtml(l.pendingId)}">
       <div class="trade-sides">
-        ${tradeSideHtml('You give', l.want, tradeInfoFromCatalog(catalogByClass, l.want.class))}
+        ${tradeSideHtml('You give', l.want, wantInfo, wantKey)}
         <div class="trade-arrow" aria-hidden="true">⇄</div>
-        ${tradeSideHtml('You receive', l.offer, tradeInfoFromCatalog(catalogByClass, l.offer.class))}
+        ${tradeSideHtml('You receive', l.offer, offerInfo, offerKey)}
       </div>
       <div class="trade-meta">
         <span>Trading at ${escapeHtml(domain)}</span>
@@ -11479,8 +11659,8 @@ async function refreshTradingBuyList() {
       <div class="trade-actions">
         <button type="button" class="btn-secondary trading-claim-btn" data-pending-id="${escapeHtml(l.pendingId)}">Trade</button>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 // This wallet's own posted listings. The wallet first brings each record up to date (AtlasWallet.refreshSubmittedTrades):
@@ -11492,7 +11672,12 @@ async function refreshTradingBuyList() {
 //   settled / expired / canceled     -> Delete (local housekeeping only).
 let listingMailCheckStarted = false;
 async function refreshTradingListingsList() {
+  try { await renderTradingListingsList(); } finally { dropStaleTradePreview(); }
+}
+
+async function renderTradingListingsList() {
   if (!tradingListingsListEl) return;
+  clearTradePreviews('list');
   const identity = await AtlasWallet.getIdentity();
   if (!identity) {
     tradingListingsListEl.innerHTML = '<div class="empty-note">No identity yet.</div>';
@@ -11537,6 +11722,11 @@ async function refreshTradingListingsList() {
       ...(staked ? { name: staked.asset.name, thumbnail: staked.asset.thumbnail, issuer: staked.issuer.domain }
         : { ...(r.offerName ? { name: r.offerName } : {}), ...(r.offerThumbnail ? { thumbnail: r.offerThumbnail } : {}), ...(r.offerIssuer ? { issuer: r.offerIssuer } : {}) })
     });
+    // The exact item is shown when it is still held (an open listing) or its description was recorded when it was listed.
+    const snapshot = staked ? AtlasWallet.tradeAssetSnapshot(staked) : (r.offerSnapshot || null);
+    const offerKey = registerTradePreview('list', r.pendingId, 'offer', r.offer, offerInfo, snapshot, r.domain,
+      staked ? 'The item you listed, as it is in your wallet.' : 'The item you listed, as recorded when you listed it.');
+    const wantKey = registerTradePreview('list', r.pendingId, 'want', r.want, tradeInfoFromCatalog(catalog, r.want.class), null, r.domain);
     let note = '';
     let actions = '';
     if (status === 'pending') {
@@ -11556,9 +11746,9 @@ async function refreshTradingListingsList() {
     <div class="wallet-item trade-card" data-pending-id="${escapeHtml(r.pendingId)}" data-status="${escapeHtml(status)}">
       <div class="trade-card-head"><span class="trade-status" data-status="${escapeHtml(status)}">${escapeHtml(label)}</span></div>
       <div class="trade-sides">
-        ${tradeSideHtml('You offered', r.offer, offerInfo)}
+        ${tradeSideHtml('You offered', r.offer, offerInfo, offerKey)}
         <div class="trade-arrow" aria-hidden="true">⇄</div>
-        ${tradeSideHtml('You asked for', r.want, tradeInfoFromCatalog(catalog, r.want.class))}
+        ${tradeSideHtml('You asked for', r.want, tradeInfoFromCatalog(catalog, r.want.class), wantKey)}
       </div>
       <div class="trade-meta"><span>Trading at ${escapeHtml(r.domain)}</span><span>Posted ${escapeHtml(new Date(r.submittedAt).toLocaleString())}</span></div>
       ${note ? `<div class="${status === 'unconfirmed' || status === 'unknown' ? 'trade-note' : 'trade-meta'}">${escapeHtml(note)}</div>` : ''}

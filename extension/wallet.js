@@ -4320,6 +4320,29 @@ const AtlasWallet = (() => {
     return { payload, proof };
   }
 
+  // Display-only description of a unique item (name, class, issuer, image, model, properties); the id, signature
+  // and owner key are never included. URLs must be http(s) and the properties bounded. Fungible assets have none:
+  // their class is described by the issuer's catalog. The same shape GET /atlas/trade/listings returns as offerAsset.
+  function tradeAssetSnapshot(credential) {
+    const asset = credential && credential.asset;
+    if (!asset || asset.fungible !== false || typeof asset.class !== 'string') return null;
+    const url = (u) => (typeof u === 'string' && u.length <= 512 && /^https?:\/\//i.test(u) ? u : null);
+    let properties = null;
+    if (asset.properties && typeof asset.properties === 'object' && !Array.isArray(asset.properties)) {
+      const text = JSON.stringify(asset.properties);
+      if (text.length <= 4096) properties = JSON.parse(text);
+    }
+    return {
+      class: asset.class,
+      name: typeof asset.name === 'string' ? asset.name.slice(0, 120) : asset.class,
+      fungible: false,
+      issuerDomain: credential.issuer && typeof credential.issuer.domain === 'string' ? credential.issuer.domain.slice(0, 253) : null,
+      thumbnail: url(asset.thumbnail),
+      model: url(asset.model),
+      ...(properties ? { properties } : {})
+    };
+  }
+
   // Open listings (SPEC.md §7): posts this
   // signer's own half of a trade to the station as an open listing, naming
   // no counterparty at all. Mirrors mintAsset()'s "one HTTP call plus local
@@ -4353,6 +4376,8 @@ const AtlasWallet = (() => {
       offerIssuer: balance.issuer && balance.issuer.domain || null,
       offerFungible: balance.asset ? balance.asset.fungible === true : undefined,
       offerSymbol: balance.asset && balance.asset.properties && balance.asset.properties['atlas.symbol'] || null,
+      // A unique item's own description, so the card can still show exactly what was listed once it has left the wallet.
+      offerSnapshot: tradeAssetSnapshot(balance),
       submittedAt: new Date().toISOString(),
       expiresAt: result.expiresAt,
       status: 'pending'
@@ -11663,7 +11688,7 @@ const AtlasWallet = (() => {
     verifyStandardItem, setItemEffectsContext, getItemEffectsContext, getEquipmentEffects, getActiveCapabilities, getCapabilityProviders,
     dropItem, pickUpItem, getWorldDrops, splitForDrop,
     proposeIntent, verifySignedPayload,
-    submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,
+    submitTradeIntent, tradeAssetSnapshot, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,
     getSubmittedTrades, deleteSubmittedTrade, refreshSubmittedTrades, reconcileSubmittedTradesFromMail, getTradingStationMemberships,
     recordWorldVisit, getRecentWorlds,
     getCharacterScale, getSavedCharacterScale, setCharacterScale,

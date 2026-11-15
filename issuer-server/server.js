@@ -4726,6 +4726,28 @@ function readPendingTrades() {
   }
   return doc;
 }
+// Display-only view of a unique item staked on an open listing, so a browsing client can show the exact item on offer.
+// Only the asset's own public description is copied; the credential id, signature and owner key stay on the station.
+// Fungible offers get none (their class is described by the catalog), and every URL must be http(s).
+function tradeListingAssetPreview(balance) {
+  const asset = balance && balance.asset;
+  if (!asset || asset.fungible !== false || typeof asset.class !== 'string') return null;
+  const url = (u) => (typeof u === 'string' && u.length <= 512 && /^https?:\/\//i.test(u) ? u : null);
+  let properties = null;
+  if (asset.properties && typeof asset.properties === 'object' && !Array.isArray(asset.properties)) {
+    const text = JSON.stringify(asset.properties);
+    if (text.length <= 4096) properties = JSON.parse(text);
+  }
+  return {
+    class: asset.class,
+    name: typeof asset.name === 'string' ? asset.name.slice(0, 120) : asset.class,
+    fungible: false,
+    issuerDomain: balance.issuer && typeof balance.issuer.domain === 'string' ? balance.issuer.domain.slice(0, 253) : null,
+    thumbnail: url(asset.thumbnail),
+    model: url(asset.model),
+    ...(properties ? { properties } : {})
+  };
+}
 function appendPendingTrade(entry) {
   const doc = readPendingTrades();
   doc.trades.push(entry);
@@ -9550,13 +9572,18 @@ async function main() {
       // here beyond shaping each entry for a browsing client.
       if (req.method === 'GET' && req.url === '/atlas/trade/listings') {
         const pendingDoc = readPendingTrades();
-        const listings = pendingDoc.trades.map((t) => ({
-          pendingId: t.id,
-          posterPublicKey: t.intent.proof.publicKey,
-          offer: t.intent.payload.offer,
-          want: t.intent.payload.want,
-          expiresAt: t.intent.payload.expiresAt
-        }));
+        const listings = pendingDoc.trades.map((t) => {
+          const offerAsset = tradeListingAssetPreview(t.balance);
+          return {
+            pendingId: t.id,
+            posterPublicKey: t.intent.proof.publicKey,
+            offer: t.intent.payload.offer,
+            want: t.intent.payload.want,
+            expiresAt: t.intent.payload.expiresAt,
+            // A unique offer also carries the listed item's own public description (see tradeListingAssetPreview).
+            ...(offerAsset && offerAsset.class === t.intent.payload.offer.class ? { offerAsset } : {})
+          };
+        });
         return sendJson(res, 200, { listings });
       }
 
