@@ -443,6 +443,37 @@
   .pending-ops-list li[data-state="needs-attention"] { border-style: dashed; border-width: 2px; }
   .pending-ops-list .op-status { font-weight: 600; }
   .wallet-item.held-back { border-style: dashed; }
+
+  /* Trading Station cards (Buy and Listings): what is given and what is received, side by side. */
+  .trade-card { display: flex; flex-direction: column; gap: 8px; }
+  .trade-sides { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: stretch; }
+  .trade-side { border: 1px solid #2c3c44; border-radius: 6px; padding: 8px; min-width: 0; background: rgba(255,255,255,0.02); }
+  .trade-side-label { font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: #a9b8bf; margin-bottom: 4px; }
+  .trade-side-body { display: flex; gap: 8px; align-items: center; min-width: 0; }
+  .trade-thumb { width: 36px; height: 36px; border-radius: 4px; object-fit: contain; background: rgba(255,255,255,0.05); flex: none; }
+  .trade-thumb-empty { display: inline-block; }
+  .trade-side-text { min-width: 0; }
+  .trade-name { font-weight: 600; overflow-wrap: anywhere; }
+  .trade-amount { font-weight: 600; color: #e6edf0; }
+  .trade-class { font-size: 11px; color: #a9b8bf; overflow-wrap: anywhere; }
+  .trade-issuer { font-size: 11px; color: #a9b8bf; overflow-wrap: anywhere; }
+  .trade-arrow { align-self: center; color: #a9b8bf; font-size: 18px; }
+  .trade-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: #a9b8bf; }
+  .trade-status { display: inline-block; border: 1px solid #2c3c44; border-radius: 10px; padding: 0 8px; font-size: 11px; font-weight: 600; }
+  .trade-status[data-status="pending"] { color: #57a593; border-color: #57a593; }
+  .trade-status[data-status="settled"] { color: #57a593; border-color: #57a593; }
+  .trade-status[data-status="unconfirmed"], .trade-status[data-status="unknown"] { color: #c9a227; border-color: #c9a227; }
+  .trade-status[data-status="expired"], .trade-status[data-status="canceled"] { color: #a9b8bf; }
+  .trade-note { font-size: 11px; color: #c9a227; }
+  .trade-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .trade-card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .sell-suggestion { margin-top: 4px; font-size: 11px; color: #a9b8bf; }
+  .btn-small { padding: 2px 8px; font-size: 11px; }
+  .activity-details { list-style: none; margin: 6px 0 0 0; padding: 0; font-size: 12px; }
+  .activity-details li { display: flex; gap: 6px; }
+  .activity-details .k { color: #a9b8bf; flex: none; }
+  @media (max-width: 420px) { .trade-sides { grid-template-columns: 1fr; } .trade-arrow { transform: rotate(90deg); justify-self: center; } }
+
   .wallet-item.jump-flash { animation: jump-flash 1.8s ease-out; }
   @keyframes jump-flash { 0%, 40% { box-shadow: 0 0 0 2px #8fbfe8; background: #1d2f38; } 100% { box-shadow: 0 0 0 0 transparent; } }
   @media (prefers-reduced-motion: reduce) { .wallet-item.jump-flash { animation: none; box-shadow: 0 0 0 2px #8fbfe8; } }
@@ -2384,27 +2415,14 @@
         <div class="subhead">Post something you hold for anyone at this Trading Station to claim.</div>
 
         <!-- "You offer" lists this wallet's own held, non-bound asset
-             classes (refreshTradingSellOfferOptions in viewer.js) — you can
-             only ever offer something you actually hold, so free text here
-             just invited typos. "You want" lists this domain's own tradable
-             classes, fetched live from GET /atlas/trade/catalog (Task #202,
-             refreshTradingSellWantOptions in viewer.js) rather than a
-             hardcoded list — the placeholder option below is replaced as
-             soon as that fetch completes. Task #250 fourth follow-up
-             (Bruno's own request): both lists now also include a held/
-             tradable NON-fungible class (e.g. the Signet Ring), not just
-             fungible balances — whichever side resolves to one gets its own
-             quantity input locked to "1" and disabled (updateSellQuantityLocks
-             in viewer.js), since there's no partial share of a unique item
-             to negotiate. Task #207: a still-editable (fungible) quantity
-             input starts at 0 (min="0" — 0 is a real, valid in-between state
-             here, only /atlas/trade's own submit validation requires a
-             positive integer) and keeps the other one in sync — typing into
-             either auto-fills the other at this domain's own declared
-             exchangeRate for the two selected classes (updateSellSuggestion
-             in viewer.js), the same math Convert's own live estimate uses.
-             Purely a starting-point suggestion, not enforced — nothing stops
-             overwriting either field afterward, same as Sell always could. -->
+             classes (refreshTradingSellOfferOptions in viewer.js); "You want"
+             lists this domain's own tradable classes, fetched live from
+             GET /atlas/trade/catalog (refreshTradingSellWantOptions). A side
+             whose class is a unique item has its quantity locked to 1
+             (updateSellQuantityLocks). The two quantities are independent:
+             nothing here ever writes into a field the seller typed in. This
+             domain's exchange rate is offered as an optional hint
+             (refreshSellSuggestion) that is applied only by its button. -->
         <div class="subhead" style="margin-top:10px;">You offer</div>
         <select id="tradingSellOfferClassSelect">
           <option value="">Nothing tradable to offer</option>
@@ -2416,7 +2434,11 @@
           <option value="">Loading tradable assets…</option>
         </select>
         <input type="number" id="tradingSellWantQtyInput" placeholder="Quantity (g)" min="0" value="0">
-        <div class="empty-note" style="margin-top:4px;">Quantities auto-suggest each other using this domain's own conversion rate — overwrite either one freely. A unique item's quantity is always 1.</div>
+        <div id="tradingSellSuggestion" class="sell-suggestion" hidden>
+          <span id="tradingSellSuggestionText"></span>
+          <button id="tradingSellUseSuggestionBtn" type="button" class="btn-secondary btn-small">Use as request</button>
+        </div>
+        <div class="empty-note" style="margin-top:4px;">Set each amount yourself, in whole grams. A unique item's quantity is always 1.</div>
 
         <!-- Per-listing expiry, in hours (v1.15) — used to be a hardcoded
              10 MINUTES shared by every listing (see wallet.js's

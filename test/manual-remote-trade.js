@@ -250,12 +250,8 @@ async function joinTradingStationIfNeeded(frame) {
     await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellWantClassSelect').options).some((o) => o.value === 'atlas.element.gold'), null, { timeout: 10000 });
     await pickSearchable(a.frame, 'tradingSellWantClassSelect', 'atlas.element.gold');
 
-    // Task #207 — both quantity fields default to 0, and typing a real
-    // number into either one auto-suggests the other from this domain's
-    // own exchangeRate. Verify the mechanism itself here, independent of
-    // the deliberately generous "10 iron for 5 gold" listing this test
-    // actually posts below (see setSellQuantities' own comment for why
-    // that specific pair is set directly rather than typed).
+    // Both quantity fields start at 0 and are entered independently. The domain's rate is only offered as an optional
+    // hint: it never writes into a field, and the user's own amounts are never overwritten.
     const bothZeroInitially = await a.frame.evaluate(() => [
       document.getElementById('tradingSellOfferQtyInput').value,
       document.getElementById('tradingSellWantQtyInput').value,
@@ -264,10 +260,18 @@ async function joinTradingStationIfNeeded(frame) {
       throw new Error('Expected both Sell quantity fields to default to 0, got: ' + JSON.stringify(bothZeroInitially));
     }
     await a.frame.locator('#tradingSellOfferQtyInput').fill('20');
-    await a.frame.waitForFunction(() => document.getElementById('tradingSellWantQtyInput').value === '1', null, { timeout: 5000 });
+    await a.frame.waitForFunction(() => !document.getElementById('tradingSellSuggestion').hidden, null, { timeout: 5000 });
+    const afterOffer = await a.frame.evaluate(() => ({
+      want: document.getElementById('tradingSellWantQtyInput').value,
+      hint: document.getElementById('tradingSellSuggestionText').textContent,
+    }));
+    if (afterOffer.want !== '0') throw new Error('Typing an offer amount must not change the requested amount, got ' + afterOffer.want);
+    if (!/20 g of .* is worth about 1 g of /.test(afterOffer.hint)) throw new Error('Unexpected rate hint: ' + afterOffer.hint);
     await a.frame.locator('#tradingSellWantQtyInput').fill('3');
-    await a.frame.waitForFunction(() => document.getElementById('tradingSellOfferQtyInput').value === '60', null, { timeout: 5000 });
-    console.log('PASS: quantity auto-suggestion works both ways at this domain\'s 20:1 iron:gold rate (0/0 default, 20->1, 3->60)');
+    await a.frame.locator('#tradingSellOfferQtyInput').fill('25');
+    const manual = await a.frame.evaluate(() => document.getElementById('tradingSellWantQtyInput').value);
+    if (manual !== '3') throw new Error('A manually entered request must be kept, got ' + manual);
+    console.log('PASS: quantities are entered independently; the 20:1 iron:gold rate is only a hint and the typed 3 is kept');
 
     await setSellQuantities(a.frame, 10, 5);
     await a.frame.locator('#tradingSellSubmitBtn').click();
@@ -354,7 +358,7 @@ async function joinTradingStationIfNeeded(frame) {
     await listingsRow.waitFor({ timeout: 10000 });
     await listingsRow.locator('.trading-cancel-btn').click();
     await a.frame.waitForFunction(
-      () => Array.from(document.querySelectorAll('#tradingListingsList .wallet-item')).some((el) => el.textContent.includes('3 g atlas.element.iron') && el.textContent.includes('canceled')), null,
+      () => Array.from(document.querySelectorAll('#tradingListingsList .wallet-item')).some((el) => el.textContent.includes('3 g atlas.element.iron') && /canceled/i.test(el.textContent)), null,
       { timeout: 10000 }
     );
     console.log('PASS: A\'s second listing shows canceled in Listings');
@@ -371,7 +375,7 @@ async function joinTradingStationIfNeeded(frame) {
     const settledRow = a.frame.locator('#tradingListingsList .wallet-item', { hasText: '10 g atlas.element.iron' });
     await settledRow.waitFor({ timeout: 10000 });
     const settledRowText = await settledRow.textContent();
-    if (!settledRowText.includes('settled')) throw new Error('Expected A\'s first listing to show settled status, got: ' + settledRowText);
+    if (!/settled/i.test(settledRowText)) throw new Error('Expected A\'s first listing to show settled status, got: ' + settledRowText);
     await settledRow.locator('.trading-delete-listing-btn').click();
     await a.frame.waitForFunction(
       () => !Array.from(document.querySelectorAll('#tradingListingsList .wallet-item')).some((el) => el.textContent.includes('10 g atlas.element.iron')), null,
@@ -383,7 +387,7 @@ async function joinTradingStationIfNeeded(frame) {
     const canceledRow = a.frame.locator('#tradingListingsList .wallet-item', { hasText: '3 g atlas.element.iron' });
     await canceledRow.waitFor({ timeout: 10000 });
     const canceledRowText = await canceledRow.textContent();
-    if (!canceledRowText.includes('canceled')) throw new Error('Expected A\'s second listing to still show canceled status, got: ' + canceledRowText);
+    if (!/canceled/i.test(canceledRowText)) throw new Error('Expected A\'s second listing to still show canceled status, got: ' + canceledRowText);
     await canceledRow.locator('.trading-delete-listing-btn').click();
     await a.frame.waitForFunction(
       () => !Array.from(document.querySelectorAll('#tradingListingsList .wallet-item')).some((el) => el.textContent.includes('3 g atlas.element.iron')), null,

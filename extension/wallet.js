@@ -4243,7 +4243,7 @@ const AtlasWallet = (() => {
   // queues — posting a listing never settles it on the spot (see the
   // endpoint's own comment for why that changed in v1.14); recorded locally
   // (getSubmittedTrades/saveSubmittedTrades below) purely for this wallet's
-  // own Listings sub-tab display, with reconcileSubmittedTrades (see
+  // own Listings sub-tab display, with reconcileSubmittedTradesFromMail (see
   // checkAllMail below) noticing later once it's claimed.
   async function submitTradeIntent(issuerDomain, membership, offer, want, balance, expiresMinutes) {
     if (balance && balance.id) await assertSettled((await identityOf('self')).publicKey, [balance.id]);
@@ -4263,6 +4263,10 @@ const AtlasWallet = (() => {
       domain: issuerDomain,
       offer, want,
       balanceId: balance.id,
+      // What was staked, kept so the Listings card can show it after the item has left the wallet.
+      offerName: balance.asset && balance.asset.name || null,
+      offerThumbnail: balance.asset && balance.asset.thumbnail || null,
+      offerIssuer: balance.issuer && balance.issuer.domain || null,
       submittedAt: new Date().toISOString(),
       expiresAt: result.expiresAt,
       status: 'pending'
@@ -4451,6 +4455,12 @@ const AtlasWallet = (() => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pendingId, intent: { payload, proof } })
     });
+    if (res.status === 404) {
+      // Not on the station any more: claimed, withdrawn elsewhere or expired. Bring the record up to date instead of
+      // leaving it offering a cancel that can no longer work.
+      await refreshSubmittedTrades((await getIdentity()).publicKey).catch(() => {});
+      throw new Error('This listing is no longer on the marketplace. It was claimed, withdrawn or has expired; its status has been refreshed.');
+    }
     if (!res.ok) throw new Error('Cancel failed: ' + (await res.text()));
     const result = await res.json();
     const owner = await getIdentity();
@@ -4466,17 +4476,16 @@ const AtlasWallet = (() => {
   }
 
   // Local-only record of this identity's own submitted remote trade
-  // intents (task #144 Phase 1), purely for the wallet's Trade tab display
-  // — same "not signed, not sent anywhere, this device's own bookkeeping"
-  // shape as the alias store below. `status` starts 'pending' and is only
-  // ever flipped locally, either immediately (submitTradeIntent above, when
-  // the station settles it on the spot) or later (reconcileSubmittedTrades
-  // below, once a mail check notices the balance it staked got superseded
-  // or revoked out from under it — the sign a match happened while this
-  // wallet wasn't looking). Expiry itself isn't a stored status — the UI
-  // compares `expiresAt` to now at render time, same "computed, not
-  // persisted" approach as everywhere else a timestamp alone is enough.
-  // Encrypted at rest (2026-09-14, second round).
+  // intents, purely for the wallet's Listings tab — this device's own
+  // bookkeeping, not signed and not sent anywhere. `status` starts
+  // 'pending' and only changes here:
+  //   settled     - settlement evidence arrived (reconcileSubmittedTradesFromMail);
+  //   canceled    - this wallet withdrew it (cancelTradeListing);
+  //   unconfirmed - the station no longer lists it, no settlement evidence is
+  //                 in hand and it has not expired (refreshSubmittedTrades);
+  //   expired     - the station no longer lists it and its time has passed.
+  // `unconfirmed` and `expired` still become `settled` if the evidence turns up.
+  // Encrypted at rest.
   async function getSubmittedTrades(ownerPublicKey) {
     const { atlasSubmittedTrades } = await chrome.storage.local.get('atlasSubmittedTrades');
     const identity = await getIdentity();
@@ -8158,7 +8167,11 @@ const AtlasWallet = (() => {
     const verdict = await verifyCredential(credential);
     if (!verdict.valid) throw new Error(verdictBlockMessage(verdict, 'this gift') || ('gift credential does not check out: ' + verdict.reason));
 
+    // The balance is read from the wallet itself just before and just after the claim, and before automatic merging, so the
+    // recorded change is what the claim added and a merge of balances is never counted as something received.
+    const balanceBefore = await heldFungibleBalance(ownerPublicKey, credential);
     await commitOperation(ownerPublicKey, null, [{ owner: ownerPublicKey, add: [{ credential, lastVerdict: verdict }] }]);
+    const balanceAfter = await heldFungibleBalance(ownerPublicKey, credential);
     await autoConsolidateAssetWallet(ownerPublicKey);
 
     await withMessageLock(async () => {
@@ -8169,7 +8182,60 @@ const AtlasWallet = (() => {
       current.read = true; // clicking Claim is at least as strong a "seen it" signal as opening the card
       await saveMail(ownerPublicKey, latest);
     });
+    await logMailClaim(ownerPublicKey, entry.message, credential, balanceBefore, balanceAfter);
     return { credential, verdict };
+  }
+
+  // The amount of a fungible class this identity holds from one issuer: every balance of that class and issuer that is
+  // not known to be spent. null for a unique item.
+  async function heldFungibleBalance(ownerPublicKey, credential) {
+    if (!credential.asset.fungible) return null;
+    const held = await getWallet(ownerPublicKey);
+    return held
+      .filter((e) => !isKnownSpent(e) && e.credential.asset.fungible && e.credential.asset.class === credential.asset.class && e.credential.issuer.domain === credential.issuer.domain)
+      .reduce((sum, e) => sum + e.credential.quantity, 0);
+  }
+
+  // Whole grams with thousands separators, the larger unit only as a convenience: 4,993 g (4.993 kg).
+  function formatExactGrams(grams) {
+    if (!Number.isFinite(grams)) return String(grams);
+    const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    const exact = grouped(grams) + ' g';
+    if (grams < 1000) return exact;
+    const unit = grams < 1000000 ? { div: 1000, places: 3, name: 'kg' } : { div: 1000000, places: 6, name: 't' };
+    const fraction = String(grams % unit.div).padStart(unit.places, '0').replace(/0+$/, '');
+    return exact + ' (' + grouped(Math.trunc(grams / unit.div)) + (fraction ? '.' + fraction : '') + ' ' + unit.name + ')';
+  }
+
+  // Records a claimed mail attachment in Activity, once per message. The entry carries the figures as measured by
+  // claimMailGift, so what the log shows is what the wallet held, not an estimate.
+  async function logMailClaim(ownerPublicKey, message, credential, balanceBefore, balanceAfter) {
+    try {
+      const identity = await getIdentity();
+      if (!identity || identity.publicKey !== ownerPublicKey) return; // the log belongs to the identity that is open
+      const existing = await getActivityLog();
+      if (existing.some((e) => e.meta && e.meta.kind === 'mail-claim' && e.meta.messageId === message.id)) return;
+      const asset = credential.asset;
+      const fungible = asset.fungible === true;
+      const symbol = asset.properties && typeof asset.properties['atlas.symbol'] === 'string' ? asset.properties['atlas.symbol'] : null;
+      const baseName = asset.name || asset.class;
+      // Some classes already carry the symbol in their name ("Gold (Au)"); it is not added twice.
+      const name = symbol && !baseName.includes('(' + symbol + ')') ? baseName + ' (' + symbol + ')' : baseName;
+      let source;
+      if (typeof message.subject === 'string' && message.subject.startsWith(LISTING_CLAIMED_SUBJECT_PREFIX)) source = 'Trading Station payment';
+      else if (message.from && message.from.publicKey) source = 'Gift from ' + (message.from.handle || 'another identity');
+      else source = 'Gift from ' + credential.issuer.domain;
+      // The change is only reported as a balance when the two measurements agree with what was claimed; if another
+      // operation touched the same balance meanwhile, the amount received is still logged but no balances are claimed.
+      const consistent = fungible && Number.isFinite(balanceBefore) && Number.isFinite(balanceAfter) && balanceAfter - balanceBefore === credential.quantity;
+      await logActivity('asset', 'Received ' + (fungible ? formatExactGrams(credential.quantity) + ' ' : '') + name, {
+        kind: 'mail-claim', messageId: message.id,
+        assetId: credential.id, assetClass: asset.class, domain: credential.issuer.domain,
+        assetName: asset.name || asset.class, symbol, fungible, quantity: fungible ? credential.quantity : 1,
+        source,
+        ...(consistent ? { previousBalance: balanceBefore, newBalance: balanceAfter } : {})
+      });
+    } catch (err) { /* logging never fails the claim */ }
   }
 
   // Post Office (task #75/#87/#94, SPEC.md §11.3): sends mail to another
@@ -10186,31 +10252,63 @@ const AtlasWallet = (() => {
   // replaced. A `newCredential` that fails any check is discarded — the
   // old (now-revoked) entry stays exactly as it was, no different from any
   // other verification failure this wallet already handles.
-  // The other half of what an `updates` array can mean
-  // for this wallet, alongside processAssetUpdates above: not just "here's
-  // what your credential turned into", but also, for THIS identity's own
-  // locally-recorded submitted trades, "here's the sign one of them just
-  // settled while you weren't looking" — a pending trade's staked balance
-  // id showing up in `updates` (superseded or plain revoked, either way)
-  // means the station matched and settled it. The actual remainder/
-  // received credentials are handled by processAssetUpdates and the
-  // ordinary mail-gift-claim path respectively (see POST /atlas/trade/
-  // submit's own comment) — this function only updates the LOCAL record's
-  // display status, never touches wallet contents itself.
-  async function reconcileSubmittedTrades(ownerPublicKey, domain, updates) {
-    if (!updates || updates.length === 0) return;
+  // A local listing record is marked settled only on authoritative evidence: the "Listing claimed at <station>" mail that
+  // the issuer of the staked item signs when it settles that item. The signed message names the staked item's id
+  // (credentialId), so it ties the claim to this listing whichever domain issued the item and whichever domain hosts the
+  // station. A listing merely missing from the public marketplace proves nothing (it may have been canceled or have expired),
+  // and neither does the staked item being revoked. `messages` must already have passed verifyMailMessage.
+  const LISTING_CLAIMED_SUBJECT_PREFIX = 'Listing claimed at ';
+  async function reconcileSubmittedTradesFromMail(ownerPublicKey, messages) {
+    if (!messages || messages.length === 0) return 0;
     const records = await getSubmittedTrades(ownerPublicKey);
-    const updatedIds = new Set(updates.map((u) => u.id));
-    let changed = false;
+    let changed = 0;
     for (const record of records) {
-      if (record.domain !== domain || record.status !== 'pending') continue;
-      if (updatedIds.has(record.balanceId)) {
-        record.status = 'settled';
-        record.settledAt = new Date().toISOString();
-        changed = true;
-      }
+      if (record.status === 'settled' || record.status === 'canceled') continue;
+      const evidence = messages.find((m) => m && m.credentialId === record.balanceId && m.subject === LISTING_CLAIMED_SUBJECT_PREFIX + record.domain);
+      if (!evidence) continue;
+      record.status = 'settled';
+      record.settledAt = evidence.sentAt || new Date().toISOString();
+      record.settledEvidence = { kind: 'settlement-mail', messageId: evidence.id };
+      delete record.unconfirmedAt;
+      changed++;
     }
     if (changed) await saveSubmittedTrades(ownerPublicKey, records);
+    return changed;
+  }
+
+  // Brings this identity's local listing records up to date and says, per open record, what could be established
+  // about it right now. Returns {pendingId: 'listed' | 'off-market' | 'unreachable'}:
+  //   listed       - the station still shows it (it can be cancelled);
+  //   off-market   - the station no longer shows it and no settlement evidence is in hand yet, so it is neither
+  //                  offered for cancellation nor called settled (status 'unconfirmed', or 'expired' once past its time);
+  //   unreachable  - the station could not be asked; nothing is changed.
+  async function refreshSubmittedTrades(ownerPublicKey) {
+    const stored = await getMail(ownerPublicKey);
+    await reconcileSubmittedTradesFromMail(ownerPublicKey, stored.map((e) => e.message));
+    const records = await getSubmittedTrades(ownerPublicKey);
+    const open = records.filter((r) => r.status === 'pending' || r.status === 'unconfirmed');
+    const view = {};
+    if (!open.length) return view;
+    const markets = new Map();
+    for (const domain of new Set(open.map((r) => r.domain))) {
+      try { markets.set(domain, new Set((await fetchTradeListings(domain)).map((l) => l.pendingId))); } catch (err) { markets.set(domain, null); }
+    }
+    const now = Date.now();
+    let changed = false;
+    for (const record of open) {
+      const listed = markets.get(record.domain);
+      if (!listed) { view[record.pendingId] = 'unreachable'; continue; }
+      if (listed.has(record.pendingId)) {
+        view[record.pendingId] = 'listed';
+        if (record.status === 'unconfirmed') { record.status = 'pending'; delete record.unconfirmedAt; changed = true; }
+        continue;
+      }
+      view[record.pendingId] = 'off-market';
+      if (new Date(record.expiresAt).getTime() <= now) { record.status = 'expired'; changed = true; }
+      else if (record.status !== 'unconfirmed') { record.status = 'unconfirmed'; record.unconfirmedAt = new Date().toISOString(); changed = true; }
+    }
+    if (changed) await saveSubmittedTrades(ownerPublicKey, records);
+    return view;
   }
 
   function processAssetUpdates(ownerPublicKey, domain, updates) {
@@ -10548,6 +10646,7 @@ const AtlasWallet = (() => {
         // Messages the person deleted that this domain still holds (deleted
         // while offline, or before domains could be asked to forget them).
         const staleOnServer = [];
+        const verifiedHere = [];
         for (const message of (messages || [])) {
           if (knownIds.has(message.id)) {
             // Friend notices already handled count as deleted too; a request
@@ -10559,6 +10658,7 @@ const AtlasWallet = (() => {
           const ok = await verifyMailMessage(domain, message);
           if (!ok) continue; // never surface anything that doesn't check out
           knownIds.add(message.id);
+          verifiedHere.push(message);
           // Friend requests and their acceptances (see FRIEND_SUBJECT_MARKER).
           // Like chat, these need `from` (they only travel through a Post
           // Office); a marked message without it is dropped, never shown as mail.
@@ -10630,7 +10730,7 @@ const AtlasWallet = (() => {
           }
         }
         await processAssetUpdates(identity.publicKey, domain, updates);
-        await reconcileSubmittedTrades(identity.publicKey, domain, updates);
+        await reconcileSubmittedTradesFromMail(identity.publicKey, verifiedHere);
         if (staleOnServer.length) await deleteMessagesOnServer(identity, domain, staleOnServer, assets);
       } catch (err) {
         // unreachable domain — move on, don't let it block the others
@@ -11304,7 +11404,7 @@ const AtlasWallet = (() => {
     dropItem, pickUpItem, getWorldDrops, splitForDrop,
     proposeIntent, verifySignedPayload,
     submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,
-    getSubmittedTrades, deleteSubmittedTrade, getTradingStationMemberships,
+    getSubmittedTrades, deleteSubmittedTrade, refreshSubmittedTrades, reconcileSubmittedTradesFromMail, getTradingStationMemberships,
     recordWorldVisit, getRecentWorlds,
     getCharacterScale, getSavedCharacterScale, setCharacterScale,
     getCameraDistance, setCameraDistance,

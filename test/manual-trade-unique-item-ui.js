@@ -222,7 +222,7 @@ async function joinTradingStationIfNeeded(frame) {
     await listingsRow.waitFor({ timeout: 10000 });
     const listingsRowText = await listingsRow.textContent();
     if (/\d+\s*g\s+atlas\.wearable\.ring/.test(listingsRowText)) throw new Error('Expected Listings to also render the ring side without a "g" suffix, got: ' + listingsRowText);
-    if (!listingsRowText.includes('settled')) throw new Error('Expected A\'s listing to show settled status, got: ' + listingsRowText);
+    if (!/settled/i.test(listingsRowText)) throw new Error('Expected A\'s listing to show settled status, got: ' + listingsRowText);
     console.log('PASS: Listings also renders the ring side without a "g" suffix ->', listingsRowText.trim());
 
     console.log('\nALL TRADE UNIQUE-ITEM WALLET UI (TASK #250 FOURTH FOLLOW-UP) CHECKS PASSED');

@@ -2063,6 +2063,9 @@ const tradingSellOfferClassSelect = document.getElementById('tradingSellOfferCla
 const tradingSellOfferQtyInput = document.getElementById('tradingSellOfferQtyInput');
 const tradingSellWantClassSelect = document.getElementById('tradingSellWantClassSelect');
 const tradingSellWantQtyInput = document.getElementById('tradingSellWantQtyInput');
+const tradingSellSuggestionEl = document.getElementById('tradingSellSuggestion');
+const tradingSellSuggestionTextEl = document.getElementById('tradingSellSuggestionText');
+const tradingSellUseSuggestionBtn = document.getElementById('tradingSellUseSuggestionBtn');
 const tradingSellExpiresHoursInput = document.getElementById('tradingSellExpiresHoursInput');
 const tradingSellSubmitBtn = document.getElementById('tradingSellSubmitBtn');
 const tradingSellStatusEl = document.getElementById('tradingSellStatus');
@@ -5044,10 +5047,13 @@ function issuerErrorText(err) {
 
 function formatMass(grams) {
   if (!Number.isFinite(grams)) return String(grams);
-  const trimmed = (n) => n.toFixed(2).replace(/\.?0+$/, '');
-  if (grams < 1000) return grams + ' g';
-  if (grams < 1000000) return trimmed(grams / 1000) + ' kg';
-  return trimmed(grams / 1000000) + ' t';
+  // Whole grams are always shown exactly; the larger unit is only a convenience: 4,993 g (4.993 kg).
+  const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const exact = grouped(grams) + ' g';
+  if (grams < 1000) return exact;
+  const unit = grams < 1000000 ? { div: 1000, places: 3, name: 'kg' } : { div: 1000000, places: 6, name: 't' };
+  const fraction = String(grams % unit.div).padStart(unit.places, '0').replace(/0+$/, '');
+  return exact + ' (' + grouped(Math.trunc(grams / unit.div)) + (fraction ? '.' + fraction : '') + ' ' + unit.name + ')';
 }
 
 // Renders the small "Properties (N) ▸" link + its hidden detail panel for
@@ -7355,11 +7361,25 @@ function activityAssetRef(entry) {
   return m ? { id: null, assetClass: m[1], domain: null } : null;
 }
 
+// The detail lines under a claimed Mail attachment: where it came from and, for a fungible asset, the balance before,
+// the change and the balance after, each as recorded at the time of the claim.
+function mailClaimDetailsHtml(meta) {
+  const rows = [['Issuer', meta.domain], ['Source', meta.source]];
+  if (meta.fungible && Number.isFinite(meta.previousBalance) && Number.isFinite(meta.newBalance)) {
+    rows.push(['Previous balance', formatMass(meta.previousBalance)]);
+    rows.push(['Change', '+' + formatMass(meta.newBalance - meta.previousBalance)]);
+    rows.push(['New balance', formatMass(meta.newBalance)]);
+  }
+  return '<ul class="activity-details">' + rows.filter((r) => r[1]).map((r) =>
+    '<li><span class="k">' + escapeHtml(r[0]) + ':</span><span>' + escapeHtml(String(r[1])) + '</span></li>').join('') + '</ul>';
+}
+
 function renderActivityLogEntry(entry, container) {
   const el = document.createElement('div');
   el.className = 'info-card';
   el.innerHTML =
     '<div class="name">' + escapeHtml(entry.text) + '</div>' +
+    (entry.meta && entry.meta.kind === 'mail-claim' ? mailClaimDetailsHtml(entry.meta) : '') +
     '<div class="meta">' + new Date(entry.at).toLocaleString() + '</div>';
   const ref = activityAssetRef(entry);
   if (ref) {
@@ -10885,12 +10905,10 @@ async function refreshTradingSellOfferOptions() {
     // the visible searchable-combo input stays in sync on EVERY exit path
     // above, including the early "nothing tradable" return.
     tradingSellOfferCombo && tradingSellOfferCombo.sync();
-    // Task #207 — this refresh can silently change (or clear) the selected
-    // offer class without firing its own 'change' event (e.g. a class you
-    // no longer hold drops out entirely); recompute the suggestion so the
-    // "you want" side doesn't keep showing a stale number for a class
-    // that's no longer actually selected.
-    updateSellSuggestion(sellDrivingSide);
+    // This refresh can change or clear the selected offer class without
+    // firing its own 'change' event (a class no longer held drops out), so
+    // the quantity locks and the optional rate hint are recomputed here.
+    updateSellSuggestion();
   }
 }
 
@@ -10966,34 +10984,18 @@ async function refreshTradingSellWantOptions() {
   } finally {
     // Task #205: see the matching comment in refreshTradingSellOfferOptions.
     tradingSellWantCombo && tradingSellWantCombo.sync();
-    // Task #207 — the want dropdown may have just been rebuilt (a fresh
-    // domain, a refetch), which can silently invalidate whatever suggestion
-    // was showing without firing either quantity input's own 'input' event;
-    // recompute from whichever side the visitor was last actually typing
-    // into so the two fields don't drift out of sync with the new options.
-    updateSellSuggestion(sellDrivingSide);
+    // The want dropdown may have just been rebuilt (a fresh domain, a
+    // refetch); recompute the quantity locks and the optional rate hint.
+    updateSellSuggestion();
   }
 }
 
-// Task #207 — Sell's "you offer"/"you want" quantity auto-suggestion.
-// Both quantity inputs start at 0 (viewer.html); typing a real number into
-// EITHER one auto-fills the other at this domain's own declared
-// `exchangeRate` for the two currently-selected classes — the exact same
-// floor-conversion math updateConvertEstimate() below already uses for
-// Convert's live estimate, just applied to a barter pair instead of an
-// actual /atlas/convert spend. This is a starting-point SUGGESTION only:
-// nothing at listing-post time checks the two quantities against each
-// other at all (Sell has never enforced a "fair" rate, unlike Convert),
-// so overwriting either field afterward is always fine.
-//
-// sellDrivingSide tracks whichever quantity field the visitor actually
-// typed into most recently — the one auto-fill always treats as the
-// source of truth and never overwrites itself. It's also what
-// refreshTradingSellOfferOptions/refreshTradingSellWantOptions above
-// re-derive the suggestion from after a dropdown repopulates out from
-// under the current selection (see their own finally blocks).
+// Sell's "you offer"/"you want" quantities are independent: the seller types each one, and nothing writes into
+// either field except the quantity lock of a unique item (always 1) and the seller's own press of the hint's button.
+// The hint (refreshSellSuggestion below) works out what the offered amount is worth at this domain's own declared
+// `exchangeRate`, with the same floor-conversion math updateConvertEstimate() uses for Convert's live estimate.
+// Nothing at listing-post time compares the two amounts (the station's own validation is unchanged).
 let sellCatalogCache = [];
-let sellDrivingSide = 'offer';
 
 // Returns the suggested quantity of `toClass` a `fromQty` amount of
 // `fromClass` would be "worth" at this domain's own rates, or `null` when
@@ -11034,35 +11036,38 @@ function updateSellQuantityLocks() {
   lockSellQuantityIfUnique(tradingSellWantQtyInput, !!wantInfo && wantInfo.fungible === false);
 }
 
-function updateSellSuggestion(drivingSide) {
-  sellDrivingSide = drivingSide;
-  if (!tradingSellOfferClassSelect || !tradingSellWantClassSelect || !tradingSellOfferQtyInput || !tradingSellWantQtyInput) return;
-  updateSellQuantityLocks();
-  const offerClass = tradingSellOfferClassSelect.value;
-  const wantClass = tradingSellWantClassSelect.value;
-  if (!offerClass || !wantClass) return; // nothing selected on one side yet — nothing to suggest
-  // A locked (non-fungible) side is already pinned to 1 above and has no
-  // exchangeRate for computeSuggestedSellQuantity to work with anyway — it
-  // naturally returns null for that side, so no separate branch is needed
-  // here, but skipping it explicitly avoids overwriting the "1" it was
-  // just locked to with a stale/zero suggestion.
-  if (drivingSide === 'want') {
-    if (tradingSellOfferQtyInput.disabled) return;
-    const suggested = computeSuggestedSellQuantity(wantClass, parseInt(tradingSellWantQtyInput.value, 10), offerClass);
-    if (suggested !== null) tradingSellOfferQtyInput.value = suggested;
-  } else {
-    if (tradingSellWantQtyInput.disabled) return;
-    const suggested = computeSuggestedSellQuantity(offerClass, parseInt(tradingSellOfferQtyInput.value, 10), wantClass);
-    if (suggested !== null) tradingSellWantQtyInput.value = suggested;
-  }
+// An optional hint, never a rewrite: what the offered amount is worth at this domain's own rate. The seller's own amounts are
+// only changed by pressing the button, so a custom price is never overwritten.
+let sellSuggestedWant = null;
+function refreshSellSuggestion() {
+  if (!tradingSellSuggestionEl) return;
+  sellSuggestedWant = null;
+  const offerClass = tradingSellOfferClassSelect && tradingSellOfferClassSelect.value;
+  const wantClass = tradingSellWantClassSelect && tradingSellWantClassSelect.value;
+  const offerQty = parseInt(tradingSellOfferQtyInput.value, 10);
+  const offerInfo = offerClass ? sellOfferHoldingsCache.get(offerClass) : null;
+  const wantInfo = wantClass ? sellCatalogCache.find((c) => c.class === wantClass) : null;
+  const usable = offerClass && wantClass && offerClass !== wantClass && offerInfo && offerInfo.fungible !== false
+    && wantInfo && wantInfo.fungible !== false && Number.isInteger(offerQty) && offerQty > 0;
+  const suggested = usable ? computeSuggestedSellQuantity(offerClass, offerQty, wantClass) : null;
+  if (!suggested) { tradingSellSuggestionEl.hidden = true; return; }
+  sellSuggestedWant = suggested;
+  tradingSellSuggestionTextEl.textContent = 'At this domain\'s rates, ' + formatMass(offerQty) + ' of ' + offerClass + ' is worth about ' + formatMass(suggested) + ' of ' + wantClass + '. ';
+  tradingSellSuggestionEl.hidden = false;
 }
 
-// Setting .value programmatically (above) never fires 'input'/'change' on
-// its own, so these four listeners can't loop back into each other.
-tradingSellOfferQtyInput && tradingSellOfferQtyInput.addEventListener('input', () => updateSellSuggestion('offer'));
-tradingSellWantQtyInput && tradingSellWantQtyInput.addEventListener('input', () => updateSellSuggestion('want'));
-tradingSellOfferClassSelect && tradingSellOfferClassSelect.addEventListener('change', () => updateSellSuggestion(sellDrivingSide));
-tradingSellWantClassSelect && tradingSellWantClassSelect.addEventListener('change', () => updateSellSuggestion(sellDrivingSide));
+function updateSellSuggestion() {
+  if (!tradingSellOfferClassSelect || !tradingSellWantClassSelect || !tradingSellOfferQtyInput || !tradingSellWantQtyInput) return;
+  updateSellQuantityLocks();
+  refreshSellSuggestion();
+}
+
+tradingSellOfferQtyInput && tradingSellOfferQtyInput.addEventListener('input', updateSellSuggestion);
+tradingSellOfferClassSelect && tradingSellOfferClassSelect.addEventListener('change', updateSellSuggestion);
+tradingSellWantClassSelect && tradingSellWantClassSelect.addEventListener('change', updateSellSuggestion);
+tradingSellUseSuggestionBtn && tradingSellUseSuggestionBtn.addEventListener('click', () => {
+  if (sellSuggestedWant && !tradingSellWantQtyInput.disabled) tradingSellWantQtyInput.value = sellSuggestedWant;
+});
 
 // Task #203 (SPEC.md §7's "Currency conversion") — Convert sub-tab.
 // Caches the last-fetched catalog (with each entry's exchangeRate) so the
@@ -11254,21 +11259,35 @@ function formatExpiryCountdown(expiresAtIso) {
   return `expires in ${minutes}m`;
 }
 
-// Task #250 fourth follow-up — a listing's offer/want (from GET
-// /atlas/trade/listings) is only ever {class, quantity}, with no
-// `fungible` flag of its own (unlike an actual held credential, which
-// always carries one — see the Buy claim handler's own confirmation-line
-// formatting just above for that case). Browsing a listing BEFORE
-// claiming it has no credential in hand yet to read fungibility off of, so
-// this looks it up in a small class -> catalog-entry map built once per
-// render pass (see the two callers below) — for display only, never to
-// gate anything. Falls back to the old mass-formatting for a class the
-// catalog lookup didn't cover (a fetch failure, or an issuer that predates
-// the `fungible` field) rather than guessing.
-function formatTradeSideAmount(side, catalogByClass) {
-  const entry = catalogByClass && catalogByClass.get(side.class);
-  if (entry && entry.fungible === false) return side.class;
-  return formatMass(side.quantity) + ' ' + side.class;
+// ---------- Trading Station cards (Buy and Listings) ----------
+//
+// One card layout for both tabs: what is given and what is received side by side, each with the item's name, its
+// thumbnail when it has one, the exact amount (whole grams, never rounded) and its class. A listing carries only the
+// class and quantity of each side, so names and thumbnails come from this station's catalog, display only; the
+// seller's own records also keep a snapshot of what they staked.
+function tradeThumbHtml(url) {
+  if (typeof url === 'string' && /^https?:\/\//i.test(url)) return '<img class="trade-thumb" src="' + escapeHtml(url) + '" alt="" loading="lazy">';
+  return '<span class="trade-thumb trade-thumb-empty"></span>';
+}
+
+// `info` is what is known about the item: {name, thumbnail, fungible, issuer}; any of it may be missing.
+function tradeSideHtml(label, side, info) {
+  info = info || {};
+  const unique = info.fungible === false;
+  const amount = unique ? 'Unique item' : formatMass(side.quantity);
+  return '<div class="trade-side">' +
+    '<div class="trade-side-label">' + escapeHtml(label) + '</div>' +
+    '<div class="trade-side-body">' + tradeThumbHtml(info.thumbnail) +
+    '<div class="trade-side-text">' +
+    (info.name ? '<div class="trade-name">' + escapeHtml(info.name) + '</div>' : '') +
+    '<div><span class="trade-amount">' + escapeHtml(amount) + '</span> <span class="trade-class">' + escapeHtml(side.class) + '</span></div>' +
+    (info.issuer ? '<div class="trade-issuer">Issued by ' + escapeHtml(info.issuer) + '</div>' : '') +
+    '</div></div></div>';
+}
+
+function tradeInfoFromCatalog(catalogByClass, cls) {
+  const entry = catalogByClass && catalogByClass.get(cls);
+  return entry ? { name: entry.name, thumbnail: entry.thumbnail, fungible: entry.fungible } : {};
 }
 
 async function refreshTradingBuyList() {
@@ -11292,35 +11311,38 @@ async function refreshTradingBuyList() {
     tradingBuyListEl.innerHTML = '<div class="empty-note">Nothing listed right now.</div>';
     return;
   }
-  // Best-effort, display-only (see formatTradeSideAmount's own comment) —
-  // an ungated GET, same one Sell's own "You want" dropdown already fetches,
-  // just for formatting rather than populating a select this time.
+  // Best-effort, display-only: the same ungated GET Sell's "You want" dropdown fetches.
   const catalogByClass = new Map();
   try {
     (await AtlasWallet.fetchTradableClasses(domain) || []).forEach((c) => catalogByClass.set(c.class, c));
-  } catch (err) { /* falls back to mass formatting below */ }
+  } catch (err) { /* cards fall back to the class id */ }
   tradingBuyListEl.innerHTML = listings.map((l) => `
-    <div class="wallet-item">
-      ${formatTradeSideAmount(l.offer, catalogByClass)} → ${formatTradeSideAmount(l.want, catalogByClass)}
-      <span class="empty-note">from ${l.posterPublicKey.slice(0, 16)}… — ${formatExpiryCountdown(l.expiresAt)}</span>
-      <button type="button" class="btn-secondary trading-claim-btn" data-pending-id="${l.pendingId}">Trade</button>
+    <div class="wallet-item trade-card" data-pending-id="${escapeHtml(l.pendingId)}">
+      <div class="trade-sides">
+        ${tradeSideHtml('You give', l.want, tradeInfoFromCatalog(catalogByClass, l.want.class))}
+        <div class="trade-arrow" aria-hidden="true">⇄</div>
+        ${tradeSideHtml('You receive', l.offer, tradeInfoFromCatalog(catalogByClass, l.offer.class))}
+      </div>
+      <div class="trade-meta">
+        <span>Trading at ${escapeHtml(domain)}</span>
+        <span>Posted by ${escapeHtml(l.posterPublicKey.slice(0, 16))}…</span>
+        <span>${escapeHtml(formatExpiryCountdown(l.expiresAt))}</span>
+      </div>
+      <div class="trade-actions">
+        <button type="button" class="btn-secondary trading-claim-btn" data-pending-id="${escapeHtml(l.pendingId)}">Trade</button>
+      </div>
     </div>
   `).join('');
 }
 
-// This wallet's own posted listings (Listings tab, v1.14) — same local
-// record Sell's submitTradeIntent call writes, same "pending/settled from
-// the stored record, expired computed at render time" shape
-// refreshRemoteTradeList had before this reshape. Adds a Cancel button
-// (POST /atlas/trade/cancel) for anything still actually withdrawable, and
-// a local-only Delete button for a settled or expired card — there's
-// nothing left to withdraw from either (settled already paid out,
-// expired never will), so this just clears the record out of the list;
-// unlike Cancel it never talks to the server, purely
-// AtlasWallet.deleteSubmittedTrade() removing this wallet's own local
-// bookkeeping entry. Deliberately NOT offered on 'pending' (still live —
-// Cancel is the right action) or 'canceled' (not asked for; easy to add
-// later if wanted).
+// This wallet's own posted listings. The wallet first brings each record up to date (AtlasWallet.refreshSubmittedTrades):
+// a listing is Settled only on the issuer's signed settlement mail, never because it is missing from the marketplace.
+// What a card offers follows from what is known:
+//   still listed at the station      -> Cancel (the only case where cancelling can work);
+//   no longer listed, not settled    -> "Waiting for confirmation", with Check again and Remove, no Cancel;
+//   station not reachable            -> status unknown, Check again, no Cancel;
+//   settled / expired / canceled     -> Delete (local housekeeping only).
+let listingMailCheckStarted = false;
 async function refreshTradingListingsList() {
   if (!tradingListingsListEl) return;
   const identity = await AtlasWallet.getIdentity();
@@ -11328,38 +11350,72 @@ async function refreshTradingListingsList() {
     tradingListingsListEl.innerHTML = '<div class="empty-note">No identity yet.</div>';
     return;
   }
+  let view = {};
+  try { view = await AtlasWallet.refreshSubmittedTrades(identity.publicKey); } catch (err) { /* shown from the stored records */ }
   const records = await AtlasWallet.getSubmittedTrades(identity.publicKey);
   if (records.length === 0) {
     tradingListingsListEl.innerHTML = '<div class="empty-note">Nothing posted yet.</div>';
     return;
   }
-  // Same display-only catalog lookup refreshTradingBuyList uses (see
-  // formatTradeSideAmount's own comment) — one fetch per distinct domain a
-  // record was posted to, since this wallet's own listings can span more
-  // than one Trading Station, unlike Buy's single currently-browsed one.
-  const domains = Array.from(new Set(records.map((r) => r.domain)));
+  // The settlement mail is what settles a listing; ask for it once in the background when something is waiting for it.
+  if (!listingMailCheckStarted && records.some((r) => r.status === 'unconfirmed' || r.status === 'pending')) {
+    listingMailCheckStarted = true;
+    AtlasWallet.checkAllMail().then(async () => {
+      const after = await AtlasWallet.getSubmittedTrades(identity.publicKey);
+      if (after.some((r, i) => records[i] && r.status !== records[i].status)) await refreshTradingListingsList();
+    }).catch(() => {}).finally(() => { listingMailCheckStarted = false; });
+  }
+  const held = new Map((await AtlasWallet.getWallet(identity.publicKey)).map((e) => [e.credential.id, e.credential]));
   const catalogByDomain = new Map();
-  await Promise.all(domains.map(async (d) => {
+  await Promise.all(Array.from(new Set(records.map((r) => r.domain))).map(async (d) => {
     const byClass = new Map();
     try {
       (await AtlasWallet.fetchTradableClasses(d) || []).forEach((c) => byClass.set(c.class, c));
-    } catch (err) { /* falls back to mass formatting below */ }
+    } catch (err) { /* cards fall back to the class id */ }
     catalogByDomain.set(d, byClass);
   }));
 
   const now = Date.now();
   tradingListingsListEl.innerHTML = records.slice().reverse().map((r) => {
-    const status = r.status === 'pending' && new Date(r.expiresAt).getTime() < now ? 'expired' : r.status;
-    // Only a still-pending listing has a countdown worth showing —
-    // settled/expired/canceled are all already-final states.
-    const countdown = status === 'pending' ? ` <span class="empty-note">(${formatExpiryCountdown(r.expiresAt)})</span>` : '';
-    const actionBtn = status === 'pending'
-      ? `<button type="button" class="btn-secondary trading-cancel-btn" data-pending-id="${r.pendingId}" data-domain="${r.domain}">Cancel</button>`
-      : (status === 'settled' || status === 'expired' || status === 'canceled')
-        ? `<button type="button" class="danger-btn trading-delete-listing-btn" data-pending-id="${r.pendingId}">Delete</button>`
-        : '';
-    const catalogByClass = catalogByDomain.get(r.domain) || new Map();
-    return `<div class="wallet-item">${formatTradeSideAmount(r.offer, catalogByClass)} → ${formatTradeSideAmount(r.want, catalogByClass)} @ ${r.domain} — <strong>${status}</strong>${countdown} ${actionBtn}</div>`;
+    const open = r.status === 'pending' || r.status === 'unconfirmed';
+    const expired = open && new Date(r.expiresAt).getTime() < now;
+    const seen = view[r.pendingId];
+    let status = expired && r.status === 'pending' ? 'expired' : r.status;
+    if (status === 'pending' && seen !== 'listed') status = 'unknown';
+    const label = { pending: 'Open', unknown: 'Status unknown', unconfirmed: 'Waiting for confirmation', settled: 'Settled', expired: 'Expired', canceled: 'Canceled' }[status] || status;
+    const catalog = catalogByDomain.get(r.domain) || new Map();
+    const staked = held.get(r.balanceId);
+    const offerInfo = Object.assign(tradeInfoFromCatalog(catalog, r.offer.class), {
+      ...(staked ? { name: staked.asset.name, thumbnail: staked.asset.thumbnail, issuer: staked.issuer.domain }
+        : { ...(r.offerName ? { name: r.offerName } : {}), ...(r.offerThumbnail ? { thumbnail: r.offerThumbnail } : {}), ...(r.offerIssuer ? { issuer: r.offerIssuer } : {}) })
+    });
+    let note = '';
+    let actions = '';
+    if (status === 'pending') {
+      note = formatExpiryCountdown(r.expiresAt);
+      actions = `<button type="button" class="btn-secondary trading-cancel-btn" data-pending-id="${escapeHtml(r.pendingId)}" data-domain="${escapeHtml(r.domain)}">Cancel</button>`;
+    } else if (status === 'unknown') {
+      note = 'Could not reach ' + r.domain + ' to check this listing.';
+      actions = '<button type="button" class="btn-secondary trading-check-btn">Check again</button>';
+    } else if (status === 'unconfirmed') {
+      note = 'It is no longer on the marketplace. It may have been claimed, withdrawn elsewhere or expired; it is marked Settled once the station’s settlement mail arrives.';
+      actions = `<button type="button" class="btn-secondary trading-check-btn">Check again</button> <button type="button" class="danger-btn trading-delete-listing-btn" data-pending-id="${escapeHtml(r.pendingId)}">Remove</button>`;
+    } else {
+      if (status === 'settled' && r.settledAt) note = 'Settled ' + new Date(r.settledAt).toLocaleString();
+      actions = `<button type="button" class="danger-btn trading-delete-listing-btn" data-pending-id="${escapeHtml(r.pendingId)}">Delete</button>`;
+    }
+    return `
+    <div class="wallet-item trade-card" data-pending-id="${escapeHtml(r.pendingId)}" data-status="${escapeHtml(status)}">
+      <div class="trade-card-head"><span class="trade-status" data-status="${escapeHtml(status)}">${escapeHtml(label)}</span></div>
+      <div class="trade-sides">
+        ${tradeSideHtml('You offered', r.offer, offerInfo)}
+        <div class="trade-arrow" aria-hidden="true">⇄</div>
+        ${tradeSideHtml('You asked for', r.want, tradeInfoFromCatalog(catalog, r.want.class))}
+      </div>
+      <div class="trade-meta"><span>Trading at ${escapeHtml(r.domain)}</span><span>Posted ${escapeHtml(new Date(r.submittedAt).toLocaleString())}</span></div>
+      ${note ? `<div class="${status === 'unconfirmed' || status === 'unknown' ? 'trade-note' : 'trade-meta'}">${escapeHtml(note)}</div>` : ''}
+      <div class="trade-actions">${actions}</div>
+    </div>`;
   }).join('');
 }
 
@@ -11582,6 +11638,15 @@ tradingListingsListEl && tradingListingsListEl.addEventListener('click', async (
       cancelBtn.textContent = 'Cancel';
       return;
     }
+    await refreshTradingListingsList();
+    return;
+  }
+
+  const checkBtn = evt.target.closest('.trading-check-btn');
+  if (checkBtn) {
+    checkBtn.disabled = true;
+    checkBtn.textContent = 'Checking\u2026';
+    try { await AtlasWallet.checkAllMail(); } catch (err) { /* the refresh below still reports what is known */ }
     await refreshTradingListingsList();
     return;
   }

@@ -2057,10 +2057,13 @@
     // file's own header comment) and never reaches into viewer.js.
     function formatMass(grams) {
       if (!Number.isFinite(grams)) return String(grams);
-      const trimmed = (n) => n.toFixed(2).replace(/\.?0+$/, '');
-      if (grams < 1000) return grams + ' g';
-      if (grams < 1000000) return trimmed(grams / 1000) + ' kg';
-      return trimmed(grams / 1000000) + ' t';
+      // Whole grams are always shown exactly; the larger unit is only a convenience: 4,993 g (4.993 kg).
+      const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      const exact = grouped(grams) + ' g';
+      if (grams < 1000) return exact;
+      const unit = grams < 1000000 ? { div: 1000, places: 3, name: 'kg' } : { div: 1000000, places: 6, name: 't' };
+      const fraction = String(grams % unit.div).padStart(unit.places, '0').replace(/0+$/, '');
+      return exact + ' (' + grouped(Math.trunc(grams / unit.div)) + (fraction ? '.' + fraction : '') + ' ' + unit.name + ')';
     }
 
     // The E-press prompt's own label for a dropped item — asset.name alone
