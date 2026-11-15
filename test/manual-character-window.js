@@ -12,6 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { StudioLab } = require('./studio-lab');
+const BP = require('./lib/bridge-prompt');
 
 const REPO = path.resolve(__dirname, '..');
 const EXT_PATH = path.join(REPO, 'extension');
@@ -110,13 +111,13 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     await studio.locator('#templateTiles [data-value="key"]').click();
     await studio.locator('#assetName').fill('Gallery Key');
     await studio.locator('#mint').click();
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 45000 });
-    let bridge = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(studio, { timeout: 45000 });
+    let bridge = BP.frame(studio);
     await bridge.locator('#readyState').waitFor({ state: 'visible', timeout: 45000 });
     await bridge.locator('#approveBtn').click();
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { state: 'detached', timeout: 45000 }).catch(() => {});
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 45000 });
-    bridge = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.gone(studio, { timeout: 45000 }).catch(() => {});
+    await BP.wait(studio, { timeout: 45000 });
+    bridge = BP.frame(studio);
     await bridge.locator('#offerState').waitFor({ state: 'visible', timeout: 45000 });
     await bridge.locator('#offerApproveBtn').click();
     await studio.waitForFunction(() => /Offered to your wallet|Added to your wallet/.test(document.getElementById('message').textContent), null, { timeout: 45000 });

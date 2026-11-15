@@ -13,6 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { StudioLab } = require('./studio-lab');
+const BP = require('./lib/bridge-prompt');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-activity-profile-'));
@@ -83,17 +84,17 @@ const check = (name, ok, detail) => {
     // Mints through the Studio page. `decision` is what is pressed at the wallet's offer prompt.
     async function studioMint(name, decision) {
       await studio.bringToFront();
-      await studio.waitForSelector('#domain-atlas-bridge-confirm', { state: 'detached', timeout: 15000 });
+      await BP.gone(studio, { timeout: 15000 });
       await studio.waitForFunction(() => !document.getElementById('mint').disabled, null, { timeout: 15000 });
       await studio.locator('#assetName').fill(name);
       await studio.locator('#mint').click();
-      await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
-      let frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+      await BP.wait(studio, { timeout: 15000 });
+      let frame = BP.frame(studio);
       await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
       await frame.locator('#approveBtn').click();
-      await studio.waitForSelector('#domain-atlas-bridge-confirm', { state: 'detached', timeout: 15000 }).catch(() => {});
-      await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
-      frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+      await BP.gone(studio, { timeout: 15000 }).catch(() => {});
+      await BP.wait(studio, { timeout: 15000 });
+      frame = BP.frame(studio);
       await frame.locator('#offerState').waitFor({ state: 'visible', timeout: 15000 });
       await frame.locator(decision === 'approve' ? '#offerApproveBtn' : '#offerDenyBtn').click();
       await studio.waitForFunction(() => /Offered to your wallet|Added to your wallet|declined|timed out|not permitted/.test(document.getElementById('message').textContent), null, { timeout: 15000 });
@@ -146,8 +147,8 @@ const check = (name, ok, detail) => {
     const dup = studio.evaluate((c) => window.atlasWallet.offerAsset(c), first.credential);
     dup.catch(() => {});
     await studio.bringToFront();
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
-    const dframe = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(studio, { timeout: 15000 });
+    const dframe = BP.frame(studio);
     await dframe.locator('#offerState').waitFor({ state: 'visible', timeout: 15000 });
     await dframe.locator('#offerApproveBtn').click();
     await dup;

@@ -1,12 +1,12 @@
 // Domain Atlas — wallet-bridge confirmation (SPEC.md §3.8.1 signing, §3.8.2
 // asset offers, §3.8.3 trusted offer domains)
 //
-// Loaded as an extension-origin iframe by content.js's
-// openBridgeConfirmOverlay(). The host page cannot script into it or read
-// it. The request (origin, kind, detail, payload) is read from
-// background.js by the token in this page's URL, never from a
-// window message: the host page can post messages to this iframe as
-// easily as content.js can, so nothing received that way is trusted.
+// Opened by background.js in a window of its own (chrome.windows.create),
+// never inside the requesting page, so that page has nothing of it to cover,
+// restyle, navigate, remove or message. It is not a web-accessible resource.
+// The request (origin, kind, detail, payload) is read from background.js by
+// the token in this page's URL, and the answer goes back to background.js,
+// which hands it to the tab that asked. No window message is read or sent.
 //
 // A page's payload is never signed as it stands. What gets signed is
 // { ctx: 'atlas.bridge.sign/1', origin, payload }, with the origin
@@ -16,9 +16,9 @@
 //
 // Acts on an approval directly (loads wallet.js via a plain <script> tag,
 // same as viewer.html already does) rather than asking background.js to —
-// see content.js's own comment on openBridgeConfirmOverlay() for why
-// routing through one more extension context wouldn't add any actual
-// trust boundary here. For 'sign' this means calling
+// every extension page already has the same unrestricted AtlasWallet access
+// background.js does, so routing through one more context wouldn't add any
+// actual trust boundary here. For 'sign' this means calling
 // AtlasWallet.signWithSelf(); for 'offer' it means calling
 // AtlasWallet.queueBridgeOffer() by default — SPEC.md §3.8.2 is explicit
 // that approving an offer must NOT add it straight to the wallet, so this
@@ -36,6 +36,9 @@
 // signed purchase intent and the settlement are exactly the ones the tab produces. Nothing is signed until the visitor presses
 // Sign and buy on the summary of quantity, Gold cost, credential and receiving key.
 (function () {
+  // Only ever shown as a window of its own. Framed by anything, it shows nothing and answers nothing.
+  if (window.top !== window) { document.documentElement.textContent = ''; return; }
+  const token = location.hash.slice(1);
   const readyState = document.getElementById('readyState');
   const offerState = document.getElementById('offerState');
   const lockedState = document.getElementById('lockedState');
@@ -81,7 +84,8 @@
     if (decided) return; // the inactivity timer and a real click can both fire — only the first counts
     decided = true;
     clearTimeout(inactivityTimer);
-    window.parent.postMessage({ type: 'domain-atlas-bridge-confirm-decision', approved, result: result || null }, '*');
+    const closeSoon = () => setTimeout(() => window.close(), 300);
+    chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-confirm-decision', token, approved: !!approved, result: result || null }).then(closeSoon, closeSoon);
   }
 
   // A visitor who never answers at all (switches tabs and forgets, closes
@@ -123,7 +127,6 @@
   }
 
   async function loadRequest() {
-    const token = location.hash.slice(1);
     let request = null;
     try {
       request = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-confirm-fetch', token });

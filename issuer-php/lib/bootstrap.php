@@ -1566,19 +1566,32 @@ function atlas_trade_leg_resumable($kp, $tradeId, $credential, $ownerPublicKey, 
 // unique item (transferred back, preserving its instance state) for a non-fungible one. The refund is a journalled
 // replacement keyed by $aReceived and the claimant, so asking again returns the same credential.
 function refund_failed_second_leg($kp, $aReceived, $offerB, $claimantPublicKey) {
+  // The credit being taken back must be this domain's own, and the refund can never be worth more than it.
+  if (!is_array($aReceived) || ($aReceived['credential'] ?? null) !== 'domain-atlas-asset/1.0' || ($aReceived['issuer']['domain'] ?? null) !== atlas_domain()
+    || !is_string($aReceived['id'] ?? null) || $aReceived['id'] === '' || !is_string($claimantPublicKey) || $claimantPublicKey === ''
+    || !verify_own_credential_signature($kp['publicKeyB64url'], $aReceived, asset_payload_of($aReceived)))
+    throw new Exception('the credit to take back is not one this domain issued', 400);
+  $isUnique = isset($aReceived['asset']['fungible']) && $aReceived['asset']['fungible'] === false;
+  if (!$isUnique && (!is_array($offerB) || ($offerB['class'] ?? null) !== ($aReceived['asset']['class'] ?? null) || !(is_int($offerB['quantity'] ?? null) || is_float($offerB['quantity'] ?? null))
+    || $offerB['quantity'] <= 0 || $offerB['quantity'] > $aReceived['quantity']))
+    throw new Exception('the refund does not match the credit it takes back', 400);
   $params = ['claimantPublicKey' => $claimantPublicKey];
   $requestId = atlas_derived_request_id('trade-refund', $aReceived['id'], $params);
+  // Takes the credit's spend lock, the same one every spend of it takes, then answers a refund already made from the journal
+  // (after which the credit is revoked, so this must come first).
   $begun = atlas_try_begin_replacement($requestId, 'trade-refund', [$aReceived], $params);
   if ($begun[0] === 'replay') return json_decode($begun[1], true)['refund'];
   if ($begun[0] === 'skip') throw new Exception('this refund is already being processed, or was settled differently', 409);
-  $isUnique = isset($aReceived['asset']['fungible']) && $aReceived['asset']['fungible'] === false;
+  // Value is returned only for a credit that still stands. Spent, split, consolidated, transferred or revoked by anything
+  // else, it is gone and a refund would pay the same value twice; commit below re-checks this inside the revocation lock.
+  if (is_revoked($aReceived['id'])) throw new Exception('the credit to take back was already spent or revoked, so there is nothing to refund', 409);
   $refund = $isUnique
     ? transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $aReceived, true)
     : mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $offerB['class'], $offerB['quantity'], $aReceived['id'], null, true);
   $reason = 'refund: counterparty leg of this trade failed to settle';
   $responseJson = atlas_commit_replacement(
     $requestId, 'trade-refund', [$aReceived['id']], $reason, $params,
-    [$refund], ['refund' => $refund], null, [['kind' => 'archive', 'credential' => $aReceived, 'reason' => $reason]]
+    [$refund], ['refund' => $refund], null, [['kind' => 'archive', 'credential' => $aReceived, 'reason' => $reason]], true
   );
   return json_decode($responseJson, true)['refund'];
 }

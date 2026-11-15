@@ -44,6 +44,7 @@ const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
 const H = require('./lib/delivery-harness');
+const BP = require('./lib/bridge-prompt');
 
 const ROOT = path.resolve(__dirname, '..');
 const EXT_PATH = path.join(ROOT, 'extension');
@@ -235,19 +236,19 @@ function parsePromptFields(text) {
 }
 
 async function answerPrompt(page, approve) {
-  await page.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 20000 });
-  const frame = page.frameLocator('#domain-atlas-bridge-confirm');
+  await BP.wait(page, { timeout: 20000 });
+  const frame = BP.frame(page);
   await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 15000 });
   const shown = { origin: await frame.locator('#origin').innerText(), payload: await frame.locator('#payloadBox').innerText() };
   await frame.locator(approve ? '#approveBtn' : '#denyBtn').click();
-  await page.waitForSelector('#domain-atlas-bridge-confirm', { state: 'detached', timeout: 15000 });
+  await BP.gone(page, { timeout: 15000 });
   return shown;
 }
 function autoApprove(page) {
   let on = true; let n = 0;
   (async () => {
     while (on) {
-      try { if (await page.locator('#domain-atlas-bridge-confirm').count()) { await answerPrompt(page, true); n++; } } catch (_) { /* page closing */ }
+      try { if (await BP.count(page)) { await answerPrompt(page, true); n++; } } catch (_) { /* page closing */ }
       await sleep(250);
     }
   })();
@@ -467,7 +468,7 @@ async function scenario(presenceKind, issuerKind) {
       await page.waitForFunction(() => !document.getElementById('modSetup').hidden, null, { timeout: 15000 });
       await page.locator('#modStartBtn').click();
       await page.waitForFunction(() => /will not sign for this page/.test(document.getElementById('modStatus').textContent), null, { timeout: 20000 });
-      check('the wallet never prompts, and the panel explains what the operator must allow', (await page.locator('#domain-atlas-bridge-confirm').count()) === 0 && /moderation-grant/.test(await page.locator('#modStatus').innerText()) && /moderation-setup/.test(await page.locator('#modStatus').innerText()), await page.locator('#modStatus').innerText());
+      check('the wallet never prompts, and the panel explains what the operator must allow', (await BP.count(page)) === 0 && /moderation-grant/.test(await page.locator('#modStatus').innerText()) && /moderation-setup/.test(await page.locator('#modStatus').innerText()), await page.locator('#modStatus').innerText());
       fs.writeFileSync(manifestPath, good);
       await page.reload({ waitUntil: 'load' });
       await page.waitForFunction(() => !document.getElementById('modSetup').hidden, null, { timeout: 15000 });
@@ -539,7 +540,7 @@ async function scenario(presenceKind, issuerKind) {
         for (;;) {
           await page.locator('#modRefreshBtn').click();
           // a grant may have lapsed meanwhile: the wallet prompt then appears and is approved (the issuer will refuse it)
-          const prompt = await page.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 1500 }).catch(() => null);
+          const prompt = await BP.wait(page, { timeout: 1500 }).catch(() => null);
           if (prompt) await answerPrompt(page, true);
           await sleep(900);
           const text = await page.locator('#modRosterState').innerText().catch(() => '');

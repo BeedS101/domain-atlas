@@ -399,22 +399,15 @@
     if (bridgePreviewFrame) { bridgePreviewFrame.remove(); bridgePreviewFrame = null; }
   }
 
-  // ---------- SPEC.md §3.8.1/§3.8.2 — the wallet-bridge confirmation ----------
+  // ---------- SPEC.md §3.8.1/§3.8.2/§3.8.3 — the wallet-bridge confirmation ----------
   //
-  // One iframe at a time, not one per request: a page firing several
-  // requestSignature()/offerAsset() calls back to back would otherwise
-  // stack several full-viewport iframes on top of each other, which is
-  // confusing for a visitor and pointless to build UI for. Queued
-  // instead — the SAME queue for both kinds, since the one-at-a-time
-  // guarantee is about not stacking overlays at all, not about keeping
-  // signing requests and offer requests separately ordered; each prior
-  // request's overlay fully closes (approved, denied, or timed out)
-  // before the next one's ever opens.
+  // One prompt at a time, not one per request: a page firing several requestSignature()/offerAsset() calls back to back
+  // would otherwise open several windows at once, which is confusing for a visitor and pointless to build UI for. Queued
+  // instead, the same queue for every kind: each prompt closes (approved, denied, or timed out) before the next opens.
   //
-  // kind distinguishes which confirm-bridge.js display mode to show:
-  // 'sign' (detail is the purpose string, payload is the page-supplied
-  // payload object, SPEC.md §3.8.1) or 'offer' (detail is the asset
-  // class, payload is the credential itself, SPEC.md §3.8.2).
+  // kind distinguishes which confirm-bridge.js display mode to show: 'sign' (detail is the purpose string, payload is the
+  // page-supplied payload object, SPEC.md §3.8.1), 'offer' (detail is the asset class, payload is the credential itself,
+  // SPEC.md §3.8.2), 'identity' (which of the visitor's identities this site gets) or 'buy' (one chain labs coin).
   const bridgeConfirmQueue = [];
   let bridgeConfirmShowing = false;
 
@@ -436,80 +429,43 @@
     });
   }
 
-  // confirm-bridge.html (extension-origin, web_accessible_resources) is the
-  // non-spoofable confirmation SPEC.md §3.8/§3.8.1/§3.8.2 requires — a real
-  // cross-origin browsing context this host page cannot script into, read
-  // the contents of, or draw over, the same property the world-entry
-  // overlay below (openOverlay()) already relies on for a different
-  // reason. Unlike that overlay, this one deliberately acts on an approval
-  // ITSELF — signs the payload directly for 'sign', queues the credential
-  // directly for 'offer' (loads wallet.js directly either way, see
-  // confirm-bridge.js's own comment) — rather than asking background.js
-  // to — every extension page already has the same unrestricted
-  // AtlasWallet access background.js does, so routing through one more hop
-  // would add a message round trip without adding any actual trust
-  // boundary.
-  //
-  // The request is filed with background.js under a random token, and the
-  // iframe reads it back from there by the token in its URL. It is never
-  // sent to the iframe by window.postMessage: the host page can post to the
-  // iframe too, and a message from it is indistinguishable from one sent by
-  // this script. background.js records the origin Chrome reports for this
-  // script, so the origin shown and signed is never taken from the page.
+  // The prompt is confirm-bridge.html in a window of its own, opened by background.js (see the comment there). Nothing
+  // of it is placed in this page, so the host page cannot cover it, restyle it, navigate it, remove it or send it an
+  // answer: styles, scripts, DOM changes and window messages in the page do not reach another window. What this script
+  // does is ask for the window and wait for background.js to report how the visitor answered. An answer can only arrive
+  // through chrome.runtime.onMessage, which only extension code can call, and only with the token background.js chose.
+  // The origin the prompt shows and signs is the one Chrome reports for this script, never a value from the page.
   async function openBridgeConfirmOverlay(kind, detail, payload, onDone) {
-    const tokenBytes = crypto.getRandomValues(new Uint8Array(24));
-    const token = Array.from(tokenBytes, (b) => b.toString(16).padStart(2, '0')).join('');
-    let stashed = null;
+    let opened = null;
     try {
-      stashed = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-confirm-stash', token, kind, detail, payload });
+      opened = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-confirm-open', kind, detail, payload });
     } catch (err) {
-      stashed = null;
+      opened = null;
     }
-    if (!stashed || !stashed.ok) {
+    if (!opened || !opened.ok || typeof opened.token !== 'string') {
       onDone(null);
       return;
     }
-    const iframe = document.createElement('iframe');
-    iframe.id = 'domain-atlas-bridge-confirm';
-    const src = chrome.runtime.getURL('confirm-bridge.html');
-    iframe.src = src + '#' + token;
-    Object.assign(iframe.style, {
-      position: 'fixed',
-      inset: '0',
-      width: '100vw',
-      height: '100vh',
-      border: 'none',
-      zIndex: 2147483647,
-      background: 'transparent' // the page inside draws its own backdrop+card; nothing to paint out here
-    });
-    document.documentElement.appendChild(iframe);
-    lockHostPageScroll();
+    const token = opened.token;
 
-    // Defensive only — confirm-bridge.js already auto-denies after its own
-    // shorter inactivity timeout (see that file). This is the backstop for
-    // the iframe failing to ever load or run at all (a reload mid-flight,
-    // a broken build), so a visitor is never left with a queue stuck behind
-    // a prompt that can't resolve itself.
-    // A purchase prompt has several steps and a purchase that is running, so it gets a longer backstop; the prompt restarts its
-    // own inactivity timer on every interaction and stops it while a purchase is in flight.
-    const hardTimeout = setTimeout(() => finish(null), kind === 'buy' ? 900000 : 150000);
+    // Defensive only: the prompt auto-denies after its own shorter inactivity timeout (see confirm-bridge.js), and
+    // background.js closes it when its window or this tab goes away. This is the backstop for a window that never
+    // answers, so a visitor is never left with a queue stuck behind a prompt that can't resolve itself. A purchase has
+    // several steps and a purchase that is running, so it gets a longer backstop.
+    const hardTimeout = setTimeout(() => finish(null, true), kind === 'buy' ? 900000 : 150000);
 
-    function finish(result) {
+    function finish(result, cancel) {
       clearTimeout(hardTimeout);
-      window.removeEventListener('message', onMessage);
-      iframe.remove();
-      unlockHostPageScroll();
+      chrome.runtime.onMessage.removeListener(onResult);
+      if (cancel) chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-confirm-cancel', token }).catch(() => {});
       onDone(result);
     }
 
-    function onMessage(event) {
-      if (event.source !== iframe.contentWindow) return;
-      if (!event.data || typeof event.data !== 'object') return;
-      if (event.data.type === 'domain-atlas-bridge-confirm-decision') {
-        finish(event.data.approved ? (event.data.result || null) : null);
-      }
+    function onResult(message) {
+      if (!message || message.type !== 'domain-atlas-bridge-confirm-result' || message.token !== token) return;
+      finish(message.approved === true ? (message.result || null) : null, false);
     }
-    window.addEventListener('message', onMessage);
+    chrome.runtime.onMessage.addListener(onResult);
   }
 
   // ---------- SPEC.md §3.7 — optional domain identity pinning ----------

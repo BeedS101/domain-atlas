@@ -35,6 +35,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const BP = require('./lib/bridge-prompt');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const PORT = 8215; // isolated — distinct from every other manual-*.js test's chosen port
@@ -229,8 +230,8 @@ function credentialOf(assetClass, extra) {
     assert(pendingBefore.length === 0, 'previewing must not have queued anything, found ' + pendingBefore.length);
     // Now offer the very ring that was just previewed.
     await page.locator('#offerBtn').click();
-    await page.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const offerFrame = page.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(page, { timeout: 10000 });
+    const offerFrame = BP.frame(page);
     await offerFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
     await offerFrame.locator('#offerApproveBtn').click();
     await page.waitForFunction(() => document.getElementById('offerStatus').textContent.includes('Queued.'), undefined, { timeout: 10000 });

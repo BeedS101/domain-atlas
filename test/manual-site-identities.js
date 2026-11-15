@@ -10,6 +10,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const BP = require('./lib/bridge-prompt');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const PORT = 8241;
@@ -89,12 +90,12 @@ async function startIssuer() {
       await p.goto(origin + '/page.html', { waitUntil: 'load' });
       return p;
     };
-    const frameOf = (p) => p.frameLocator('#domain-atlas-bridge-confirm');
+    const frameOf = (p) => BP.frame(p);
 
     console.log('--- an account with nothing to choose between ---');
     let pageA = await openSite(SITE_A);
     const first = await pageA.evaluate(() => window.atlasWallet.getIdentity());
-    check('a site gets the main identity with no prompt', first.allowed === true && first.publicKey === main && await pageA.locator('#domain-atlas-bridge-confirm').count() === 0, first);
+    check('a site gets the main identity with no prompt', first.allowed === true && first.publicKey === main && await BP.count(pageA) === 0, first);
     check('the storage layer agrees', (await W(async (o) => AtlasWallet.getSiteIdentity(o), SITE_A)).state === 'default');
     check('an address that is not a site origin is refused', /site address/.test(await fails(async (A) => A.setSiteIdentity('localhost:8241/page.html', 'x'))));
 
@@ -102,7 +103,7 @@ async function startIssuer() {
     const shopping = await W(() => AtlasWallet.createSubIdentity('Shopping'));
     check('with a second identity a site that has no binding must ask', (await W(async (o) => AtlasWallet.getSiteIdentity(o), SITE_A)).state === 'ask');
     const askA = pageA.evaluate(() => window.atlasWallet.getIdentity());
-    await pageA.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
+    await BP.wait(pageA, { timeout: 10000 });
     let f = frameOf(pageA);
     await f.locator('#identityState').waitFor({ state: 'visible', timeout: 10000 });
     check('the prompt names the exact origin', (await f.locator('#identityOrigin').innerText()) === SITE_A);
@@ -116,13 +117,13 @@ async function startIssuer() {
     check('the site is answered by that identity', gotA.allowed && gotA.publicKey === siteIdentityA.publicKey, gotA);
     check('the wallet window is still on the main identity', (await W(() => AtlasWallet.getActiveIdentityInfo())).kind === 'main' && (await W(async () => (await AtlasWallet.getIdentity()).publicKey)) === main);
     const again = await pageA.evaluate(() => window.atlasWallet.getIdentity());
-    check('the next request is answered with no prompt', again.publicKey === siteIdentityA.publicKey && await pageA.locator('#domain-atlas-bridge-confirm').count() === 0, again);
+    check('the next request is answered with no prompt', again.publicKey === siteIdentityA.publicKey && await BP.count(pageA) === 0, again);
     check('the binding is remembered and listed', JSON.stringify((await W(() => AtlasWallet.listSiteIdentities())).map((s) => [s.origin, s.label])) === JSON.stringify([[SITE_A, DOMAIN]]));
 
     console.log('--- a second site chooses another identity, at the same time ---');
     const pageB = await openSite(SITE_B);
     const askB = pageB.evaluate(() => window.atlasWallet.getIdentity());
-    await pageB.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
+    await BP.wait(pageB, { timeout: 10000 });
     f = frameOf(pageB);
     await f.locator('#identityState').waitFor({ state: 'visible', timeout: 10000 });
     check('a look-alike address asks separately', (await f.locator('#identityOrigin').innerText()) === SITE_B);
@@ -136,7 +137,7 @@ async function startIssuer() {
 
     console.log('--- signing is done by the site\'s identity ---');
     const signPromise = pageB.evaluate(() => window.atlasWallet.requestSignature({ purpose: 'login', nonce: 'n-1' }));
-    await pageB.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
+    await BP.wait(pageB, { timeout: 10000 });
     f = frameOf(pageB);
     await f.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
     await f.locator('#actingAs').waitFor({ state: 'visible', timeout: 10000 });
@@ -156,18 +157,18 @@ async function startIssuer() {
 
     console.log('--- not now ---');
     const askDecline = pageA.evaluate(() => window.atlasWallet.getIdentity());
-    await pageA.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
+    await BP.wait(pageA, { timeout: 10000 });
     await frameOf(pageA).locator('#identityCancel').click();
     const declined = await askDecline;
     check('declining answers nothing', declined.allowed === true && declined.publicKey === null, declined);
     const quick = await pageA.evaluate(() => window.atlasWallet.getIdentity());
-    check('and does not ask again straight away', quick.publicKey === null && await pageA.locator('#domain-atlas-bridge-confirm').count() === 0, quick);
+    check('and does not ask again straight away', quick.publicKey === null && await BP.count(pageA) === 0, quick);
     await pageA.reload({ waitUntil: 'load' });
 
     console.log('--- a choice that is not remembered ---');
     const askOnce = pageA.evaluate(() => window.atlasWallet.getIdentity());
     askOnce.catch(() => {});
-    await pageA.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
+    await BP.wait(pageA, { timeout: 10000 });
     f = frameOf(pageA);
     await f.locator('#identityState').waitFor({ state: 'visible', timeout: 10000 });
     await f.locator('#identityRemember').uncheck();
@@ -175,7 +176,7 @@ async function startIssuer() {
     const onceKey = (await askOnce).publicKey;
     check('the site is answered by the chosen identity', onceKey === main, onceKey);
     check('without being listed as remembered', (await W(() => AtlasWallet.listSiteIdentities())).every((s) => s.origin !== SITE_A));
-    check('and without asking again while the wallet stays unlocked', (await pageA.evaluate(() => window.atlasWallet.getIdentity())).publicKey === main && await pageA.locator('#domain-atlas-bridge-confirm').count() === 0);
+    check('and without asking again while the wallet stays unlocked', (await pageA.evaluate(() => window.atlasWallet.getIdentity())).publicKey === main && await BP.count(pageA) === 0);
 
     console.log('--- identities that go away take their bindings ---');
     const doomed = await W(async (o) => (await AtlasWallet.createSiteIdentity(o, { remember: true })).publicKey, SITE_A);

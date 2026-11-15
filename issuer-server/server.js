@@ -3472,7 +3472,9 @@ async function txnSweep() {
 // Runs the five steps above for already-signed (not yet recorded) successors.
 // `successors` are the signed credentials; `response` is what the client gets.
 // The caller holds the lease for `requestId`, or passes none and gets one here.
-async function commitReplacement(res, { requestId, op, predecessorIds, reason, params, successors, response, effects }) {
+// `requireLive` refuses the commit, in the same synchronous step as the revocation write, when a predecessor is already
+// revoked: the journal entry is aborted and nothing is spent or published.
+async function commitReplacement(res, { requestId, op, predecessorIds, reason, params, successors, response, effects, requireLive }) {
   const rec = {
     txn: webcrypto.randomUUID().replace(/-/g, '').slice(0, 16),
     requestId: requestId || null,
@@ -3494,6 +3496,11 @@ async function commitReplacement(res, { requestId, op, predecessorIds, reason, p
   try {
     txnRegister(rec);
     faultPoint('txn:holdings-registered');
+    if (requireLive && predecessorIds.some((id) => isRevoked(id))) {
+      const err = new Error('that credential was already spent or revoked');
+      err.statusCode = 409;
+      throw err;
+    }
     if (rec.predecessors.length) revokeMany(predecessorIds, reason, rec.txn);
     committed = true;
     faultPoint('txn:revoked');
@@ -6151,28 +6158,49 @@ async function main() {
   // same unique item (transferred back, preserving its instance state) for a non-fungible one. The refund is a journalled
   // replacement keyed by aReceived and the claimant, so asking again returns the same credential.
   async function refundFailedSecondLeg(aReceived, offerB, claimantPublicKey) {
+    // The credit being taken back must be this domain's own, and the refund can never be worth more than it.
+    if (!aReceived || aReceived.credential !== 'domain-atlas-asset/1.0' || !aReceived.issuer || aReceived.issuer.domain !== DOMAIN
+      || typeof aReceived.id !== 'string' || !aReceived.id || typeof claimantPublicKey !== 'string' || !claimantPublicKey
+      || !(await verifyOwnCredentialSignature(aReceived, assetPayloadOf(aReceived)))) {
+      throw new Error('the credit to take back is not one this domain issued');
+    }
+    const isUnique = aReceived.asset.fungible === false;
+    if (!isUnique && (!offerB || offerB.class !== aReceived.asset.class || typeof offerB.quantity !== 'number' || !(offerB.quantity > 0) || offerB.quantity > aReceived.quantity)) {
+      throw new Error('the refund does not match the credit it takes back');
+    }
     const params = { claimantPublicKey };
     const requestId = derivedRequestId('trade-refund', aReceived.id, params);
-    const release = await acquireSpendLock('rid:' + requestId, SPEND_LOCK_WAIT_MS);
-    if (!release) throw new Error('this refund is already being processed - try again');
+    // The credit's own spend lock first, as every spend of it takes it, then the request lock (the lock order everywhere else).
+    const creditRelease = await acquireSpendLock(aReceived.id, SPEND_LOCK_WAIT_MS);
+    if (!creditRelease) throw new Error('this credit is being used by another request right now - try again');
     try {
-      txnRecoverKey(requestId);
-      const prior = replayLookup(requestId, 'trade-refund', [aReceived.id], params);
-      if (prior) {
-        if (prior.conflict) throw new Error('this refund was already settled differently');
-        return prior.response.refund;
+      const release = await acquireSpendLock('rid:' + requestId, SPEND_LOCK_WAIT_MS);
+      if (!release) throw new Error('this refund is already being processed - try again');
+      try {
+        txnRecoverKey(requestId);
+        const prior = replayLookup(requestId, 'trade-refund', [aReceived.id], params);
+        if (prior) {
+          if (prior.conflict) throw new Error('this refund was already settled differently');
+          return prior.response.refund;
+        }
+        // Value is returned only for a credit that still stands. Spent, split, consolidated, transferred or revoked by
+        // anything else, it is gone and a refund would pay the same value twice; the commit below checks this again in the
+        // same step as the revocation.
+        if (isRevoked(aReceived.id)) throw new Error('the credit to take back was already spent or revoked, so there is nothing to refund');
+        const refund = isUnique
+          ? await transferUniqueAsset(claimantPublicKey, aReceived, true)
+          : await mintAssetByClass(claimantPublicKey, offerB.class, offerB.quantity, aReceived.id, undefined, true);
+        const reason = 'refund: counterparty leg of this trade failed to settle';
+        await commitReplacement(null, {
+          requestId, op: 'trade-refund', predecessorIds: [aReceived.id], reason, params,
+          successors: [refund], response: { refund }, effects: [{ kind: 'archive', credential: aReceived, reason }], requireLive: true
+        });
+        return refund;
+      } finally {
+        release();
       }
-      const refund = aReceived.asset.fungible === false
-        ? await transferUniqueAsset(claimantPublicKey, aReceived, true)
-        : await mintAssetByClass(claimantPublicKey, offerB.class, offerB.quantity, aReceived.id, undefined, true);
-      const reason = 'refund: counterparty leg of this trade failed to settle';
-      await commitReplacement(null, {
-        requestId, op: 'trade-refund', predecessorIds: [aReceived.id], reason, params,
-        successors: [refund], response: { refund }, effects: [{ kind: 'archive', credential: aReceived, reason }]
-      });
-      return refund;
     } finally {
-      release();
+      creditRelease();
     }
   }
 

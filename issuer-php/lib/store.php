@@ -3100,7 +3100,10 @@ function atlas_remove_stale_temp_files($dir) {
 // replacement cannot be completed. `$txn` (optional) tags each entry with the
 // transaction-journal id of the replacement that made it, which is how
 // recovery after a crash tells a spend that committed from one that did not.
-function atlas_revoke_many($ids, $reason, $txn = null) {
+// $requireLive makes the write refuse (409, nothing written) when any of the ids is already on the list, decided inside
+// the same lock as the write. A spend that must not follow another one (a refund of a credit someone may have spent in
+// the meantime) uses it, so two requests cannot both revoke one credential and each mint a successor.
+function atlas_revoke_many($ids, $reason, $txn = null, $requireLive = false) {
   // Never write an entry the reader would then refuse.
   foreach ($ids as $id) {
     if (!is_string($id) || $id === '') throw new Exception('a revocation needs a credential id', 400);
@@ -3121,6 +3124,11 @@ function atlas_revoke_many($ids, $reason, $txn = null) {
   flock($lock, LOCK_EX);
   try {
     $doc = read_revocations();
+    if ($requireLive) {
+      $already = [];
+      foreach ($doc['revoked'] as $r) if (isset($r['id'])) $already[$r['id']] = true;
+      foreach ($ids as $id) if (isset($already[$id])) throw new Exception('that credential was already spent or revoked', 409);
+    }
     $revokedAt = gmdate('Y-m-d\TH:i:s\Z');
     foreach ($ids as $id) {
       $entry = ['id' => $id, 'revokedAt' => $revokedAt, 'reason' => $reason];

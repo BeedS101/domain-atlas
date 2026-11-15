@@ -12,6 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { StudioLab } = require('./studio-lab');
+const BP = require('./lib/bridge-prompt');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-equip-profile-'));
@@ -71,7 +72,7 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
       while (Date.now() < deadline) {
         if (await done()) return;
         for (const id of ['#approveBtn', '#offerApproveBtn']) {
-          const btn = studio.frameLocator('#domain-atlas-bridge-confirm').locator(id);
+          const btn = BP.frame(studio).locator(id);
           if (await btn.isVisible().catch(() => false)) await btn.click({ timeout: 2000 }).catch(() => {});
         }
         await studio.waitForTimeout(400);
@@ -104,8 +105,8 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
 
     console.log('STEP 2: mint the sword; the prompt names the stats');
     await studio.locator('#mint').click();
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
-    let frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(studio, { timeout: 15000 });
+    let frame = BP.frame(studio);
     await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
     const box = await frame.locator('#payloadBox').innerText();
     assertTrue(box.includes('Mint a free demo sword (silver) named "Silver Edge" for the main hand slot') || box.includes('Mint a free demo sword (silver) named "Silver Edge"'), 'prompt names the sword: ' + box);
@@ -121,8 +122,8 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     await plus('luck'); await plus('luck'); await plus('focus');
     await shot(studio, 'studio-necklace');
     await studio.locator('#mint').click();
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
-    frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(studio, { timeout: 15000 });
+    frame = BP.frame(studio);
     await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
     const box2 = await frame.locator('#payloadBox').innerText();
     assertTrue(box2.includes('for the neck slot in colour #aa33cc') && /Luck \+2/.test(box2) && /Focus \+1/.test(box2), 'prompt names slot, colour and stats: ' + box2);
@@ -136,8 +137,8 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     await plus('luck'); await plus('luck'); await plus('dexterity');
     await shot(studio, 'studio-ring');
     await studio.locator('#mint').click();
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
-    frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(studio, { timeout: 15000 });
+    frame = BP.frame(studio);
     await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
     const box3 = await frame.locator('#payloadBox').innerText();
     assertTrue(box3.includes('for the ring slot') && /Luck \+2/.test(box3) && /Dexterity \+1/.test(box3), 'prompt names the ring slot and stats: ' + box3);
@@ -147,8 +148,8 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     for (const id of ['armor', 'armor', 'armor', 'defense', 'defense']) await plus(id);
     await shot(studio, 'studio-shield');
     await studio.locator('#mint').click();
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
-    frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(studio, { timeout: 15000 });
+    frame = BP.frame(studio);
     await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
     const box4 = await frame.locator('#payloadBox').innerText();
     assertTrue(box4.includes('for the off hand slot') && /Armor \+3/.test(box4) && /Defense \+2/.test(box4), 'prompt names the off hand slot and stats: ' + box4);

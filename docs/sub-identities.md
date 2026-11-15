@@ -126,8 +126,8 @@ site's requests (read, sign, offer, buy) with it.
   binding whose identity is gone (removed, or exported with its key removed), so the site prompts again.
 - The prompt appears only when a site asks for wallet access (`getIdentity`, `requestSignature`, `offerAsset`,
   `requestPurchase`) and has no binding, and only when the account has at least one sub-identity. With none,
-  every site simply gets the main identity and nothing is asked or stored. The wallet draws the prompt in the
-  confirmation window (`confirm-bridge.html`, kind `identity`); the page cannot. It suggests a new identity
+  every site simply gets the main identity and nothing is asked or stored. The wallet draws the prompt in its own
+  confirmation window (`confirm-bridge.html`, kind `identity`, opened by the extension, not part of the page); the page cannot. It suggests a new identity
   named after the site, and offers the identity the wallet is showing, or any other. "Remember" is ticked by
   default; unticked, the choice lasts until the wallet locks (session storage). Nothing is answered before a
   choice is made, and declining answers nothing for 30 seconds on that page load rather than asking on every

@@ -72,19 +72,41 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (watchedKeys.some((key) => key in changes)) refreshToolbarIcon();
 });
 
-// Pending wallet-bridge confirmations (SPEC.md §3.8.1/§3.8.2), keyed by a
-// random token. content.js files a request here; confirm-bridge.html reads it
-// back once by the token in its own URL. The requesting origin is taken from
-// the sender Chrome reports, never from anything the page can influence, and
-// the request never travels through window.postMessage, which the host page
-// can also send to the confirmation iframe.
+// Wallet-bridge confirmations (SPEC.md §3.8.1/§3.8.2/§3.8.3) are shown in a window of their own, opened here with
+// chrome.windows.create(). The requesting page has no element in it, so no CSS, script, focus or DOM operation of its
+// can cover, restyle, navigate, remove or answer the prompt. content.js only asks for one and later hears the outcome.
+//
+// Each request is filed under a random token this file generates. The prompt page reads it back once by the token in its
+// own URL, and the answer travels from that page to this file to the requesting tab, never through anything the page can
+// send to. The requesting origin is taken from the sender Chrome reports, never from anything the page can influence.
+// Pending requests are kept in session storage, because a service worker can stop while a person is still deciding.
+const BRIDGE_CONFIRM_KEY = 'atlasBridgeConfirms';
 const BRIDGE_CONFIRM_TTL_MS = 150000;
-const pendingBridgeConfirms = new Map();
+const BRIDGE_CONFIRM_BUY_TTL_MS = 900000;
+const BRIDGE_CONFIRM_MAX_PENDING = 3;
+const BRIDGE_CONFIRM_MAX_PAYLOAD_CHARS = 500000;
+const BRIDGE_CONFIRM_WIDTH = 460;
+const BRIDGE_CONFIRM_HEIGHT = 680;
+// An origin whose prompts are declined or closed again and again is refused new ones for a while, so a page cannot keep
+// opening windows; the first few refusals cost nothing, so an ordinary retry is never held up.
+const BRIDGE_CONFIRM_FREE_DENIALS = 5;
+const BRIDGE_CONFIRM_COOLDOWN_BASE_MS = 5000;
+const BRIDGE_CONFIRM_COOLDOWN_MAX_MS = 120000;
+const BRIDGE_CONFIRM_DENIAL_MEMORY_MS = 60000;
+const bridgeConfirmDenials = new Map();
+let bridgeConfirmChain = Promise.resolve();
 
-function pruneBridgeConfirms(nowMs) {
-  for (const [token, entry] of pendingBridgeConfirms) {
-    if (entry.expiresAtMs <= nowMs) pendingBridgeConfirms.delete(token);
-  }
+// Serialized read-modify-write over the pending map.
+function withBridgeConfirms(fn) {
+  const run = bridgeConfirmChain.then(async () => {
+    const stored = await chrome.storage.session.get(BRIDGE_CONFIRM_KEY);
+    const map = stored[BRIDGE_CONFIRM_KEY] && typeof stored[BRIDGE_CONFIRM_KEY] === 'object' ? stored[BRIDGE_CONFIRM_KEY] : {};
+    const out = await fn(map);
+    await chrome.storage.session.set({ [BRIDGE_CONFIRM_KEY]: map });
+    return out;
+  });
+  bridgeConfirmChain = run.catch(() => {});
+  return run;
 }
 
 function senderOrigin(sender) {
@@ -92,38 +114,171 @@ function senderOrigin(sender) {
   try { return new URL(sender.url).origin; } catch (err) { return null; }
 }
 
+function bridgeConfirmCooldownMs(origin, nowMs) {
+  const record = bridgeConfirmDenials.get(origin);
+  if (!record) return 0;
+  if (nowMs - record.lastAtMs > BRIDGE_CONFIRM_DENIAL_MEMORY_MS) { bridgeConfirmDenials.delete(origin); return 0; }
+  return Math.max(0, record.untilMs - nowMs);
+}
+
+function noteBridgeConfirmOutcome(origin, approved, nowMs) {
+  if (approved) { bridgeConfirmDenials.delete(origin); return; }
+  const prior = bridgeConfirmDenials.get(origin);
+  const count = prior && nowMs - prior.lastAtMs <= BRIDGE_CONFIRM_DENIAL_MEMORY_MS ? prior.count + 1 : 1;
+  const over = count - BRIDGE_CONFIRM_FREE_DENIALS + 1;
+  const wait = over > 0 ? Math.min(BRIDGE_CONFIRM_COOLDOWN_MAX_MS, BRIDGE_CONFIRM_COOLDOWN_BASE_MS * Math.pow(2, over - 1)) : 0;
+  bridgeConfirmDenials.set(origin, { count, lastAtMs: nowMs, untilMs: nowMs + wait });
+}
+
+function validBridgeConfirmRequest(message) {
+  const kind = message.kind;
+  if (kind !== 'sign' && kind !== 'offer' && kind !== 'buy' && kind !== 'identity') return false;
+  if (kind === 'buy' && !(message.payload && typeof message.payload.domain === 'string' && /^[0-9a-f]{32}$/.test(String(message.payload.coinId)))) return false;
+  let size = 0;
+  try { size = JSON.stringify(message.payload === undefined ? null : message.payload).length + JSON.stringify(message.detail === undefined ? '' : message.detail).length; } catch (err) { return false; }
+  return size <= BRIDGE_CONFIRM_MAX_PAYLOAD_CHARS;
+}
+
+// Tells the requesting tab how its request ended and closes the prompt window.
+async function settleBridgeConfirm(entry, approved, result) {
+  noteBridgeConfirmOutcome(entry.origin, approved, Date.now());
+  try {
+    await chrome.tabs.sendMessage(entry.tabId, { type: 'domain-atlas-bridge-confirm-result', token: entry.token, approved: !!approved, result: approved ? (result || null) : null }, { frameId: 0 });
+  } catch (err) {
+    // The tab is gone or reloaded; nobody is waiting for the answer.
+  }
+  if (typeof entry.windowId === 'number') chrome.windows.remove(entry.windowId).catch(() => {});
+}
+
+// Ends every pending request matching `test`, as declined when `notify` is set.
+async function dropBridgeConfirms(test, notify) {
+  let dropped = [];
+  try {
+    dropped = await withBridgeConfirms((map) => {
+      const out = [];
+      for (const [token, entry] of Object.entries(map)) {
+        if (test(entry)) { out.push(entry); delete map[token]; }
+      }
+      return out;
+    });
+  } catch (err) {
+    return;
+  }
+  for (const entry of dropped) {
+    if (notify) await settleBridgeConfirm(entry, false, null);
+    else if (typeof entry.windowId === 'number') chrome.windows.remove(entry.windowId).catch(() => {});
+  }
+}
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  dropBridgeConfirms((entry) => entry.windowId === windowId, true);
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  dropBridgeConfirms((entry) => entry.tabId === tabId, false);
+});
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  // A page that navigates or reloads can no longer receive the answer, so the prompt for it goes away.
+  if (changeInfo.status === 'loading') dropBridgeConfirms((entry) => entry.tabId === tabId, false);
+});
+
+function openBridgeConfirmWindow(token, parentWindowId) {
+  return (async () => {
+    const options = { url: chrome.runtime.getURL('confirm-bridge.html') + '#' + token, type: 'popup', width: BRIDGE_CONFIRM_WIDTH, height: BRIDGE_CONFIRM_HEIGHT, focused: true };
+    try {
+      const parent = await chrome.windows.get(parentWindowId);
+      if (parent && typeof parent.left === 'number' && typeof parent.top === 'number' && parent.width && parent.height) {
+        options.left = Math.max(0, Math.round(parent.left + (parent.width - BRIDGE_CONFIRM_WIDTH) / 2));
+        options.top = Math.max(0, Math.round(parent.top + Math.min(80, (parent.height - BRIDGE_CONFIRM_HEIGHT) / 2)));
+      }
+    } catch (err) {
+      // No position to centre on; the browser picks one.
+    }
+    const win = await chrome.windows.create(options);
+    return win && typeof win.id === 'number' ? win.id : null;
+  })();
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!sender.tab || typeof sender.tab.id !== 'number') return;
   const tabId = sender.tab.id;
-  if (message && message.type === 'domain-atlas-bridge-confirm-stash') {
+  const ownPage = chrome.runtime.getURL('confirm-bridge.html');
+  const fromPrompt = typeof sender.url === 'string' && sender.url.split('#')[0] === ownPage;
+  if (message && message.type === 'domain-atlas-bridge-confirm-open') {
     // From content.js, which runs only in a tab's top frame.
     const origin = senderOrigin(sender);
-    const kind = message.kind;
-    if (sender.frameId !== 0 || !origin || /^chrome-extension:/.test(origin) ||
-        typeof message.token !== 'string' || message.token.length < 32 ||
-        (kind !== 'sign' && kind !== 'offer' && kind !== 'buy' && kind !== 'identity') ||
-        (kind === 'buy' && !(message.payload && typeof message.payload.domain === 'string' && /^[0-9a-f]{32}$/.test(String(message.payload.coinId))))) {
+    if (sender.frameId !== 0 || !origin || /^chrome-extension:/.test(origin) || !validBridgeConfirmRequest(message)) {
       sendResponse({ ok: false });
       return;
     }
-    const nowMs = Date.now();
-    pruneBridgeConfirms(nowMs);
-    pendingBridgeConfirms.set(message.token, {
-      tabId, origin, kind, detail: message.detail, payload: message.payload, expiresAtMs: nowMs + BRIDGE_CONFIRM_TTL_MS
-    });
-    sendResponse({ ok: true });
-    return;
+    (async () => {
+      const nowMs = Date.now();
+      if (bridgeConfirmCooldownMs(origin, nowMs) > 0) { sendResponse({ ok: false, reason: 'cooldown' }); return; }
+      const bytes = crypto.getRandomValues(new Uint8Array(24));
+      const token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      // The payload is kept as JSON text: session storage keeps objects with their keys re-ordered.
+      const entry = { token, tabId, origin, kind: message.kind, detailJson: JSON.stringify(message.detail === undefined ? '' : message.detail), payloadJson: JSON.stringify(message.payload === undefined ? null : message.payload), fetched: false, windowId: null, expiresAtMs: nowMs + (message.kind === 'buy' ? BRIDGE_CONFIRM_BUY_TTL_MS : BRIDGE_CONFIRM_TTL_MS) };
+      const room = await withBridgeConfirms((map) => {
+        const stale = [];
+        for (const [t, e] of Object.entries(map)) {
+          if (e.expiresAtMs <= nowMs) { stale.push(e); delete map[t]; }
+        }
+        for (const e of stale) if (typeof e.windowId === 'number') chrome.windows.remove(e.windowId).catch(() => {});
+        const pending = Object.values(map);
+        if (pending.length >= BRIDGE_CONFIRM_MAX_PENDING || pending.some((e) => e.tabId === tabId)) return false;
+        map[token] = entry;
+        return true;
+      });
+      if (!room) { sendResponse({ ok: false, reason: 'busy' }); return; }
+      let windowId = null;
+      try {
+        windowId = await openBridgeConfirmWindow(token, sender.tab.windowId);
+      } catch (err) {
+        windowId = null;
+      }
+      if (windowId === null) {
+        await withBridgeConfirms((map) => { delete map[token]; });
+        sendResponse({ ok: false });
+        return;
+      }
+      const stillPending = await withBridgeConfirms((map) => {
+        if (!map[token]) return false;
+        if (map[token].windowId === null) map[token].windowId = windowId;
+        return true;
+      });
+      if (!stillPending) chrome.windows.remove(windowId).catch(() => {});
+      sendResponse({ ok: stillPending, token });
+    })().catch(() => sendResponse({ ok: false }));
+    return true;
   } else if (message && message.type === 'domain-atlas-bridge-confirm-fetch') {
-    // From confirm-bridge.html only, inside the same tab. One read per token.
-    const ownPage = chrome.runtime.getURL('confirm-bridge.html');
-    pruneBridgeConfirms(Date.now());
-    const entry = typeof message.token === 'string' ? pendingBridgeConfirms.get(message.token) : null;
-    if (!entry || entry.tabId !== tabId || typeof sender.url !== 'string' || sender.url.split('#')[0] !== ownPage) {
-      sendResponse({ ok: false });
-      return;
-    }
-    pendingBridgeConfirms.delete(message.token);
-    sendResponse({ ok: true, origin: entry.origin, kind: entry.kind, detail: entry.detail, payload: entry.payload });
+    // From the prompt window only. One read per token, and only from the window opened for it.
+    (async () => {
+      const entry = await withBridgeConfirms((map) => {
+        const e = typeof message.token === 'string' ? map[message.token] : null;
+        if (!e || e.fetched || e.expiresAtMs <= Date.now() || !fromPrompt || (e.windowId !== null && e.windowId !== sender.tab.windowId)) return null;
+        e.fetched = true;
+        if (e.windowId === null) e.windowId = sender.tab.windowId;
+        return e;
+      });
+      sendResponse(entry ? { ok: true, origin: entry.origin, kind: entry.kind, detail: JSON.parse(entry.detailJson), payload: JSON.parse(entry.payloadJson) } : { ok: false });
+    })().catch(() => sendResponse({ ok: false }));
+    return true;
+  } else if (message && message.type === 'domain-atlas-bridge-confirm-decision') {
+    // From the prompt window only: the visitor's answer, passed on to the tab that asked.
+    (async () => {
+      const entry = await withBridgeConfirms((map) => {
+        const e = typeof message.token === 'string' ? map[message.token] : null;
+        if (!e || !e.fetched || !fromPrompt || e.windowId !== sender.tab.windowId) return null;
+        delete map[message.token];
+        return e;
+      });
+      if (entry) await settleBridgeConfirm(entry, message.approved === true, message.result);
+      sendResponse({ ok: !!entry });
+    })().catch(() => sendResponse({ ok: false }));
+    return true;
+  } else if (message && message.type === 'domain-atlas-bridge-confirm-cancel') {
+    // From content.js when it stops waiting (its own backstop timeout).
+    dropBridgeConfirms((e) => e.token === message.token && e.tabId === tabId && sender.frameId === 0, false);
+    sendResponse({ ok: true });
     return;
   }
   if (message && message.type === 'domain-atlas-world-entered') {

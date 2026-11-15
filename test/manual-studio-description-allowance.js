@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { StudioLab } = require('./studio-lab');
+const BP = require('./lib/bridge-prompt');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-allowance-profile-'));
@@ -75,10 +76,10 @@ function writeManifest(lab, sign) {
     const text = (page, id) => page.locator('#' + id).innerText();
     const allowance = (page) => text(page, 'allowance');
     const waitAllowance = (page, re, ms) => page.waitForFunction((src) => new RegExp(src).test(document.getElementById('allowance').textContent), re.source, { timeout: ms || 15000 });
-    const prompt = (page) => page.frameLocator('#domain-atlas-bridge-confirm');
-    const promptOpen = (page) => page.locator('#domain-atlas-bridge-confirm').count();
+    const prompt = (page) => BP.frame(page);
+    const promptOpen = (page) => BP.count(page);
     async function answerSign(page, approve) {
-      await page.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
+      await BP.wait(page, { timeout: 15000 });
       const frame = prompt(page);
       await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
       const shown = { purpose: await frame.locator('#purposeText').innerText(), payload: await frame.locator('#payloadBox').innerText() };
@@ -152,8 +153,8 @@ function writeManifest(lab, sign) {
       await studio.locator('#mint').click();
       await answerSign(studio, approveSignature);
       if (!approveSignature) { await studio.waitForFunction(() => /declined|timed out/.test(document.getElementById('message').textContent), null, { timeout: 15000 }); return; }
-      await studio.waitForSelector('#domain-atlas-bridge-confirm', { state: 'detached', timeout: 15000 }).catch(() => {});
-      await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
+      await BP.gone(studio, { timeout: 15000 }).catch(() => {});
+      await BP.wait(studio, { timeout: 15000 });
       const f = prompt(studio);
       await f.locator('#offerState').waitFor({ state: 'visible', timeout: 15000 });
       await f.locator(offer ? '#offerApproveBtn' : '#offerDenyBtn').click();

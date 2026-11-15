@@ -27,6 +27,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const H = require('./lib/delivery-harness');
+const BP = require('./lib/bridge-prompt');
 
 const ROOT = path.resolve(__dirname, '..');
 const EXT_PATH = path.join(ROOT, 'extension');
@@ -265,11 +266,11 @@ async function scenario(kind) {
     let { page, label } = await openPanel(context, errors);
     await page.waitForFunction(() => !document.getElementById('modSetup').hidden, null, { timeout: 15000 });
     await page.locator('#modStartBtn').click();
-    await page.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 20000 });
-    const frame = page.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(page, { timeout: 20000 });
+    const frame = BP.frame(page);
     await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 15000 });
     await frame.locator('#approveBtn').click();
-    await page.waitForSelector('#domain-atlas-bridge-confirm', { state: 'detached', timeout: 15000 });
+    await BP.gone(page, { timeout: 15000 });
     await page.waitForFunction(() => !document.getElementById('modWork').hidden, null, { timeout: 20000 });
     await page.locator('#modRefreshBtn').click();
     await page.waitForFunction(() => /not switched on|Could not reach/i.test(document.getElementById('modStatus').textContent + document.getElementById('modRosterState').textContent), null, { timeout: 15000 });

@@ -13,6 +13,7 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || '/home/claude/.npm-global/lib/node_modules/playwright');
+const BP = require('./lib/bridge-prompt');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const PORT = 8205;
@@ -60,7 +61,7 @@ const SPATIAL = {
 
     // ---- signing bridge ----
     const sig = (payload) => page.evaluate((p) => window.atlasWallet.requestSignature(p), payload);
-    const overlay = () => page.locator('#domain-atlas-bridge-confirm').count();
+    const overlay = () => BP.count(page);
     const attempts = [
       ['a call invite', { purpose: 'login', type: 'atlas.call.invite', callId: 'x' }],
       ['a call signal nested inside an allowed purpose', { purpose: 'login', data: { nested: [{ type: 'atlas.call.signal', kind: 'accept' }] } }],
@@ -77,9 +78,9 @@ const SPATIAL = {
     // The ordinary purpose still reaches the confirmation prompt, so the refusal above is specific.
     const ordinary = page.evaluate(() => window.atlasWallet.requestSignature({ purpose: 'login', nonce: 'n1' }));
     ordinary.catch(() => {});
-    await page.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
+    await BP.wait(page, { timeout: 10000 });
     check('an ordinary whitelisted purpose still shows the confirmation prompt', true);
-    await page.frameLocator('#domain-atlas-bridge-confirm').locator('#denyBtn').click();
+    await BP.frame(page).locator('#denyBtn').click();
     const ordinaryResult = await ordinary;
     check('and a Deny still ends it with no signature', ordinaryResult.allowed === true && ordinaryResult.result === null, ordinaryResult);
 

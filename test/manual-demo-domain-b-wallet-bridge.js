@@ -33,6 +33,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const BP = require('./lib/bridge-prompt');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const PORT = 8205; // isolated — distinct from every other manual-*.js test's own port
@@ -162,8 +163,8 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-demo-b-profile-
 
     console.log('STEP 5: "Ask for a signature" shows the real prompt naming "demo-login", and reports a real signed envelope once approved');
     await demoPage.locator('#signBtn').click();
-    await demoPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const signFrame = demoPage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(demoPage, { timeout: 10000 });
+    const signFrame = BP.frame(demoPage);
     await signFrame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
     const signPayloadBoxText = await signFrame.locator('#payloadBox').innerText();
     if (!signPayloadBoxText.includes('demo-login')) throw new Error('Expected the prompt to show the real purpose "demo-login", got: ' + signPayloadBoxText);
@@ -189,8 +190,8 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-demo-b-profile-
 
     console.log('STEP 6: "Offer me a collectible" mints a real credential, shows the real offer prompt, and queues it WITHOUT adding it to the wallet');
     await demoPage.locator('#offerBtn').click();
-    await demoPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const offerFrame = demoPage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(demoPage, { timeout: 10000 });
+    const offerFrame = BP.frame(demoPage);
     await offerFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
     const offerClassShown = await offerFrame.locator('#offerAssetClass').innerText();
     if (offerClassShown !== 'atlas.wearable.ring') throw new Error('Expected the prompt to show the real asset class "atlas.wearable.ring", got: ' + offerClassShown);

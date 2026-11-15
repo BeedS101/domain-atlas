@@ -12,6 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { StudioLab } = require('./studio-lab');
+const BP = require('./lib/bridge-prompt');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-wallet-profile-'));
@@ -52,7 +53,7 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     await plain.goto(lab.origin + '/nopolicy.html', { waitUntil: 'load' });
     const refused = await plain.evaluate(() => window.atlasWallet.requestSignature({ purpose: 'atlas.studio.mint/1', nonce: 'x' }));
     assertTrue(refused.allowed === false && refused.result === null, 'expected refusal, got ' + JSON.stringify(refused));
-    assertTrue(await plain.locator('#domain-atlas-bridge-confirm').count() === 0, 'no prompt for a refused page');
+    assertTrue(await BP.count(plain) === 0, 'no prompt for a refused page');
     await plain.close();
     console.log('PASS: refused without a prompt');
 
@@ -90,8 +91,8 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     await studio.locator('#assetName').fill('Walkthrough Trophy');
     await studio.locator('#description').fill('Minted by the browser test.');
     await studio.locator('#mint').click();
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
-    let frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(studio, { timeout: 15000 });
+    let frame = BP.frame(studio);
     await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
     const originShown = await frame.locator('#origin').innerText();
     assertTrue(originShown === lab.origin, 'prompt shows the page origin, got ' + originShown);
@@ -106,13 +107,13 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
 
     console.log('STEP 5: Approve the signature, then the wallet offer');
     await studio.locator('#mint').click();
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
-    frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(studio, { timeout: 15000 });
+    frame = BP.frame(studio);
     await frame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
     await frame.locator('#approveBtn').click();
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { state: 'detached', timeout: 15000 }).catch(() => {});
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
-    frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.gone(studio, { timeout: 15000 }).catch(() => {});
+    await BP.wait(studio, { timeout: 15000 });
+    frame = BP.frame(studio);
     await frame.locator('#offerState').waitFor({ state: 'visible', timeout: 15000 });
     assertTrue((await frame.locator('#offerAssetName').innerText()) === 'Walkthrough Trophy', 'offer names the designed asset');
     assertTrue((await frame.locator('#offerAssetClass').innerText()) === CLASS, 'offer shows the studio class');
@@ -144,8 +145,8 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     forged.id = 'urn:atlas:asset:00000000-0000-4000-8000-000000000000';
     const offer = studio.evaluate((c) => window.atlasWallet.offerAsset(c), forged);
     offer.catch(() => {});
-    await studio.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 15000 });
-    frame = studio.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(studio, { timeout: 15000 });
+    frame = BP.frame(studio);
     await frame.locator('#offerState').waitFor({ state: 'visible', timeout: 15000 });
     await frame.locator('#offerApproveBtn').click();
     const res = await offer;

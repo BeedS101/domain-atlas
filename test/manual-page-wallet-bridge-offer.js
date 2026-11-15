@@ -47,6 +47,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const BP = require('./lib/bridge-prompt');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const PORT = 8204; // isolated — distinct from every other manual-*.js test's own port
@@ -145,7 +146,7 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     const refusedCredential = await mintCredential(refusedPage, NON_WHITELISTED_CLASS, 'placeholder-public-key-never-verified', 1);
     const refusedResult = await refusedPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), refusedCredential);
     if (refusedResult.allowed !== false || refusedResult.result !== null) throw new Error('Expected {allowed:false, result:null} for a non-whitelisted class, got: ' + JSON.stringify(refusedResult));
-    const overlayCountAfterRefused = await refusedPage.locator('#domain-atlas-bridge-confirm').count();
+    const overlayCountAfterRefused = await BP.count(refusedPage);
     if (overlayCountAfterRefused !== 0) throw new Error('Expected no confirmation overlay to ever appear for a non-whitelisted class, found ' + overlayCountAfterRefused);
     await refusedPage.close();
     console.log('PASS: non-whitelisted class refused with no prompt shown at all');
@@ -156,15 +157,15 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     const lockedCredential = await mintCredential(lockedPage, WHITELISTED_CLASS, 'placeholder-public-key-never-verified');
     const lockedResultPromise = lockedPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), lockedCredential);
     lockedResultPromise.catch(() => {}); // avoid noisy unhandled-rejection output if an earlier assertion throws first
-    await lockedPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const lockedFrame = lockedPage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(lockedPage, { timeout: 10000 });
+    const lockedFrame = BP.frame(lockedPage);
     await lockedFrame.locator('#lockedState').waitFor({ state: 'visible', timeout: 10000 });
     const lockedDetailText = await lockedFrame.locator('#lockedDetailLine').innerText();
     if (!lockedDetailText.includes(WHITELISTED_CLASS)) throw new Error('Expected the locked-state prompt to name the real asset class, got: ' + lockedDetailText);
     await lockedFrame.locator('#dismissBtn').click();
     const lockedResult = await lockedResultPromise;
     if (lockedResult.allowed !== true || lockedResult.result !== null) throw new Error('Expected {allowed:true, result:null} dismissing the locked state, got: ' + JSON.stringify(lockedResult));
-    await lockedPage.waitForSelector('#domain-atlas-bridge-confirm', { state: 'detached', timeout: 10000 });
+    await BP.gone(lockedPage, { timeout: 10000 });
     await lockedPage.close();
     console.log('PASS: whitelisted class shows the real prompt; with no identity active, it correctly shows "locked" rather than a fake Accept option, and Dismiss resolves to nothing queued');
 
@@ -193,8 +194,8 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     const acceptCredential = await mintCredential(acceptPage, WHITELISTED_CLASS, realPublicKey);
     const acceptResultPromise = acceptPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), acceptCredential);
     acceptResultPromise.catch(() => {});
-    await acceptPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const acceptFrame = acceptPage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(acceptPage, { timeout: 10000 });
+    const acceptFrame = BP.frame(acceptPage);
     await acceptFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
     const offerOriginShown = await acceptFrame.locator('#offerOrigin').innerText();
     if (offerOriginShown !== 'http://' + DOMAIN) throw new Error('Expected the prompt to show the real requesting origin, got: ' + offerOriginShown);
@@ -244,8 +245,8 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     const denyCredential = await mintCredential(denyPage, WHITELISTED_CLASS, realPublicKey);
     const denyResultPromise = denyPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), denyCredential);
     denyResultPromise.catch(() => {});
-    await denyPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const denyFrame = denyPage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(denyPage, { timeout: 10000 });
+    const denyFrame = BP.frame(denyPage);
     await denyFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
     await denyFrame.locator('#offerDenyBtn').click();
     const denyResult = await denyResultPromise;
@@ -261,8 +262,8 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     const dismissCredential = await mintCredential(dismissPage, WHITELISTED_CLASS, realPublicKey);
     const dismissResultPromise = dismissPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), dismissCredential);
     dismissResultPromise.catch(() => {});
-    await dismissPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const dismissFrame = dismissPage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(dismissPage, { timeout: 10000 });
+    const dismissFrame = BP.frame(dismissPage);
     await dismissFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
     await dismissFrame.locator('#offerApproveBtn').click();
     const dismissAcceptResult = await dismissResultPromise;
@@ -284,8 +285,8 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     const trustCredential = await mintCredential(trustPage, WHITELISTED_CLASS, realPublicKey);
     const trustResultPromise = trustPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), trustCredential);
     trustResultPromise.catch(() => {});
-    await trustPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const trustFrame = trustPage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(trustPage, { timeout: 10000 });
+    const trustFrame = BP.frame(trustPage);
     await trustFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
     await trustFrame.locator('#offerTrustCheckbox').check();
     await trustFrame.locator('#offerApproveBtn').click();
@@ -303,7 +304,7 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     await autoClaimPage.goto('http://' + DOMAIN + '/page-offer.html', { waitUntil: 'load' });
     const autoClaimCredential = await mintCredential(autoClaimPage, WHITELISTED_CLASS, realPublicKey);
     const autoClaimResult = await autoClaimPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), autoClaimCredential);
-    const overlayCountAfterAutoClaim = await autoClaimPage.locator('#domain-atlas-bridge-confirm').count();
+    const overlayCountAfterAutoClaim = await BP.count(autoClaimPage);
     if (overlayCountAfterAutoClaim !== 0) throw new Error('Expected no confirmation overlay at all for a trusted origin, found ' + overlayCountAfterAutoClaim);
     if (autoClaimResult.allowed !== true || !autoClaimResult.result || !autoClaimResult.result.claimed) {
       throw new Error('Expected {allowed:true, result:{claimed:true, ...}} with no prompt for a trusted origin, got: ' + JSON.stringify(autoClaimResult));
@@ -325,8 +326,8 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     const revokeCredential = await mintCredential(revokePage, WHITELISTED_CLASS, realPublicKey);
     const revokeResultPromise = revokePage.evaluate((credential) => window.atlasWallet.offerAsset(credential), revokeCredential);
     revokeResultPromise.catch(() => {});
-    await revokePage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const revokeFrame = revokePage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(revokePage, { timeout: 10000 });
+    const revokeFrame = BP.frame(revokePage);
     await revokeFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
     await revokeFrame.locator('#offerDenyBtn').click();
     const revokeResult = await revokeResultPromise;
@@ -340,8 +341,8 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     const previewOfferCredential = await mintCredential(previewOfferPage, WHITELISTED_CLASS, realPublicKey);
     const previewOfferResultPromise = previewOfferPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), previewOfferCredential);
     previewOfferResultPromise.catch(() => {});
-    await previewOfferPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const previewOfferFrame = previewOfferPage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(previewOfferPage, { timeout: 10000 });
+    const previewOfferFrame = BP.frame(previewOfferPage);
     await previewOfferFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
     // Trust was revoked in STEP 10, so this origin is ordinary again —
     // approving (no trust checkbox) queues it, same as STEP 4, rather than
@@ -389,8 +390,8 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     const dismissPreviewCredential = await mintCredential(dismissPreviewPage, WHITELISTED_CLASS, realPublicKey);
     const dismissPreviewResultPromise = dismissPreviewPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), dismissPreviewCredential);
     dismissPreviewResultPromise.catch(() => {});
-    await dismissPreviewPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const dismissPreviewFrame = dismissPreviewPage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(dismissPreviewPage, { timeout: 10000 });
+    const dismissPreviewFrame = BP.frame(dismissPreviewPage);
     await dismissPreviewFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
     await dismissPreviewFrame.locator('#offerApproveBtn').click();
     const dismissPreviewResult = await dismissPreviewResultPromise;

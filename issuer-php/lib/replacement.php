@@ -759,8 +759,9 @@ function atlas_txn_sweep() {
 // `$requestId`, or passes null and gets a lease here. A caller that already
 // holds a lease on a transaction id of its own (taken before any owner lease,
 // to keep the lock order: spend locks, request/transaction lease, owner lease)
-// passes that id as `$txn`.
-function atlas_commit_replacement($requestId, $op, $predecessorIds, $reason, $params, $successors, $response, $txn = null, $effects = []) {
+// passes that id as `$txn`. `$requireLive` refuses the commit, inside the revocation lock, when a predecessor is
+// already revoked (the journal entry is then aborted and nothing is spent or published).
+function atlas_commit_replacement($requestId, $op, $predecessorIds, $reason, $params, $successors, $response, $txn = null, $effects = [], $requireLive = false) {
   $ids = array_values($predecessorIds);
   $sorted = $ids;
   sort($sorted);
@@ -794,7 +795,7 @@ function atlas_commit_replacement($requestId, $op, $predecessorIds, $reason, $pa
   try {
     atlas_txn_register($rec);
     atlas_fault_point('txn:holdings-registered');
-    if ($ids) atlas_revoke_many($ids, $reason, $txn);
+    if ($ids) atlas_revoke_many($ids, $reason, $txn, $requireLive);
     $committed = true;
     atlas_fault_point('txn:revoked');
   } catch (Exception $e) {

@@ -7,6 +7,7 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const BP = require('./lib/bridge-prompt');
 
 const EXT_PATH = process.env.EXT_PATH || path.resolve(__dirname, '..', 'extension');
 const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-foreign-profile-'));
@@ -63,10 +64,10 @@ function assertTrue(c, m) { if (!c) throw new Error(m); }
     assertTrue(id.allowed === false, 'getIdentity must be denied, got ' + JSON.stringify(id));
     const sign = await foreign.evaluate(() => window.atlasWallet.requestSignature({ purpose: 'login', nonce: 'n' }));
     assertTrue(sign.allowed === false && sign.result === null, 'requestSignature must be denied, got ' + JSON.stringify(sign));
-    assertTrue(await foreign.locator('#domain-atlas-bridge-confirm').count() === 0, 'no confirmation prompt may appear');
+    assertTrue(await BP.count(foreign) === 0, 'no confirmation prompt may appear');
     const offer = await foreign.evaluate(() => window.atlasWallet.offerAsset({ credential: 'domain-atlas-asset/1.0', id: 'x', asset: { class: 'atlas.wearable.ring' } }));
     assertTrue(offer.allowed === false, 'offerAsset must be denied, got ' + JSON.stringify(offer));
-    assertTrue(await foreign.locator('#domain-atlas-bridge-confirm').count() === 0, 'no offer prompt may appear');
+    assertTrue(await BP.count(foreign) === 0, 'no offer prompt may appear');
     console.log('PASS: read, sign and offer all denied, no prompt');
 
     console.log('STEP 2: cross-domain world discovery still works (Enter button for the linked world)');

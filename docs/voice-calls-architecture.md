@@ -148,9 +148,10 @@ reused.
   `content.js`, which accepts a request only from its own document
   (`event.source === window && event.origin === location.origin`,
   `content.js` line 1023), checks the manifest-declared `walletBridge`
-  permission and `purpose` (lines 107-170), and draws any confirmation in an
-  extension-origin iframe the page cannot script (`confirm-bridge.js`; 120 s of
-  inactivity denies).
+  permission and `purpose` (lines 107-170), and has `background.js` open any
+  confirmation in a window of its own (`confirm-bridge.html`; 120 s of
+  inactivity denies), so the page has no element of it to cover, restyle,
+  navigate or message.
 * `background.js` accepts runtime messages only when `sender.tab` is set
   (line 73). That is **not** a way to tell a content script from an extension
   page: an extension page opened as a tab or a window also has `sender.tab`,

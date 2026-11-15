@@ -2,7 +2,7 @@
 // window.atlasWallet.requestSignature(payload), gated by a manifest-
 // declared policy.walletBridge.sign whitelist of `purpose` strings, with
 // every whitelisted request still needing the visitor's own explicit
-// approval through confirm-bridge.html — an extension-origin iframe the
+// approval through confirm-bridge.html — a window the extension opens, which the
 // requesting page cannot script into, read, or control the content of.
 //
 // Three things this test exists to prove, in order: (1) a purpose NOT on
@@ -21,6 +21,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const BP = require('./lib/bridge-prompt');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const PORT = 8203; // isolated — distinct from every other manual-*.js test's own port
@@ -99,7 +100,7 @@ function pageHtml(title, linkTag) {
       window.atlasWallet.requestSignature({ purpose: 'transfer-funds', amount: 1000 })
     );
     if (deniedResult.allowed !== false || deniedResult.result !== null) throw new Error('Expected {allowed:false, result:null} for a non-whitelisted purpose, got: ' + JSON.stringify(deniedResult));
-    const overlayCountAfterDenied = await nonWhitelistedPage.locator('#domain-atlas-bridge-confirm').count();
+    const overlayCountAfterDenied = await BP.count(nonWhitelistedPage);
     if (overlayCountAfterDenied !== 0) throw new Error('Expected no confirmation overlay to ever appear for a non-whitelisted purpose, found ' + overlayCountAfterDenied);
     await nonWhitelistedPage.close();
     console.log('PASS: non-whitelisted purpose refused with no prompt shown at all');
@@ -111,15 +112,15 @@ function pageHtml(title, linkTag) {
       window.atlasWallet.requestSignature({ purpose: 'login', nonce: 'nonce-before-identity' })
     );
     lockedResultPromise.catch(() => {}); // avoid noisy unhandled-rejection output if an earlier assertion throws first
-    await lockedPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const lockedFrame = lockedPage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(lockedPage, { timeout: 10000 });
+    const lockedFrame = BP.frame(lockedPage);
     await lockedFrame.locator('#lockedState').waitFor({ state: 'visible', timeout: 10000 });
     const lockedDetailText = await lockedFrame.locator('#lockedDetailLine').innerText();
     if (!lockedDetailText.includes('login')) throw new Error('Expected the locked-state prompt to name the real purpose, got: ' + lockedDetailText);
     await lockedFrame.locator('#dismissBtn').click();
     const lockedResult = await lockedResultPromise;
     if (lockedResult.allowed !== true || lockedResult.result !== null) throw new Error('Expected {allowed:true, result:null} dismissing the locked state, got: ' + JSON.stringify(lockedResult));
-    await lockedPage.waitForSelector('#domain-atlas-bridge-confirm', { state: 'detached', timeout: 10000 });
+    await BP.gone(lockedPage, { timeout: 10000 });
     await lockedPage.close();
     console.log('PASS: whitelisted purpose shows the real prompt; with no identity active, it correctly shows "locked" rather than a fake Approve option, and Dismiss resolves to no signature');
 
@@ -148,8 +149,8 @@ function pageHtml(title, linkTag) {
     const signPayload = { purpose: 'login', nonce: 'nonce-for-real-signature', site: DOMAIN };
     const approveResultPromise = approvePage.evaluate((payload) => window.atlasWallet.requestSignature(payload), signPayload);
     approveResultPromise.catch(() => {});
-    await approvePage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const approveFrame = approvePage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(approvePage, { timeout: 10000 });
+    const approveFrame = BP.frame(approvePage);
     await approveFrame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
     const originShown = await approveFrame.locator('#origin').innerText();
     if (originShown !== 'http://' + DOMAIN) throw new Error('Expected the prompt to show the real requesting origin, got: ' + originShown);
@@ -180,8 +181,8 @@ function pageHtml(title, linkTag) {
     await denyPage.goto('http://' + DOMAIN + '/page-sign.html', { waitUntil: 'load' });
     const denyResultPromise = denyPage.evaluate(() => window.atlasWallet.requestSignature({ purpose: 'age-attestation', minAge: 18 }));
     denyResultPromise.catch(() => {});
-    await denyPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const denyFrame = denyPage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(denyPage, { timeout: 10000 });
+    const denyFrame = BP.frame(denyPage);
     await denyFrame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
     await denyFrame.locator('#denyBtn').click();
     const denyResult = await denyResultPromise;
@@ -189,22 +190,22 @@ function pageHtml(title, linkTag) {
     await denyPage.close();
     console.log('PASS: a second whitelisted purpose ("age-attestation") also prompts correctly, and an explicit Deny yields no signature');
 
-    console.log('STEP 6: the page posts its own request messages into the confirmation iframe; the prompt and the signature ignore them');
+    console.log('STEP 6: the page posts forged prompt and decision messages at itself and at every frame; the prompt and the signature ignore them');
     const forgePage = await context.newPage();
     await forgePage.goto('http://' + DOMAIN + '/page-sign.html', { waitUntil: 'load' });
     const forgedPayload = { action: 'transfer', credentialId: 'urn:test:forged', recipientPublicKey: 'ATTACKER' };
     const forgeResultPromise = forgePage.evaluate((forgedPayload) => {
       const forged = { type: 'domain-atlas-bridge-confirm-init', origin: 'https://bank.example', kind: 'sign', detail: 'login', payload: forgedPayload };
+      const approve = { type: 'domain-atlas-bridge-confirm-decision', approved: true, result: { signedPayload: { forged: true } } };
       const timer = setInterval(() => {
-        const frame = document.getElementById('domain-atlas-bridge-confirm');
-        if (frame && frame.contentWindow) frame.contentWindow.postMessage(forged, '*');
+        for (const target of [window, ...Array.from(window.frames)]) { target.postMessage(forged, '*'); target.postMessage(approve, '*'); }
       }, 20);
       setTimeout(() => clearInterval(timer), 4000);
       return window.atlasWallet.requestSignature({ purpose: 'login', nonce: 'genuine-request' });
     }, forgedPayload);
     forgeResultPromise.catch(() => {});
-    await forgePage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
-    const forgeFrame = forgePage.frameLocator('#domain-atlas-bridge-confirm');
+    await BP.wait(forgePage, { timeout: 10000 });
+    const forgeFrame = BP.frame(forgePage);
     await forgeFrame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
     await forgePage.waitForTimeout(1500);
     const forgeOriginShown = await forgeFrame.locator('#origin').innerText();
