@@ -2,21 +2,11 @@
 if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Domain Atlas — PHP issuer: configuration, key storage, revocation ledger.
 //
-// Mirrors issuer-server/server.js's three overridable settings, but PHP has
-// no long-lived process to read environment variables from at startup — a
-// shared host runs this fresh per request — so ATLAS_DOMAIN defaults to the
-// Host header instead (correct almost all the time on real hosting) and can
-// still be forced below if you're reverse-proxied or the Host header isn't
-// trustworthy for some reason.
-
-// ATLAS_DOMAIN — baked into every issued credential's issuer.domain field.
-// Get this wrong and re-verification tries to fetch the issuer's key from
-// the WRONG domain later. Auto-detected from the request; override if needed.
-function atlas_domain() {
-  $forced = null; // e.g. 'example.com' — set this if Host-header detection isn't right for your setup
-  if ($forced) return $forced;
-  return isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost';
-}
+// Mirrors issuer-server/server.js's overridable settings. PHP has no long-lived process to read environment variables
+// from at startup — a shared host runs this fresh per request — so the settings are read on each request.
+//
+// The issuer's own domain (atlas_domain()) is in lib/domain.php: it comes from configuration, not from the request.
+require_once __DIR__ . '/domain.php';
 
 // ATLAS_TRUSTED_TRADE_PEERS (SPEC.md §7) — the only other domains this
 // domain will treat as a genuine cross-domain trading counterpart, in

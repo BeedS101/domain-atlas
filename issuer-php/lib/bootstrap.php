@@ -468,9 +468,24 @@ function atlas_relay_trade_lock($kp, $domain, $tradeId, $credential, $expiresAt)
     'attestationSignature' => $attestationSignature,
   ]);
   if ($res['status'] !== 200) {
-    throw new Exception(isset($res['body']['error']) ? $res['body']['error'] : ($domain . ' refused the trade lock (HTTP ' . $res['status'] . ')'));
+    $message = isset($res['body']['error']) ? $res['body']['error'] : ($domain . ' refused the trade lock (HTTP ' . $res['status'] . ')');
+    // A leg that was refunded is answered with the refund itself, so a claim that lost its own record still hands it over.
+    if (($res['body']['code'] ?? null) === 'trade-refunded' && is_array($res['body']['refund'] ?? null)) {
+      throw new AtlasTradeRefundedException($message, $res['body']['refund'], is_array($res['body']['remainder'] ?? null) ? $res['body']['remainder'] : null);
+    }
+    throw new Exception($message);
   }
   return $res['body'];
+}
+
+class AtlasTradeRefundedException extends Exception {
+  public $refund;
+  public $remainder;
+  public function __construct($message, $refund, $remainder) {
+    parent::__construct($message);
+    $this->refund = $refund;
+    $this->remainder = $remainder;
+  }
 }
 
 // The SETTLE counterpart of atlas_relay_trade_lock() above — asks the
@@ -544,6 +559,52 @@ function atlas_relay_trade_settle($kp, $domain, $tradeId, $credential, $spendQua
     } catch (AtlasRelayOutcomeException $secondErr) {
       throw new AtlasRelayOutcomeException($firstErr->getMessage() . ' (retried once, also failed: ' . $secondErr->getMessage() . ')', $secondErr->definite);
     }
+  }
+}
+
+// Asks the issuer of the claimant's balance to undo the first leg of a trade whose second leg the poster's issuer refused: it
+// revokes the credit it minted for the poster and pays the claimant the same value (see refund_failed_second_leg()). The
+// issuer records the refund, so asking again, as a retry after a lost answer does, returns the same credential. Returns
+// ['refund' => ..., 'remainder' => ...]; throws AtlasRelayRefundException whose ->kind is 'refused' when the issuer answered
+// 400 or 403 (it refunded nothing), 'unsupported' when it has no such endpoint (an older issuer), and 'unknown' for anything
+// else, including a refund that may have happened. Mirrors relayTradeRefund() in issuer-server/server.js.
+class AtlasRelayRefundException extends Exception {
+  public $kind;
+  public function __construct($message, $kind) {
+    parent::__construct($message);
+    $this->kind = $kind;
+  }
+}
+
+function atlas_relay_trade_refund($kp, $domain, $tradeId, $credential) {
+  $attestation = ['relayingDomain' => atlas_domain(), 'tradeId' => $tradeId, 'credentialId' => $credential['id']];
+  $attestationSignature = atlas_sign($kp['privateKey'], $attestation);
+  $attempt = function () use ($domain, $credential, $attestation, $attestationSignature) {
+    try {
+      $res = atlas_peer_post_json($domain, '/atlas/trade/relay-refund', [
+        'credential' => $credential,
+        'attestation' => $attestation,
+        'attestationSignature' => $attestationSignature,
+      ]);
+    } catch (AtlasOutboundException $e) {
+      throw new AtlasRelayRefundException($e->getMessage(), 'unknown');
+    }
+    $body = is_array($res['body'] ?? null) ? $res['body'] : null;
+    if ($res['status'] !== 200) {
+      $kind = in_array($res['status'], [404, 405], true) ? 'unsupported' : (in_array($res['status'], [400, 403], true) ? 'refused' : 'unknown');
+      throw new AtlasRelayRefundException(isset($body['error']) ? $body['error'] : ($domain . ' refused the trade refund (HTTP ' . $res['status'] . ')'), $kind);
+    }
+    $refund = $body !== null && ($body['status'] ?? null) === 'refunded' ? ($body['refund'] ?? null) : null;
+    $genuine = is_array($refund) && ($refund['owner']['publicKey'] ?? null) === $credential['owner']['publicKey']
+      && ($refund['asset']['class'] ?? null) === $credential['asset']['class'] && ($refund['issuer']['domain'] ?? null) === $domain;
+    if (!$genuine) throw new AtlasRelayRefundException($domain . ' gave no usable answer to the trade refund', 'unknown');
+    return ['refund' => $refund, 'remainder' => is_array($body['remainder'] ?? null) ? $body['remainder'] : null];
+  };
+  try {
+    return $attempt();
+  } catch (AtlasRelayRefundException $firstErr) {
+    if ($firstErr->kind !== 'unknown') throw $firstErr;
+    return $attempt();
   }
 }
 
@@ -1427,20 +1488,34 @@ function fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwn
   return ['received' => $recorded['received'], 'remainder' => $recorded['remainder']];
 }
 
-// True when this balance of this domain's own was already spent for this trade leg by an earlier request that then stopped
-// (or whose answer was lost): the journal holds the committed leg for the same trade, new owner and quantity, and the
-// presented credential is the genuine one for the party named. The ordinary "still live" checks cannot apply to it any
-// more, and a retry resumes with the recorded result instead.
-// True when a trade leg for this balance has committed in this domain's journal (whoever it was for).
-function atlas_trade_leg_settled($tradeId, $credential) {
-  $requestId = atlas_trade_leg_request_id($tradeId, $credential['id']);
-  if (atlas_request_lease($requestId) !== null) return false;
+// What this domain's journal records for one of its own balances spent for a trade leg: ['state' => 'none'] when no leg
+// committed, ['state' => 'settled', 'leg' => ...] while the credit minted for the counterparty stands, and ['state' =>
+// 'refunded', 'leg' => ..., 'refund' => ...] once a refund took that credit back and paid the balance's owner.
+// ['state' => 'busy'] when another request holds the leg or its journal cannot be recovered right now. A refunded leg is
+// never settled or replayed again: the counterparty's credit no longer exists. Mirrors tradeLegOutcome() in
+// issuer-server/server.js.
+function atlas_trade_leg_outcome($tradeId, $credential) {
+  $legId = atlas_trade_leg_request_id($tradeId, $credential['id']);
+  if (atlas_request_lease($legId) !== null) return ['state' => 'busy'];
   try {
-    atlas_txn_recover_key($requestId);
+    atlas_txn_recover_key($legId);
   } catch (Exception $e) {
-    return false;
+    return ['state' => 'busy'];
   }
-  return atlas_replay_peek($requestId, 'trade-leg') !== null;
+  $legJson = atlas_replay_peek($legId, 'trade-leg');
+  $leg = $legJson === null ? null : json_decode($legJson, true);
+  if (!is_array($leg) || !is_array($leg['received'] ?? null)) return ['state' => 'none'];
+  $refundId = atlas_derived_request_id('trade-refund', $leg['received']['id'], ['claimantPublicKey' => $credential['owner']['publicKey']]);
+  if (atlas_request_lease($refundId) !== null) return ['state' => 'busy'];
+  try {
+    atlas_txn_recover_key($refundId);
+  } catch (Exception $e) {
+    return ['state' => 'busy'];
+  }
+  $refundJson = atlas_replay_peek($refundId, 'trade-refund');
+  $refunded = $refundJson === null ? null : json_decode($refundJson, true);
+  if (is_array($refunded) && is_array($refunded['refund'] ?? null)) return ['state' => 'refunded', 'leg' => $leg, 'refund' => $refunded['refund']];
+  return ['state' => 'settled', 'leg' => $leg];
 }
 
 // A claim whose first leg is settled by a foreign issuer leaves a record before anything is relayed, so a retry after a lost
@@ -1466,6 +1541,10 @@ function atlas_trade_attempt_resumable($tradeId, $credential, $claimantPublicKey
   return verify_foreign_asset_credential($credential, true) === true;
 }
 
+// True when this balance of this domain's own was already spent for this trade leg by an earlier request that then stopped
+// (or whose answer was lost): the journal holds the committed leg for the same trade, new owner and quantity, and the
+// presented credential is the genuine one for the party named. The ordinary "still live" checks cannot apply to it any
+// more, and a retry resumes with the recorded result instead.
 function atlas_trade_leg_resumable($kp, $tradeId, $credential, $ownerPublicKey, $class, $spendQuantity, $newOwnerPublicKey, $mail) {
   if (!is_array($credential) || ($credential['credential'] ?? null) !== 'domain-atlas-asset/1.0' || ($credential['issuer']['domain'] ?? null) !== atlas_domain()) return false;
   if (!verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential))) return false;
@@ -1476,25 +1555,16 @@ function atlas_trade_leg_resumable($kp, $tradeId, $credential, $ownerPublicKey, 
   return $begun[0] === 'replay';
 }
 
-// Compensates a claimant whose balance was already spent by
-// fulfill_trade_side_settlement() above (the B side, paid first) when the
-// OTHER leg (the A side, paid second) then fails — a network drop, a
-// foreign domain timing out on relay-settle, or any other error after B's
-// spend already committed. Only safe to call when B's side settled
-// LOCALLY (issuerBDomain === atlas_domain()): this domain is then the one
-// that both produced $aReceived (minted to the poster, who was never told
-// about it — the mail notice carrying it is built by the A-side
-// settlement that just failed, so it was never sent) and can safely undo
-// it, since nothing else has touched it in between. A spend on a FOREIGN
-// domain can't be refunded this way — that would need a new cross-domain
-// refund-relay endpoint this protocol doesn't have yet (see
-// atlas/trade/claim.php's own comment on this gap). Mirrors
-// issuer-server/server.js's refundFailedSecondLeg().
+// Gives a claimant their value back when the other leg of the trade cannot settle, after fulfill_trade_side_settlement()
+// above already spent the claimant's balance (the B side, paid first). Runs on the domain that issued that balance: from
+// atlas/trade/claim.php when it is that domain, otherwise from atlas/trade/relay-refund.php when the station asks. Only that
+// domain can do it: it produced $aReceived (minted to the poster, who was never told about it, since the mail notice
+// carrying it belongs to the A-side settlement that did not happen) and can revoke it. Mirrors issuer-server/server.js's
+// refundFailedSecondLeg().
 //
-// Revokes $aReceived (the never-delivered credit to the poster) and mints
-// its equivalent back to the claimant: a fresh balance for a fungible
-// class, or the exact same unique item (transferred back, preserving its
-// instance state) for a non-fungible one.
+// Revokes $aReceived and mints its equivalent back to the claimant: a fresh balance for a fungible class, or the exact same
+// unique item (transferred back, preserving its instance state) for a non-fungible one. The refund is a journalled
+// replacement keyed by $aReceived and the claimant, so asking again returns the same credential.
 function refund_failed_second_leg($kp, $aReceived, $offerB, $claimantPublicKey) {
   $params = ['claimantPublicKey' => $claimantPublicKey];
   $requestId = atlas_derived_request_id('trade-refund', $aReceived['id'], $params);

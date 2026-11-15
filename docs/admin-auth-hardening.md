@@ -109,9 +109,10 @@ first.
    files appear in `lib/`: `atlas-admin-proof-nonces-store.json` and
    `atlas-admin-ratelimit-store.json`. `lib/` is already denied to web
    requests by its `.htaccess`; confirm that on your host.
-5. Set `ATLAS_DOMAIN` (Node) explicitly. On PHP the domain is taken from the
-   `Host` header unless `$forced` is set in `atlas_domain()` (`lib/store.php`);
-   set it to your domain.
+5. Set `ATLAS_DOMAIN` explicitly. On PHP set it in the environment or in
+   `lib/atlas-domain-config.json`; until then the domain is taken from the `Host`
+   header, which the sender chooses, and an admin request written for another
+   domain can be accepted by a request that carries that Host.
 6. Ask each admin to sign in again.
 7. Optional tuning is by environment variable (all optional): `ATLAS_ADMIN_SESSION_MAX_MS`,
    `ATLAS_ADMIN_REQUEST_WINDOW_MS`, `ATLAS_ADMIN_NONCE_CAP`,

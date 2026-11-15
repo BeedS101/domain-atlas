@@ -2082,9 +2082,10 @@ const AtlasWallet = (() => {
   }
 
   // A trade claim that the station started and could not finish. The first leg has spent the claimant's
-  // balance and minted the change (`remainder`); the refund of what was paid exists only when the spend was
-  // local. Both are credentials the station signed for the claimant and are applied together, in one write,
-  // only when every one checks out. Anything else is held for attention with nothing applied.
+  // balance and minted the change (`remainder`). The refund of what was paid is issued by the domain that issued the spent
+  // balance: the station for a local spend, the foreign issuer (asked by the station) otherwise, and it may be missing when that
+  // issuer could not be asked. The credentials are applied together, in one write, only when every one checks out. Anything
+  // else is held for attention with nothing applied.
   async function stopClaim(entry, status, text, data) {
     const hold = (message) => holdForAttention(entry, status, text, data, [], entry.label + ' needs attention: ' + message
       + ' The trade may have been settled at one issuer and not the other; the balance used is kept and held back, and nothing is sent again unless you ask.');
@@ -2096,7 +2097,7 @@ const AtlasWallet = (() => {
     if (!pay) throw await hold(String(data.error || text).slice(0, 160));
     if (entry.attention && entry.attention.applied) throw await hold('the change from this trade was already applied; ' + String(data.error || text).slice(0, 120));
     const sameClass = (c) => c.asset.class === pay.cls && c.asset.fungible === pay.fungible;
-    const refundOk = !refund || (isUsableCredential(refund, entry.owner) && sameClass(refund) && refund.issuer.domain === entry.domain
+    const refundOk = !refund || (isUsableCredential(refund, entry.owner) && sameClass(refund) && refund.issuer.domain === pay.balanceIssuer
       && (!pay.fungible || refund.quantity === pay.paid));
     const remainderOk = !remainder || (pay.leftover > 0 && isUsableCredential(remainder, entry.owner) && sameClass(remainder)
       && remainder.quantity === pay.leftover && remainder.issuer.domain === pay.balanceIssuer);

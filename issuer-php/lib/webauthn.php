@@ -1,5 +1,6 @@
 <?php
 if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
+require_once __DIR__ . '/domain.php';
 // Passkey (WebAuthn) assertions as owner and identity proofs. Mirrors issuer-server/lib-webauthn.js rule for rule.
 //
 // An envelope { signerRole: 'webauthn', publicKey, clientDataJSON, authenticatorData, signature } is accepted only when
@@ -15,9 +16,9 @@ if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVE
 // must be on the list this issuer expects, and the authenticator-signed rpIdHash must agree with it.
 //
 // Expected origins: by default this domain's own origins and any browser-extension origin (the wallet is an extension,
-// and its id differs between installs). This domain is the configured ATLAS_DOMAIN, never the request's Host header,
-// which the client chooses; without it only extension origins are expected by default. ATLAS_WEBAUTHN_ORIGINS (comma-separated origins) replaces that default with an
-// exact list. ATLAS_WEBAUTHN_RP_IDS additionally pins the relying-party ids. ATLAS_WEBAUTHN_REQUIRE_UV=1 refuses an
+// and its id differs between installs). This domain is the configured one (lib/domain.php), never the request's Host
+// header, which the client chooses; without it only extension origins are expected by default. ATLAS_WEBAUTHN_ORIGINS
+// (comma-separated origins) replaces that default with an exact list. ATLAS_WEBAUTHN_RP_IDS additionally pins the relying-party ids. ATLAS_WEBAUTHN_REQUIRE_UV=1 refuses an
 // assertion whose authenticator did not verify the user (the wallet asks for "preferred", so this is off by default).
 // The signature counter is not checked: synced passkeys report 0. Replay protection is the payload's own nonce.
 
@@ -64,11 +65,10 @@ function atlas_webauthn_list($value) {
   return array_values(array_filter(array_map('trim', explode(',', $value)), function ($s) { return $s !== ''; }));
 }
 
-// The origins a page of the configured domain is served from (none when ATLAS_DOMAIN is not set).
+// The origins a page of the configured domain is served from (none when the domain is not configured: see lib/domain.php).
 function atlas_webauthn_own_origins() {
-  $domain = getenv('ATLAS_DOMAIN');
-  if (!is_string($domain) || trim($domain) === '') return [];
-  $domain = strtolower(trim($domain));
+  $domain = atlas_configured_domain();
+  if (!is_string($domain)) return [];
   $host = preg_replace('/:\d+$/', '', $domain);
   return in_array($host, ['localhost', '127.0.0.1', '[::1]'], true) ? ['https://' . $domain, 'http://' . $domain] : ['https://' . $domain];
 }

@@ -240,27 +240,27 @@ async function scenarios(kind) {
     check('the genuine outcome then applies the 5-gold refund', (await state(w)).gold === 5 && (await w.pending()).length === 0, real);
   }, hold);
 
-  // ---- cross-domain: the claimant's gold is issued by a third issuer
-  await scenario(kind, 'R11 foreign first leg, larger balance: the change comes back, the payment is not refunded', async (w, iss, ctx) => {
+  // ---- cross-domain: the claimant's gold is issued by a third issuer, which refunds the payment when the poster's issuer refuses
+  await scenario(kind, 'R11 foreign first leg, larger balance: the foreign issuer returns the refund and the change', async (w, iss, ctx) => {
     const wd = await world(kind, w, iss, ctx, 10, { goldAtForeign: true });
     const out = await claim(w, iss, wd);
-    const [entry] = await w.pending();
     const st = await state(w);
-    check('the change (5 gold, issued by the foreign domain) is applied; no refund, no iron', st.gold === 5 && st.iron === 0, { out, st });
-    check('the claim stays visible as needs-attention (the payment was spent abroad and cannot be refunded from here)', out !== 'ok' && out.needsAttention === true && !!entry && entry.state === 'needs-attention' && entry.attention.code === 'claim-incomplete' && entry.attention.applied === true, { out, attention: entry && entry.attention });
+    check('the claim ends as refunded: 10 gold back (5 refund and 5 change), no iron', out !== 'ok' && out.pending !== true && !out.needsAttention && st.gold === 10 && st.iron === 0, { out, st });
+    check('the entry is closed', (await w.pending()).length === 0, await w.pending());
     const rows = await live(w, GOLD);
-    check('the change is the foreign domain\'s own credential and verifies', rows.length === 1 && rows[0].status === 'verified', rows);
-    check('the foreign domain counts the same 5 gold for the owner (change only); the payment sits with the undelivered poster credit', (await heldAt(wd.foreign, w.pub, GOLD)) === 5);
+    check('both credentials are the foreign issuer\'s own and verify', rows.length === 2 && rows.every((r) => r.status === 'verified'), rows);
+    check('the foreign issuer counts the same 10 gold for the owner', (await heldAt(wd.foreign, w.pub, GOLD)) === 10);
     await w.restart(true);
     const r = await w.recover();
-    check('recovery does not resend it; the wallet is unchanged', r[0].status === 'needs-attention' && sum(await live(w, GOLD)) === 5, r);
+    check('recovery has nothing to do and the wallet is unchanged', r.length === 0 && sum(await live(w, GOLD)) === 10, r);
   }, hold);
 
-  await scenario(kind, 'R12 foreign first leg, exact balance: nothing to return, the balance stays held', async (w, iss, ctx) => {
+  await scenario(kind, 'R12 foreign first leg, exact balance: the foreign issuer returns the refund', async (w, iss, ctx) => {
     const wd = await world(kind, w, iss, ctx, 5, { goldAtForeign: true });
     const out = await claim(w, iss, wd);
-    const [entry] = await w.pending();
-    check('held for attention as before: balance held back, nothing applied', out !== 'ok' && out.needsAttention === true && !!entry && entry.state === 'needs-attention' && (await state(w)).gold === 0 && (await shown(w, GOLD)).every((x) => x.held !== null), { out, rows: await shown(w, GOLD) });
+    const st = await state(w);
+    check('the claim ends as refunded: 5 gold back, no iron, nothing held, entry closed', out !== 'ok' && out.pending !== true && !out.needsAttention && st.gold === 5 && st.iron === 0 && (await w.pending()).length === 0 && (await shown(w, GOLD)).every((x) => x.held === null), { out, rows: await shown(w, GOLD) });
+    check('the foreign issuer counts the same 5 gold', (await heldAt(wd.foreign, w.pub, GOLD)) === 5);
   }, hold);
 
   await scenario(kind, 'R13 foreign first leg, answer lost, then recovered', async (w, iss, ctx) => {
@@ -269,30 +269,26 @@ async function scenarios(kind) {
     check('saved', out !== 'ok' && out.pending === true, out);
     await w.restart(true);
     const r = await w.recover();
-    const [entry] = await w.pending();
-    check('the stored outcome gives the change once; the entry stays as needs-attention', r.length === 1 && sum(await live(w, GOLD)) === 5 && !!entry && entry.attention.applied === true, { r });
+    check('the stored outcome gives the refund and the change once: 10 gold, entry closed', r.length === 1 && sum(await live(w, GOLD)) === 10 && (await w.pending()).length === 0, { r });
     const heldAfter = await heldAt(wd.foreign, w.pub, GOLD);
     await w.recover();
     await w.restart(true);
-    const manual = await retry(w, entry.requestId);
-    check('asking again by hand does not apply the change a second time', sum(await live(w, GOLD)) === 5 && (await heldAt(wd.foreign, w.pub, GOLD)) === heldAfter, manual);
+    await w.recover();
+    check('asking again changes nothing: still 10 gold, the foreign issuer counts the same', sum(await live(w, GOLD)) === 10 && heldAfter === 10 && (await heldAt(wd.foreign, w.pub, GOLD)) === heldAfter, { held: await heldAt(wd.foreign, w.pub, GOLD) });
   }, hold);
 
-  await scenario(kind, 'R14 backup of a claim that was applied and stays as needs-attention, restored into a fresh profile', async (w, iss, ctx) => {
+  await scenario(kind, 'R14 backup after a foreign-balance claim was refunded, restored into a fresh profile', async (w, iss, ctx) => {
     const wd = await world(kind, w, iss, ctx, 10, { goldAtForeign: true });
     await claim(w, iss, wd);
-    const [entry] = await w.pending();
     const file = await exportBackup(w);
     const t = await ctx.fresh('r14restore', w);
     await t.create().catch(() => null);
     const imported = await importBackup(t, file, w.seed);
     t.pub = w.pub;
     await t.restart(true).catch(() => null);
-    const [carried] = await t.pending();
-    check('the entry is carried with its state and the applied mark', imported.ok === true && !!carried && carried.requestId === entry.requestId && carried.state === 'needs-attention' && carried.attention.applied === true, { imported, carried });
-    check('the restored wallet holds the 5 gold of change once', sum(await live(t, GOLD)) === 5 && (await live(t, GOLD)).length === 1, await shown(t, GOLD));
+    check('the restored wallet holds the 10 gold once, in two credentials', imported.ok === true && sum(await live(t, GOLD)) === 10 && (await live(t, GOLD)).length === 2, await shown(t, GOLD));
     const r = await t.recover();
-    check('recovery in the new profile sends nothing and changes nothing', r.length === 1 && r[0].status === 'needs-attention' && sum(await live(t, GOLD)) === 5, r);
+    check('recovery in the new profile has nothing to do', r.length === 0 && sum(await live(t, GOLD)) === 10, r);
   }, hold);
 }
 

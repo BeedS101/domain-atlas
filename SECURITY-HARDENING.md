@@ -12,6 +12,8 @@ issuers with their own keys and state; no live domain was contacted.
 | P3 foreign revocation | A foreign issuer whose revocation or suspension list cannot be fetched or parsed is refused (fails closed). | `security-foreign-revocation.js` |
 | P4 passkey envelopes | `verify_envelope` requires `webauthn.get`, a well-formed authenticator-data structure, user presence, an origin and RP ID hash from the expected contexts (wallet extension origins and this domain's own origins; pinnable), and optionally user verification. The client-supplied origin is not its own authority. The raw-ECDSA path is unchanged. | `security-webauthn-envelope.js/.php`, `security-webauthn-endpoints.js` |
 | P5 crash-safe replacement | Reissue, clawback, class patches, legacy transfer, world-drop claims, trade legs and trade refunds all use the existing replacement journal: sign successors, write the journal entry, revoke predecessors in one atomic step, apply effects, store the replay result. Retries return the recorded result; no second transaction system. | `security-replacement-recovery.js`, `security-world-drop-settlement.js`, `security-trade-settlement.js` |
+| Cross-domain trade refund | When a trade's second leg is refused for good (HTTP 400 or 403) after the claimant's balance was spent by another domain, the station asks that issuer to undo its first leg (`/atlas/trade/relay-refund`): it revokes the credit it minted for the poster and pays the claimant the same value. A refunded leg is never settled or replayed again. | `security-trade-refund-relay.js` (Node, PHP and mixed) |
+| PHP issuer identity | The PHP issuer's domain comes from `ATLAS_DOMAIN` or `lib/atlas-domain-config.json`, not from the request's Host header. A signed request meant for another domain is refused whatever Host it carries. | `security-domain-pin.js` (Node and PHP share the cases) |
 
 ## Compatibility implications
 
@@ -23,10 +25,17 @@ issuers with their own keys and state; no live domain was contacted.
 - **Peers.** Non-443 public peers and URL-shaped domain strings are now rejected. A foreign issuer that publishes no
   revocation document is refused. `ATLAS_ALLOW_LOCAL_PEERS=1` re-enables loopback peers for development; it is off by
   default and implied only by the built-in development servers.
-- **PHP.** curl is required for outbound requests. Set `ATLAS_DOMAIN`: the passkey module takes this domain's own
-  origins from it (it no longer depends on the request's Host header). New state files
-  `lib/atlas-outbound-rate-store.json` and `lib/atlas-outbound-key-cache.json` are created at runtime (covered by the
-  existing `lib/atlas-*.json` ignore rule).
+- **PHP.** curl is required for outbound requests. New state files `lib/atlas-outbound-rate-store.json` and
+  `lib/atlas-outbound-key-cache.json` are created at runtime (covered by the existing `lib/atlas-*.json` ignore rule).
+- **PHP issuer domain.** Set it explicitly on each PHP deployment: `ATLAS_DOMAIN=evtec.co.za` (or
+  `ATLAS_DOMAIN=domain-atlas.co.za`) in the environment or as a web server setting such as `SetEnv`, or create
+  `lib/atlas-domain-config.json` containing `{"domain": "evtec.co.za"}` where an environment variable is awkward. Use the
+  name wallets and peers already know the issuer by, the `issuer.domain` of its existing credentials, with a port only if
+  it has one. The file is in `lib/`, which the web server does not serve, and does not count as issuer state. A value that
+  is not a host name stops the issuer from answering (HTTP 500) instead of falling back to the request. Until it is set
+  the issuer behaves as before, taking the Host header, except that the host is lower-cased, a Host that is not a host name
+  is refused with 400, and a notice is logged at most every six hours. The Node issuer already read `ATLAS_DOMAIN`.
+  The passkey module takes its origins from the same setting.
 - **Passkeys.** Default accepted origins: wallet extension origins plus this domain's own origins. Pin with
   `ATLAS_WEBAUTHN_ORIGINS` and `ATLAS_WEBAUTHN_RP_IDS` (comma separated); require user verification with
   `ATLAS_WEBAUTHN_REQUIRE_UV=1`.
@@ -40,6 +49,11 @@ issuers with their own keys and state; no live domain was contacted.
   for the replay window, hidden from the public listing, then pruned). A concurrent claimant now gets 409 `busy` while a
   claim is pending, and 404 once it is done. `ATLAS_DROP_RESERVE_SECONDS` (default 120) bounds how long a stopped
   claim blocks others.
+- **New endpoint.** `POST /atlas/trade/relay-refund` on both issuers, behind the same trusted-peer list and attestation as
+  `relay-lock` and `relay-settle`. It is additive: a station that finds an older issuer without it (HTTP 404) leaves the
+  claim open and tells the claimant to ask again or contact the operator, refunds nothing and duplicates nothing, and the
+  same claim refunds once that issuer is upgraded. `relay-lock` and `relay-settle` answer HTTP 400 with
+  `code: "trade-refunded"` and the refund credential for a leg that was refunded.
 - **Old tests changed on purpose:** tests that expected "already revoked" on an identical repeat, and the concurrent
   world-drop race tests (the loser may now get 409 instead of 404).
 - **Nothing is reset.** No keys, revocation lists, journals, ledgers or holdings are regenerated or cleared. Existing
@@ -51,7 +65,12 @@ issuers with their own keys and state; no live domain was contacted.
 2. Deploy the issuer servers (PHP and Node) before the wallet. Set `ATLAS_DOMAIN` on PHP hosts, confirm curl, and review
    `ATLAS_WEBAUTHN_*` and `ATLAS_LEGACY_DROP_PEERS` for each domain. Roll the domains of a federated pair together or
    issuers first, since the new relay-claim requires the owner and claimant intents.
-3. Release the updated wallet (adds `domain` and `dropId` to drop/claim intents).
+   Set the PHP domain on both PHP deployments in the same step (see "PHP issuer domain"). Upgrade every issuer that can
+   issue a balance a visitor may spend at another domain's Trading Station: the refund runs on that issuer.
+3. Release the updated wallet (adds `domain` and `dropId` to drop/claim intents, and applies a trade refund issued by the
+   issuer of the spent balance rather than only by the station). An older wallet that receives such a refund holds the
+   claim as needing attention and applies nothing; the station keeps the refund, so asking again after the update applies
+   it once.
 4. Watch for 409 `busy` and stale reservations on world drops, and for refused foreign issuers (missing revocation
    documents) after the change.
 5. Rollback: the journal and replay stores are additive; older code ignores the new listing fields. Keep the journal
@@ -74,12 +93,23 @@ issuers with their own keys and state; no live domain was contacted.
   issuer's `relay-lock`/`relay-settle` decide: they replay a committed leg or settle one that never ran. Without the
   record the retry died on "it has revoked/suspended this credential" (the station's own 120 s lock counts too).
   Test: `security-trade-relay-recovery.js` runs both the poster's and the claimant's issuer being stopped.
-- **Remaining cross-domain gap.** If the poster's leg is refused for good (HTTP 400/403 from its issuer) after the
-  claimant's foreign balance was already spent, the station cannot refund it: there is no cross-domain refund relay.
-  The claimant is told to contact the operator, as before.
+- **Cross-domain trades, poster's issuer refuses for good (fixed).** The claimant's balance was spent by one issuer and
+  the poster's issuer then answered HTTP 400 or 403: the station asks the claimant's issuer for `relay-refund`. That issuer
+  revokes the credit it minted for the poster (never delivered, since the mail carrying it belongs to the leg that did not
+  happen) and pays the balance's owner the same value, as one journalled replacement keyed by the credit and the claimant.
+  Asking again, after a lost answer or a stop at any point of the refund, returns the same credential; a retried claim for
+  a refunded trade gets the refund back and never settles. Test: `security-trade-refund-relay.js` (poster refuses with 400
+  and 403, a unique item, a claimant whose balance the station itself issued, the claimant's issuer stopped at four points
+  of the refund, an older issuer without the endpoint; Node, PHP and both mixed layouts).
+  Trust: the claimant's issuer refunds on a trusted peer's signed word, the same trust `relay-settle` already places in
+  it, and the refund always goes to the owner named by the presented credential. A poster's issuer that answers 400 or 403
+  after it did settle would pay both sides; a peer should be trusted only if its answers can be.
 - A reservation held by a crashed claimant blocks other claimants until it lapses (`ATLAS_DROP_RESERVE_SECONDS`).
 - The relay-settle journal replay is covered by review and the existing cross-domain suites, not a dedicated crash test.
-- PHP `atlas_domain()` is still derived from the Host header elsewhere in the codebase.
+- Other PHP services in the repository (`chain-labs/*.php`, `call-php`, `presence-php`, `directory-php`) were not part of this
+  change; `issuer-php` is the one that signs credentials. The chain-labs pages check the Host against their own host list.
+- A PHP issuer nobody has pinned yet still trusts the Host header until `ATLAS_DOMAIN` is set; that is the compatibility
+  cost of not breaking a deployment that was never configured.
 - The WebAuthn signature counter is not checked.
 - The per-peer key-lookup budget can be exhausted by a flood (a deliberate denial-of-service tradeoff).
 - Crash tests stop the process; they do not prove behavior across power loss.
@@ -94,7 +124,15 @@ node test/security-webauthn-envelope.js ; php test/security-webauthn-envelope.ph
 node test/security-replacement-recovery.js both
 node test/security-world-drop-settlement.js both
 node test/security-trade-settlement.js both
+node test/security-trade-relay-recovery.js both
+node test/security-trade-refund-relay.js both     # node | php | mixed | both
+node test/security-domain-pin.js both
 xvfb-run -a node test/security-world-drop-wallet.js
 ```
 Browser suites need `xvfb-run -a`. Old manual suites need `ATLAS_PRIVATE_MINT=off ATLAS_MINT_LIMITS=off`.
 `manual-drop-pickup.js` is intermittently flaky at wallet creation, also on unmodified code.
+`manual-gen1-claim-remainder.js` and `manual-gen1-unique-recovery.js` rig the poster's issuer to answer HTTP 400 (a refusal)
+where a refund is expected and HTTP 500 (outcome unknown) where the claim must be held. `manual-gen1-backup-journal.js` (one
+activity-log check) and `manual-gen1-php-deployment.js` / `manual-gen1-fungible-fixes.js` fail identically on unmodified `main`.
+Tests that read an issuer's state from the repository (`manual-federation-relay.js`, the mail suites, `manual-world-drops-protocol.js`)
+need the two demo domains served locally first (README, "Serve the two demo domains locally").

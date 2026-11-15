@@ -54,7 +54,9 @@ $busy = atlas_spend_lock($credential['id']);
 if ($busy !== null) send_json(409, ['error' => $busy]);
 // A balance already spent by this very trade's settlement is not an error: the relaying domain is asking again after a
 // lost answer, and the settle that follows replays the recorded result.
-$settledForThisTrade = is_revoked($credential['id']) && atlas_trade_leg_settled($attestation['tradeId'], $credential);
+$legOutcome = is_revoked($credential['id']) ? atlas_trade_leg_outcome($attestation['tradeId'], $credential) : ['state' => 'none'];
+if ($legOutcome['state'] === 'busy') send_json(409, ['error' => 'this balance is being settled by another request - try again', 'code' => 'busy']);
+$settledForThisTrade = $legOutcome['state'] === 'settled' || $legOutcome['state'] === 'refunded';
 if (is_revoked($credential['id']) && !$settledForThisTrade) {
   send_json(400, ['error' => 'that balance has already been revoked']);
 }
@@ -89,6 +91,9 @@ if (!$attestationOk) {
 // lifts itself, the same self-healing find_suspension() already gives
 // every other suspension in this bundle, instead of standing up a second
 // code path that itself needs to be reachable and trusted to run.
+if ($legOutcome['state'] === 'refunded') {
+  send_json(400, ['error' => 'this trade leg was refunded', 'code' => 'trade-refunded', 'refund' => $legOutcome['refund'], 'remainder' => $legOutcome['leg']['remainder'] ?? null]);
+}
 if ($settledForThisTrade) send_json(200, ['status' => 'locked', 'expiresAt' => $attestation['expiresAt'], 'settled' => true]);
 atlas_suspend($credential['id'], 'trade-lock:' . $attestation['tradeId'], $attestation['expiresAt']);
 send_json(200, ['status' => 'locked', 'expiresAt' => $attestation['expiresAt']]);

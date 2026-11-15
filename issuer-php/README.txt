@@ -133,14 +133,21 @@ atlas/.htaccess and only affects requests under /atlas/.
 
 A note on identity
 --------------------
-The issuer automatically uses whatever domain the request came in on
-(the Host header) as the "issuer.domain" baked into every credential it
-signs. For a single-domain site like example.com this just works with zero
-configuration. If you ever host this same account under multiple domain
-names pointing at the same files, or behind a proxy that changes the Host
-header, open lib/store.php and look at the atlas_domain() function near
-the top — there's a one-line override for exactly that case, commented
-inline.
+The issuer's domain is the "issuer.domain" baked into every credential it signs,
+the domain owners' and administrators' signed requests must name, and the name
+it uses toward other domains. Set it explicitly, to the domain wallets and peers
+already know this issuer by (for example evtec.co.za), in one of two ways:
+  - ATLAS_DOMAIN in the environment (SetEnv ATLAS_DOMAIN example.com in
+    Apache, or the equivalent of your host), or
+  - lib/atlas-domain-config.json containing {"domain": "example.com"}. lib/ is
+    not served, and this file does not count as issuer state.
+A Host header is chosen by whoever sends the request, so it is never trusted
+once a domain is configured: a request addressed to another host name is still
+answered in the configured domain, and a signed request written for another
+domain is refused. A value that is not a host name stops the issuer from
+answering until it is fixed. If nothing is configured the issuer keeps its
+older behaviour and takes the Host header (lower-cased; a Host that is not a
+host name is refused), and logs a notice now and then asking you to set it.
 
 
 Membership cards and the mail system
@@ -156,7 +163,7 @@ delegated to, for passkey wallets). This bundle returns mail and status
 updates only for credentials whose owner key equals the signer and whose
 signature from this domain verifies; everything else is dropped without
 telling the caller. It also refuses requests whose `domain` is not this
-host (the HTTP Host header — if a proxy rewrites it, set it back), requests
+host (the domain configured as described under "A note on identity"), requests
 more than 2 minutes off this server's clock, and repeated nonces.
 A wallet from before this change gets 401 auth-required and no mail until
 its extension is updated; revocation checks that read
@@ -969,7 +976,7 @@ docs/admin-auth-hardening.md in the project repository.
    carries adminAuth {action: "/atlas/admin/session/start", domain} next to
    its nonce. Use the tools/admin-*.js scripts, which do this.
  - Set $forced in atlas_domain() (lib/store.php) to your domain. Otherwise
-   the domain comes from the Host header.
+   the domain comes from the configuration described under "A note on identity".
  - Roster entries may carry "role": "moderator" (optionally with "worlds" and
    "operations" lists). A moderator can sign in but every admin route refuses
    it with 403 insufficient-role; only atlas/admin/moderation/grant.php and

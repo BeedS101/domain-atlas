@@ -6100,22 +6100,6 @@ async function main() {
     }
   }
 
-  // True when this balance of this domain's own was already spent for this trade leg by an earlier request that then
-  // stopped (or whose answer was lost): the journal holds the committed leg for the same trade, new owner and
-  // quantity, and the presented credential is the genuine one for the party named. The ordinary "still live" checks
-  // cannot apply to it any more, and a retry resumes with the recorded result instead.
-  // True when a trade leg for this balance has committed in this domain's journal (whoever it was for).
-  async function tradeLegSettled(tradeId, credential) {
-    const requestId = tradeLegRequestId(tradeId, credential.id);
-    const release = await acquireSpendLock('rid:' + requestId, SPEND_LOCK_WAIT_MS);
-    if (!release) return false;
-    try {
-      txnRecoverKey(requestId);
-      return replayPeek(requestId, 'trade-leg') !== null;
-    } finally {
-      release();
-    }
-  }
   // A claim whose first leg is settled by a foreign issuer leaves a record before anything is relayed, so a retry after a
   // lost answer can tell its own earlier attempt from a balance that was spent some other way.
   function tradeAttemptId(tradeId, credentialId) {
@@ -6136,6 +6120,10 @@ async function main() {
     if (!prior || prior.conflict) return false;
     return (await verifyForeignAssetCredential(credential, true)) === true;
   }
+  // True when this balance of this domain's own was already spent for this trade leg by an earlier request that then
+  // stopped (or whose answer was lost): the journal holds the committed leg for the same trade, new owner and quantity,
+  // and the presented credential is the genuine one for the party named. The ordinary "still live" checks cannot apply to
+  // it any more, and a retry resumes with the recorded result instead.
   async function tradeLegResumable(tradeId, credential, ownerPublicKey, cls, spendQuantity, newOwnerPublicKey, mail) {
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0' || !credential.issuer || credential.issuer.domain !== DOMAIN) return false;
     if (!(await verifyOwnCredentialSignature(credential, assetPayloadOf(credential)))) return false;
@@ -6153,24 +6141,15 @@ async function main() {
     }
   }
 
-  // Compensates a claimant whose balance was already spent by
-  // fulfillTradeSideSettlement() above (the B side, paid first) when the
-  // OTHER leg (the A side, paid second) then fails — a network drop, a
-  // foreign domain timing out on relay-settle, or any other error after
-  // B's spend already committed. Only safe to call when B's side settled
-  // LOCALLY (issuerBDomain === DOMAIN): this domain is then the one that
-  // both produced `aReceived` (minted to the poster, who was never told
-  // about it — the mail notice carrying it is built by the A-side
-  // settlement that just failed, so it was never sent) and can safely
-  // undo it, since nothing else has touched it in between. A spend on a
-  // FOREIGN domain can't be refunded this way — that would need a new
-  // cross-domain refund-relay endpoint this protocol doesn't have yet
-  // (see the trade/claim route's own comment on this gap).
+  // Gives a claimant their value back when the other leg of the trade cannot settle, after fulfillTradeSideSettlement()
+  // above already spent the claimant's balance (the B side, paid first). Runs on the domain that issued that balance:
+  // from the Trading Station's own claim handler when it is that domain, otherwise from /atlas/trade/relay-refund when
+  // the station asks. Only that domain can do it: it produced aReceived (minted to the poster, who was never told about
+  // it, since the mail notice carrying it belongs to the A-side settlement that did not happen) and can revoke it.
   //
-  // Revokes `aReceived` (the never-delivered credit to the poster) and
-  // mints its equivalent back to the claimant: a fresh balance for a
-  // fungible class, or the exact same unique item (transferred back,
-  // preserving its instance state) for a non-fungible one.
+  // Revokes aReceived and mints its equivalent back to the claimant: a fresh balance for a fungible class, or the exact
+  // same unique item (transferred back, preserving its instance state) for a non-fungible one. The refund is a journalled
+  // replacement keyed by aReceived and the claimant, so asking again returns the same credential.
   async function refundFailedSecondLeg(aReceived, offerB, claimantPublicKey) {
     const params = { claimantPublicKey };
     const requestId = derivedRequestId('trade-refund', aReceived.id, params);
@@ -6197,6 +6176,35 @@ async function main() {
     }
   }
 
+  // What this domain's journal records for one of its own balances spent for a trade leg: { state: 'none' } when no leg
+  // committed, { state: 'settled', leg } while the credit minted for the counterparty stands, and { state: 'refunded',
+  // leg, refund } once a refund took that credit back and paid the balance's owner. { state: 'busy' } when another
+  // request holds the leg. A refunded leg is never settled or replayed again: the counterparty's credit no longer exists.
+  async function tradeLegOutcome(tradeId, credential) {
+    const legId = tradeLegRequestId(tradeId, credential.id);
+    let leg = null;
+    const legRelease = await acquireSpendLock('rid:' + legId, SPEND_LOCK_WAIT_MS);
+    if (!legRelease) return { state: 'busy' };
+    try {
+      txnRecoverKey(legId);
+      leg = replayPeek(legId, 'trade-leg');
+    } finally {
+      legRelease();
+    }
+    if (!leg || !leg.received) return { state: 'none' };
+    const refundId = derivedRequestId('trade-refund', leg.received.id, { claimantPublicKey: credential.owner.publicKey });
+    const refundRelease = await acquireSpendLock('rid:' + refundId, SPEND_LOCK_WAIT_MS);
+    if (!refundRelease) return { state: 'busy' };
+    try {
+      txnRecoverKey(refundId);
+      const refunded = replayPeek(refundId, 'trade-refund');
+      if (refunded && refunded.refund) return { state: 'refunded', leg, refund: refunded.refund };
+    } finally {
+      refundRelease();
+    }
+    return { state: 'settled', leg };
+  }
+
   // SPEC.md §7 v1.29 — the OUTBOUND half of the /atlas/trade/relay-lock
   // route below, called by this server's own /atlas/trade/claim handler
   // whenever a trade touches a balance issued by a domain other than this
@@ -6216,8 +6224,13 @@ async function main() {
     } catch (err) {
       throw new Error(err instanceof OutboundError ? err.message : 'could not reach ' + domain);
     }
-    const body = await (async () => { try { return res.json(); } catch (e) { return {}; } })();
-    if (!res.ok) throw new Error(body.error || (domain + ' refused the trade lock (HTTP ' + res.status + ')'));
+    const body = await (async () => { try { return await res.json(); } catch (e) { return {}; } })();
+    if (!res.ok) {
+      // A leg that was refunded is answered with the refund itself, so a claim that lost its own record still hands it over.
+      const refused = new Error((body && body.error) || (domain + ' refused the trade lock (HTTP ' + res.status + ')'));
+      if (body && body.code === 'trade-refunded' && body.refund && typeof body.refund === 'object') Object.assign(refused, { refund: body.refund, remainder: body.remainder || null });
+      throw refused;
+    }
     return body;
   }
 
@@ -6275,6 +6288,43 @@ async function main() {
       } catch (secondErr) {
         throw failure(firstErr.message + ' (retried once, also failed: ' + secondErr.message + ')', secondErr.definite);
       }
+    }
+  }
+
+  // Asks the issuer of the claimant's balance to undo the first leg of a trade whose second leg the poster's issuer
+  // refused: it revokes the credit it minted for the poster and pays the claimant the same value (see
+  // refundFailedSecondLeg()). The issuer records the refund, so asking again, as a retry after a lost answer does,
+  // returns the same credential. Resolves { refund, remainder }; rejects with `kind`: 'refused' when the issuer
+  // answered 400 or 403 (it refunded nothing), 'unsupported' when it has no such endpoint (an older issuer), and
+  // 'unknown' for anything else, including a refund that may have happened.
+  async function relayTradeRefund(domain, tradeId, credential) {
+    const attestation = { relayingDomain: DOMAIN, tradeId, credentialId: credential.id };
+    const attestationSignature = await sign(attestation);
+    const failure = (message, kind) => Object.assign(new Error(message), { kind });
+    const attempt = async () => {
+      let res;
+      try {
+        res = await peerRequest(domain, '/atlas/trade/relay-refund', { method: 'POST', body: { credential, attestation, attestationSignature } });
+      } catch (err) {
+        throw failure(err instanceof OutboundError ? err.message : 'could not reach ' + domain, 'unknown');
+      }
+      let body = null;
+      try { body = await res.json(); } catch (e) { body = null; }
+      if (!res.ok) {
+        const kind = res.status === 404 || res.status === 405 ? 'unsupported' : (res.status === 400 || res.status === 403 ? 'refused' : 'unknown');
+        throw failure((body && body.error) || (domain + ' refused the trade refund (HTTP ' + res.status + ')'), kind);
+      }
+      const refund = body && body.status === 'refunded' ? body.refund : null;
+      const genuine = refund && typeof refund === 'object' && refund.owner && refund.owner.publicKey === credential.owner.publicKey
+        && refund.asset && refund.asset.class === credential.asset.class && refund.issuer && refund.issuer.domain === domain;
+      if (!genuine) throw failure(domain + ' gave no usable answer to the trade refund', 'unknown');
+      return { refund, remainder: body.remainder && typeof body.remainder === 'object' ? body.remainder : null };
+    };
+    try {
+      return await attempt();
+    } catch (firstErr) {
+      if (firstErr.kind !== 'unknown') throw firstErr;
+      return await attempt();
     }
   }
 
@@ -9551,8 +9601,8 @@ async function main() {
       // exactly like a reissue. A newly RECEIVED credential (of a class the
       // poster may never have held before, so there's no old id for it to
       // supersede) is instead attached to a system mail message addressed
-      // to that same old balance id — task #59's existing, tested
-      // gift-claim path (wallet.js's claimMailGift) already knows how to
+      // to that same old balance id — the gift-claim path
+      // (wallet.js's claimMailGift) already knows how to
       // absorb an already-fully-signed credential from a mail attachment,
       // so nothing new is needed on the receiving end at all. The claimant
       // is by definition live for this call, so their own side applies
@@ -9612,20 +9662,17 @@ async function main() {
         if (claimantShapeProblem) return sendJson(res, 400, { error: claimantShapeProblem });
 
         // Mirror check — the claimant's offer/want must exactly match what
-        // this listing wants/offers, same shape §7's own Match step uses.
-        // Unchanged by task #250 fourth follow-up's unique-item support: a
+        // this listing wants/offers, same shape §7's own Match step uses. A
         // non-fungible side's quantity is always exactly 1 on both ends
-        // (validateTradeSideShape enforces this at submit time already), so
-        // this plain equality check keeps working without needing to know
-        // or care which side is fungible.
+        // (validateTradeSideShape enforces this at submit time), so a plain
+        // equality check works whichever side is fungible.
         if (offerB.class !== wantA.class || offerB.quantity !== wantA.quantity ||
             wantB.class !== offerA.class || wantB.quantity !== offerA.quantity) {
           return sendJson(res, 400, { error: 'your intent does not mirror this listing\'s offer/want' });
         }
 
-        // Task #250 fourth follow-up: which check runs for each side is
-        // decided by that side's own presented balance's signed fungible
-        // flag — see /atlas/trade/submit's own comment on this same choice.
+        // Which check runs for each side is decided by that side's own
+        // presented balance's signed fungible flag, as in /atlas/trade/submit.
         const offerBIsUnique = !!(balanceB && balanceB.asset && balanceB.asset.fungible === false);
         // A claimant whose earlier attempt stopped after this balance was spent for this trade resumes from the recorded
         // result instead (tradeLegResumable).
@@ -9666,6 +9713,15 @@ async function main() {
         const tradeId = posted.id;
         const lockExpiresAt = new Date(Date.now() + 120000).toISOString();
 
+        // A trade whose first leg was refunded is finished: the poster's credit from it no longer exists, so the second
+        // leg must not run now even if the poster's issuer would accept it.
+        if (issuerBDomain === DOMAIN) {
+          const earlier = await tradeLegOutcome(tradeId, balanceB);
+          if (earlier.state === 'busy') return sendJson(res, 409, { error: 'this balance is being settled by another request - try again', code: 'busy' });
+          if (earlier.state === 'refunded') {
+            return answerClaim(502, { error: 'this trade could not be completed and your ' + offerB.quantity + ' ' + offerB.class + ' was refunded.', refund: earlier.refund, remainder: earlier.leg.remainder || null, code: 'claim-incomplete' });
+          }
+        }
         if (issuerBDomain !== DOMAIN) tradeAttemptMark(tradeId, balanceB, claimantPub, offerB.quantity);
 
         // Lock phase first, BEFORE either side mutates anything: if a
@@ -9676,6 +9732,7 @@ async function main() {
           if (issuerBDomain !== DOMAIN) await relayTradeLock(issuerBDomain, tradeId, balanceB, lockExpiresAt);
           if (issuerADomain !== DOMAIN) await relayTradeLock(issuerADomain, tradeId, balanceA, lockExpiresAt);
         } catch (err) {
+          if (err.refund) return answerClaim(502, { error: 'this trade could not be completed and your ' + offerB.quantity + ' ' + offerB.class + ' was refunded by ' + issuerBDomain + '.', refund: err.refund, remainder: err.remainder || null, code: 'claim-incomplete' });
           return sendJson(res, 502, { error: 'could not lock both sides of this trade: ' + err.message, code: 'not-settled' });
         }
 
@@ -9693,7 +9750,8 @@ async function main() {
         } catch (err) {
           return sendJson(res, 502, { error: "could not settle the claimant's balance at " + issuerBDomain + ': ' + err.message, code: 'claim-unresolved' });
         }
-        const aReceived = bSide.received, bRemainder = bSide.remainder;
+        const aReceived = bSide.received;
+        let bRemainder = bSide.remainder;
 
         const mailNotice = {
           subject: 'Listing claimed at ' + DOMAIN,
@@ -9706,12 +9764,9 @@ async function main() {
             ? await fulfillTradeSideSettlement(balanceA, offerA.quantity, claimantPub, mailNotice, tradeId)
             : await relayTradeSettle(issuerADomain, tradeId, balanceA, offerA.quantity, claimantPub, aReceived);
         } catch (err) {
-          // B's side already settled above — balanceB is genuinely spent
-          // server-side even though this request is about to report
-          // failure. Refund it when that spend was local (see
-          // refundFailedSecondLeg()'s own comment); a foreign spend has
-          // no refund path yet, so the claimant is told plainly instead
-          // of being left to discover a silently-revoked balance later.
+          // B's side already settled above, so balanceB is spent even though this request is about to report failure. The
+          // issuer of that balance refunds it: this domain when it issued it (refundFailedSecondLeg()), otherwise the
+          // issuer, asked through relayTradeRefund().
           // A foreign issuer whose outcome is unknown may have settled the poster's balance. Refunding then would pay the
           // claimant twice, so nothing is undone and the stored outcome is left open: the same claim asked again finds the
           // issuer's recorded result (or settles it), or a definite refusal, which is refunded.
@@ -9727,7 +9782,21 @@ async function main() {
               refundNote = ' — automatic refund also failed (' + refundErr.message + '); contact the domain operator, your balance may be stuck.';
             }
           } else {
-            refundNote = ' — your balance was spent at ' + issuerBDomain + ' and cannot be automatically refunded from here; contact the domain operator.';
+            // The claimant's balance was spent by another domain: it undoes its own first leg and pays the claimant back.
+            try {
+              const relayed = await relayTradeRefund(issuerBDomain, tradeId, balanceB);
+              refund = relayed.refund;
+              if (relayed.remainder) bRemainder = relayed.remainder;
+              refundNote = ' — your ' + offerB.quantity + ' ' + offerB.class + ' was refunded by ' + issuerBDomain + '.';
+            } catch (refundErr) {
+              if (refundErr.kind === 'refused') {
+                refundNote = ' — your balance was spent at ' + issuerBDomain + ' and it refused to refund it (' + refundErr.message + '); contact the domain operator.';
+              } else {
+                // The refund may or may not have happened, or the issuer cannot do it yet. Nothing is stored, so the same claim
+                // asked again finds the recorded refund, or asks for it again.
+                return sendJson(res, 502, { error: "could not settle the poster's balance at " + issuerADomain + ' (' + err.message + ') and the refund at ' + issuerBDomain + ' is not confirmed (' + refundErr.message + ') - ask again with the same claim, or contact the domain operator; nothing has been duplicated', remainder: bRemainder || null, code: 'claim-unresolved' });
+              }
+            }
           }
           // remainder: the change the first leg already minted for the claimant (null when the balance was spent exactly).
           // It is the same credential, so the stored outcome returns it again on a repeated request.
@@ -9775,7 +9844,9 @@ async function main() {
         { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
         // A balance already spent by this very trade's settlement is not an error: the relaying domain is asking again
         // after a lost answer, and the settle that follows replays the recorded result.
-        const settledForThisTrade = isRevoked(credential.id) && await tradeLegSettled(attestation.tradeId, credential);
+        const legOutcome = isRevoked(credential.id) ? await tradeLegOutcome(attestation.tradeId, credential) : { state: 'none' };
+        if (legOutcome.state === 'busy') return sendJson(res, 409, { error: 'this balance is being settled by another request - try again', code: 'busy' });
+        const settledForThisTrade = legOutcome.state === 'settled' || legOutcome.state === 'refunded';
         if (isRevoked(credential.id) && !settledForThisTrade) return sendJson(res, 400, { error: 'that balance has already been revoked' });
         // Any existing suspension that isn't THIS exact trade's own lock —
         // whether it's a different pending trade or an unrelated admin
@@ -9802,6 +9873,9 @@ async function main() {
         // findSuspension() already gives every other suspension in this
         // file, instead of standing up a second code path that itself
         // needs to be reachable and trusted to run.
+        if (legOutcome.state === 'refunded') {
+          return sendJson(res, 400, { error: 'this trade leg was refunded', code: 'trade-refunded', refund: legOutcome.refund, remainder: legOutcome.leg.remainder || null });
+        }
         if (settledForThisTrade) return sendJson(res, 200, { status: 'locked', expiresAt: attestation.expiresAt, settled: true });
         suspend(credential.id, 'trade-lock:' + attestation.tradeId, attestation.expiresAt);
         console.log('Trade balance locked for', relayingDomain + ':', credential.asset.class, credential.id);
@@ -9862,6 +9936,11 @@ async function main() {
         // recover the actual result to relay onward. Replaying the
         // recorded result instead means a lost response is actually
         // recoverable rather than looking identical to "never happened."
+        const legOutcome = await tradeLegOutcome(tradeId, credential);
+        if (legOutcome.state === 'busy') return sendJson(res, 503, { error: 'this balance is being settled by another request - try again', code: 'busy' });
+        if (legOutcome.state === 'refunded') {
+          return sendJson(res, 400, { error: 'this trade leg was refunded', code: 'trade-refunded', refund: legOutcome.refund, remainder: legOutcome.leg.remainder || null });
+        }
         const existingResult = findRelaySettleResult(tradeId, credential.id);
         if (existingResult) {
           console.log('Trade balance relay-settle REPLAYED (idempotent retry) for', relayingDomain + ':', credential.asset.class, credential.id);
@@ -9934,6 +10013,48 @@ async function main() {
         recordRelaySettleResult(tradeId, credential.id, settled.received, settled.remainder);
         console.log('Trade balance relay-settled for', relayingDomain + ':', credential.asset.class, credential.id);
         return sendJson(res, 200, { status: 'settled', received: settled.received, remainder: settled.remainder });
+      }
+
+      // POST /atlas/trade/relay-refund — the UNDO half of a cross-domain Trading Station settlement. The first leg of a
+      // trade spent a balance this domain issued and minted a credit for the poster. When the poster's issuer then
+      // refuses the second leg for good, the station asks this domain to take that credit back and pay the balance's own
+      // owner the same value, so the claimant is neither out of pocket nor paid twice. Same attestation-and-verify shape
+      // and the same trusted-peer gate as /atlas/trade/relay-lock and /atlas/trade/relay-settle. The refund goes to the
+      // owner named by the presented credential, never to a party the attestation names, and only for a leg this
+      // domain's own journal shows as settled for this trade. Recorded as a journalled replacement, so asking again
+      // returns the same credential.
+      if (req.method === 'POST' && req.url === '/atlas/trade/relay-refund') {
+        const { credential, attestation, attestationSignature } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !attestation || !attestationSignature) return sendJson(res, 400, { error: 'credential, attestation, and attestationSignature are all required' });
+        if (!credential.asset || !credential.issuer || credential.issuer.domain !== DOMAIN || !credential.owner || !credential.owner.publicKey) return sendJson(res, 400, { error: 'this domain did not issue that credential' });
+        if (attestation.credentialId !== credential.id) return sendJson(res, 400, { error: 'attestation does not name the credential it was sent with' });
+        const relayingDomain = attestation.relayingDomain;
+        const tradeId = attestation.tradeId;
+        if (!relayingDomain || !tradeId) return sendJson(res, 400, { error: 'attestation must carry relayingDomain and tradeId' });
+        if (!isTrustedTradePeer(relayingDomain)) return sendJson(res, 403, { error: 'this domain does not accept trade relays from ' + relayingDomain });
+
+        const ownSignatureOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+        if (!ownSignatureOk) return sendJson(res, 400, { error: 'credential signature does not check out against this domain\'s own key' });
+        let relayingDomainKey;
+        try {
+          relayingDomainKey = await fetchDomainPublicKey(relayingDomain);
+        } catch (err) {
+          return sendJson(res, 502, { error: 'could not verify ' + relayingDomain + '\'s own published key: ' + err.message });
+        }
+        if (!(await verifyDomainSignature(relayingDomainKey, attestation, attestationSignature))) return sendJson(res, 400, { error: relayingDomain + '\'s attestation signature does not check out' });
+
+        const outcome = await tradeLegOutcome(tradeId, credential);
+        if (outcome.state === 'busy') return sendJson(res, 409, { error: 'this balance is being settled by another request - try again', code: 'busy' });
+        if (outcome.state === 'refunded') return sendJson(res, 200, { status: 'refunded', refund: outcome.refund, remainder: outcome.leg.remainder || null });
+        if (outcome.state === 'none' || !isRevoked(credential.id)) return sendJson(res, 400, { error: 'no settled leg of this trade is recorded for that balance, so there is nothing to refund' });
+        let refund;
+        try {
+          refund = await refundFailedSecondLeg(outcome.leg.received, { class: outcome.leg.received.asset.class, quantity: outcome.leg.received.quantity }, credential.owner.publicKey);
+        } catch (err) {
+          return sendJson(res, 409, { error: 'could not refund this trade leg: ' + err.message });
+        }
+        console.log('Trade leg refunded for', relayingDomain + ':', credential.asset.class, credential.id);
+        return sendJson(res, 200, { status: 'refunded', refund, remainder: outcome.leg.remainder || null });
       }
 
       // v1.14 (SPEC.md §7) — a poster withdraws their own still-open

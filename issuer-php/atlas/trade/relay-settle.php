@@ -74,6 +74,11 @@ if (!$attestationOk) {
 // no way to recover the actual result to relay onward. Replaying the
 // recorded result instead means a lost response is actually recoverable
 // rather than looking identical to "never happened."
+$legOutcome = atlas_trade_leg_outcome($tradeId, $credential);
+if ($legOutcome['state'] === 'busy') send_json(503, ['error' => 'this balance is being settled by another request - try again', 'code' => 'busy']);
+if ($legOutcome['state'] === 'refunded') {
+  send_json(400, ['error' => 'this trade leg was refunded', 'code' => 'trade-refunded', 'refund' => $legOutcome['refund'], 'remainder' => $legOutcome['leg']['remainder'] ?? null]);
+}
 $existingResult = find_relay_settle_result($tradeId, $credential['id']);
 if ($existingResult) {
   send_json(200, ['status' => 'settled', 'received' => $existingResult['received'], 'remainder' => $existingResult['remainder']]);

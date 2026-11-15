@@ -10,8 +10,8 @@
 // consumed by wallet.js's processAssetUpdates exactly like a reissue. A
 // newly RECEIVED credential (of a class the poster may never have held
 // before, so there's no old id for it to supersede) is instead attached to
-// a system mail message addressed to that same old balance id — task #59's
-// existing, tested gift-claim path (wallet.js's claimMailGift) already
+// a system mail message addressed to that same old balance id — the
+// gift-claim path (wallet.js's claimMailGift) already
 // knows how to absorb an already-fully-signed credential from a mail
 // attachment, so nothing new is needed on the receiving end at all. The
 // claimant is by definition live for this call, so their own side applies
@@ -114,19 +114,17 @@ $claimantShapeProblem = validate_trade_side_shape($offerB, 'offer') ?? validate_
 if ($claimantShapeProblem) send_json(400, ['error' => $claimantShapeProblem]);
 
 // Mirror check — the claimant's offer/want must exactly match what this
-// listing wants/offers, same shape §7's own Match step uses. Unchanged by
-// task #250 fourth follow-up's unique-item support: a non-fungible side's
-// quantity is always exactly 1 on both ends (validate_trade_side_shape
-// enforces this at submit time already), so this plain equality check
-// keeps working without needing to know or care which side is fungible.
+// listing wants/offers, same shape §7's own Match step uses. A non-fungible
+// side's quantity is always exactly 1 on both ends (validate_trade_side_shape
+// enforces this at submit time), so a plain equality check works whichever
+// side is fungible.
 if ($offerB['class'] !== $wantA['class'] || $offerB['quantity'] !== $wantA['quantity'] ||
     $wantB['class'] !== $offerA['class'] || $wantB['quantity'] !== $offerA['quantity']) {
   send_json(400, ['error' => "your intent does not mirror this listing's offer/want"]);
 }
 
-// Task #250 fourth follow-up: which check runs for each side is decided by
-// that side's own presented balance's signed fungible flag — see
-// atlas/trade/submit.php's own comment on this same choice.
+// Which check runs for each side is decided by that side's own presented
+// balance's signed fungible flag, as in atlas/trade/submit.php.
 $offerBIsUnique = isset($balanceB['asset']['fungible']) && $balanceB['asset']['fungible'] === false;
 // A claimant whose earlier attempt stopped after this balance was spent for this trade resumes from the recorded result
 // instead (atlas_trade_leg_resumable()).
@@ -164,6 +162,15 @@ $issuerADomain = $balanceA['issuer']['domain'];
 $issuerBDomain = $balanceB['issuer']['domain'];
 $lockExpiresAt = gmdate('Y-m-d\TH:i:s\Z', time() + 120);
 
+// A trade whose first leg was refunded is finished: the poster's credit from it no longer exists, so the second leg must not
+// run now even if the poster's issuer would accept it.
+if ($issuerBDomain === atlas_domain()) {
+  $earlier = atlas_trade_leg_outcome($tradeId, $balanceB);
+  if ($earlier['state'] === 'busy') send_json(409, ['error' => 'this balance is being settled by another request - try again', 'code' => 'busy']);
+  if ($earlier['state'] === 'refunded') {
+    atlas_answer_claim($claimRequestId, $balance['id'] ?? null, $claimParams, 502, ['error' => 'this trade could not be completed and your ' . $offerB['quantity'] . ' ' . $offerB['class'] . ' was refunded.', 'refund' => $earlier['refund'], 'remainder' => $earlier['leg']['remainder'] ?? null, 'code' => 'claim-incomplete']);
+  }
+}
 if ($issuerBDomain !== atlas_domain()) atlas_trade_attempt_mark($tradeId, $balanceB, $claimantPub, $offerB['quantity']);
 
 // Lock phase first, BEFORE either side mutates anything: if a foreign
@@ -173,6 +180,8 @@ if ($issuerBDomain !== atlas_domain()) atlas_trade_attempt_mark($tradeId, $balan
 if ($issuerBDomain !== atlas_domain()) {
   try {
     atlas_relay_trade_lock($kp, $issuerBDomain, $tradeId, $balanceB, $lockExpiresAt);
+  } catch (AtlasTradeRefundedException $e) {
+    atlas_answer_claim($claimRequestId, $balance['id'] ?? null, $claimParams, 502, ['error' => 'this trade could not be completed and your ' . $offerB['quantity'] . ' ' . $offerB['class'] . ' was refunded by ' . $issuerBDomain . '.', 'refund' => $e->refund, 'remainder' => $e->remainder, 'code' => 'claim-incomplete']);
   } catch (Exception $e) {
     send_json(502, ['error' => "could not lock the claimant's balance at " . $issuerBDomain . ': ' . $e->getMessage(), 'code' => 'not-settled']);
   }
@@ -218,12 +227,9 @@ try {
   if ($issuerADomain !== atlas_domain() && !($e instanceof AtlasRelayOutcomeException && $e->definite)) {
     send_json(502, ['error' => "could not confirm the poster's settlement at " . $issuerADomain . ' (' . $e->getMessage() . ') - ask again with the same claim; nothing has been refunded or lost', 'code' => 'claim-unresolved']);
   }
-  // B's side already settled above — balanceB is genuinely spent
-  // server-side even though this request is about to report failure.
-  // Refund it when that spend was local (see refund_failed_second_leg()'s
-  // own comment in lib/bootstrap.php); a foreign spend has no refund path
-  // yet, so the claimant is told plainly instead of being left to
-  // discover a silently-revoked balance later.
+  // B's side already settled above, so balanceB is spent even though this request is about to report failure. The issuer of
+  // that balance refunds it: this domain when it issued it (refund_failed_second_leg()), otherwise the issuer, asked
+  // through atlas_relay_trade_refund().
   $refund = null;
   if ($issuerBDomain === atlas_domain()) {
     try {
@@ -233,7 +239,21 @@ try {
       $refundNote = ' — automatic refund also failed (' . $refundErr->getMessage() . '); contact the domain operator, your balance may be stuck.';
     }
   } else {
-    $refundNote = ' — your balance was spent at ' . $issuerBDomain . ' and cannot be automatically refunded from here; contact the domain operator.';
+    // The claimant's balance was spent by another domain: it undoes its own first leg and pays the claimant back.
+    try {
+      $relayed = atlas_relay_trade_refund($kp, $issuerBDomain, $tradeId, $balanceB);
+      $refund = $relayed['refund'];
+      if ($relayed['remainder'] !== null) $bRemainder = $relayed['remainder'];
+      $refundNote = ' — your ' . $offerB['quantity'] . ' ' . $offerB['class'] . ' was refunded by ' . $issuerBDomain . '.';
+    } catch (AtlasRelayRefundException $refundErr) {
+      if ($refundErr->kind === 'refused') {
+        $refundNote = ' — your balance was spent at ' . $issuerBDomain . ' and it refused to refund it (' . $refundErr->getMessage() . '); contact the domain operator.';
+      } else {
+        // The refund may or may not have happened, or the issuer cannot do it yet. Nothing is stored, so the same claim asked
+        // again finds the recorded refund, or asks for it again.
+        send_json(502, ['error' => "could not settle the poster's balance at " . $issuerADomain . ' (' . $e->getMessage() . ') and the refund at ' . $issuerBDomain . ' is not confirmed (' . $refundErr->getMessage() . ') - ask again with the same claim, or contact the domain operator; nothing has been duplicated', 'remainder' => $bRemainder, 'code' => 'claim-unresolved']);
+      }
+    }
   }
   atlas_answer_claim($claimRequestId, $balance['id'] ?? null, $claimParams, 502, ['error' => "could not settle the poster's balance at " . $issuerADomain . ': ' . $e->getMessage() . $refundNote, 'refund' => $refund, 'remainder' => $bRemainder, 'code' => 'claim-incomplete']);
 }
