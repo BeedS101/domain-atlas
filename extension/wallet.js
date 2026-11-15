@@ -104,7 +104,7 @@ const AtlasWallet = (() => {
   // anything the person starts by hand still tries.
   function originIsDown(domainOrUrl) {
     let origin;
-    try { origin = netOrigin(String(domainOrUrl).startsWith('http') ? domainOrUrl : baseUrl(String(domainOrUrl))); } catch (err) { return false; }
+    try { origin = netOrigin(/^https?:\/\//i.test(String(domainOrUrl)) ? domainOrUrl : baseUrl(String(domainOrUrl))); } catch (err) { return false; }
     const entry = origin && netDown.get(origin);
     if (!entry) return false;
     if (Date.now() >= entry.until) return false;
@@ -135,18 +135,139 @@ const AtlasWallet = (() => {
     }
   }
 
-  // Manifest/credential "domain" fields are bare hostnames (no scheme) per
-  // the spec — something has to guess a protocol to actually fetch from
-  // them. Guessing http:// unconditionally broke real HTTPS deployments:
-  // a page loaded over https fetching an http:// issuer endpoint is mixed
-  // content, and Chrome silently blocks it (fetch() rejects with a bare
-  // "Failed to fetch", no server round-trip at all). Real domains are
-  // https by default; localhost/127.0.0.1 (our own test/demo servers, and
-  // most local dev setups) stay on http since they typically don't run TLS.
+  // ---------- wallet-facing domain references ----------
+  //
+  // An issuer, Trading Station, Post Office, ledger or world "domain" is a bare host with an optional port (SPEC.md:
+  // manifest and credential domain fields carry no scheme). One validator, domainProblem(), decides whether such a string
+  // may be turned into a request address, and baseUrl() is the only place a domain becomes one. Anything that is not a
+  // plain host[:port] is refused before any request is made: schemes, paths (including a lone trailing slash),
+  // credentials, queries, fragments, whitespace, backslashes, percent escapes, non-ASCII characters and numeric
+  // shorthand such as 127.1, 2130706433 or 0x7f.1 that a URL parser would turn into an address the person never saw.
+  //
+  // Scheme: https for every public name; plain http only for loopback (localhost, *.localhost, 127.0.0.1, [::1]) and for
+  // hosts the person approved as development environments (approveDevelopmentHost). Private, link-local and other
+  // reserved IPv4 addresses and single-label names are refused unless approved, so a credential cannot point the wallet at
+  // the person's router, a cloud metadata address or an intranet host.
+  //
+  // This is the domain-only interface. Interfaces that take a complete URL by design (manifest and scene URLs, the
+  // presence service, the call service address and its own devAllowHttp switch) are separate and unchanged.
+  const DEV_HOSTS_KEY = 'atlasDevHosts';
+  let devHosts = new Set(); // approved development hosts, lower-case host[:port]
+
+  const DNS_LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
+  const DOMAIN_RE = new RegExp('^(\\[::1\\]|' + DNS_LABEL + '(?:\\.' + DNS_LABEL + ')*)(?::([1-9]\\d{0,4}))?$', 'i');
+  const IPV4_RE = /^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})$/;
+
+  function privateOrReservedIPv4(o) {
+    const [a, b, c] = o;
+    return a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 0 && c === 0) || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19));
+  }
+
+  // { host, port, hostPort, kind: 'loopback' | 'public' | 'private' | 'name' } or { problem }.
+  // kind 'private' is a reserved IPv4 address, 'name' a single-label host; both need a development approval.
+  function parseDomainReference(domain) {
+    if (typeof domain !== 'string' || domain.length === 0) return { problem: 'a domain is required' };
+    if (domain.length > 260) return { problem: 'it is too long' };
+    const m = DOMAIN_RE.exec(domain);
+    if (!m) return { problem: 'it must be a host name with an optional port, with no scheme, path, credentials, query or fragment' };
+    const host = m[1].toLowerCase();
+    const port = m[2] === undefined ? null : Number(m[2]);
+    if (port !== null && port > 65535) return { problem: 'the port is out of range' };
+    if (host.length > 253 && host[0] !== '[') return { problem: 'it is too long' };
+    const hostPort = port === null ? host : host + ':' + port;
+    if (host === '[::1]') return { host, port, hostPort, kind: 'loopback' };
+    const ip = IPV4_RE.exec(host);
+    if (ip) {
+      const octets = ip.slice(1).map(Number);
+      if (octets.some((n) => n > 255)) return { problem: 'it is not a valid IPv4 address' };
+      if (host === '127.0.0.1') return { host, port, hostPort, kind: 'loopback' };
+      return { host, port, hostPort, kind: privateOrReservedIPv4(octets) ? 'private' : 'public' };
+    }
+    const labels = host.split('.');
+    // A last label of digits only is numeric shorthand for an address (127.1, 2130706433), never a name.
+    if (/^\d+$/.test(labels[labels.length - 1])) return { problem: 'it looks like an IP address but is not a dotted IPv4 address' };
+    if (host === 'localhost' || host.endsWith('.localhost')) return { host, port, hostPort, kind: 'loopback' };
+    return { host, port, hostPort, kind: labels.length === 1 ? 'name' : 'public' };
+  }
+
+  // Returns a short reason the wallet will not contact this domain, or null if it may.
+  function domainProblem(domain) {
+    const p = parseDomainReference(domain);
+    if (p.problem) return p.problem;
+    if ((p.kind === 'private' || p.kind === 'name') && !devHosts.has(p.hostPort)) {
+      return p.kind === 'private' ? 'it is a private or reserved address (approve it as a development host to use it)' : 'it is a single-label name (approve it as a development host to use it)';
+    }
+    return null;
+  }
+
   function baseUrl(domain) {
-    if (domain.startsWith('http')) return domain.replace(/\/$/, '');
-    const isLocalHost = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(domain);
-    return ((isLocalHost ? 'http://' : 'https://') + domain).replace(/\/$/, '');
+    const p = parseDomainReference(domain);
+    let problem = p.problem || domainProblem(domain);
+    let url = null;
+    if (!problem) {
+      const plainHttp = p.kind === 'loopback' || devHosts.has(p.hostPort);
+      url = (plainHttp ? 'http://' : 'https://') + p.hostPort;
+      // Whatever the URL parser makes of it must be exactly this host and port, with nothing else.
+      try {
+        const u = new URL(url);
+        const defaultPort = u.protocol === 'https:' ? 443 : 80;
+        const samePort = p.port === null || p.port === defaultPort ? u.port === '' : u.port === String(p.port);
+        if (u.hostname !== p.host || !samePort) problem = 'it does not resolve to the host it names';
+        else if (u.username || u.password || u.search || u.hash || u.pathname !== '/') problem = 'it carries more than a host';
+      } catch (err) { problem = 'it is not a valid address'; }
+    }
+    if (problem) {
+      const shown = typeof domain === 'string' ? JSON.stringify(domain.slice(0, 80)) : String(typeof domain);
+      throw Object.assign(new Error('The wallet will not contact ' + shown + ': ' + problem + '.'), { code: 'bad-domain' });
+    }
+    return url;
+  }
+
+  function normalizeDevHostEntry(entry) {
+    const p = typeof entry === 'string' ? parseDomainReference(entry) : { problem: 'not a string' };
+    return p.problem ? null : p.hostPort;
+  }
+
+  function applyDevHosts(list) {
+    const next = new Set();
+    (Array.isArray(list) ? list : []).forEach((e) => { const h = normalizeDevHostEntry(e); if (h) next.add(h); });
+    devHosts = next;
+  }
+
+  // Development hosts are a device setting kept in extension storage; only extension pages can change them.
+  const devHostsReady = (async () => {
+    try {
+      const got = await chrome.storage.local.get(DEV_HOSTS_KEY);
+      applyDevHosts(got[DEV_HOSTS_KEY]);
+      if (chrome.storage.onChanged) chrome.storage.onChanged.addListener((changes, area) => { if (area === 'local' && changes[DEV_HOSTS_KEY]) applyDevHosts(changes[DEV_HOSTS_KEY].newValue); });
+    } catch (err) { /* no extension storage here: loopback only */ }
+  })();
+
+  async function getDevelopmentHosts() {
+    await devHostsReady;
+    return Array.from(devHosts).sort();
+  }
+
+  // Approving a host lets the wallet use plain http to it, and lets a private address or single-label name be used.
+  async function approveDevelopmentHost(hostPort) {
+    await devHostsReady;
+    const h = normalizeDevHostEntry(hostPort);
+    if (!h) throw new Error('That is not a host name or address with an optional port.');
+    const next = new Set(devHosts); next.add(h);
+    await chrome.storage.local.set({ [DEV_HOSTS_KEY]: Array.from(next).sort() });
+    devHosts = next;
+    return Array.from(next).sort();
+  }
+
+  async function removeDevelopmentHost(hostPort) {
+    await devHostsReady;
+    const h = normalizeDevHostEntry(hostPort);
+    const next = new Set(devHosts); if (h) next.delete(h);
+    await chrome.storage.local.set({ [DEV_HOSTS_KEY]: Array.from(next).sort() });
+    devHosts = next;
+    return Array.from(next).sort();
   }
 
   // ---------- identity (self) — local password-protected key ----------
@@ -11677,7 +11798,7 @@ const AtlasWallet = (() => {
     hasSyncedIdentityAvailable, restoreIdentityFromSync,
     getActivityLog, clearActivityLog,
     hideAsset, unhideAsset,
-    splitAsset, consolidateAsset, convertAsset, purchaseAsset, openChest, findChestKeys, chestStatus, studioUrl: (domain) => baseUrl(domain) + '/atlas/studio/',
+    splitAsset, consolidateAsset, convertAsset, purchaseAsset, openChest, findChestKeys, chestStatus, studioUrl: (domain) => baseUrl(domain) + '/atlas/studio/', baseUrl, domainProblem, getDevelopmentHosts, approveDevelopmentHost, removeDevelopmentHost,
     autoConsolidateAssetWallet, recoverPendingOperations, retryPendingOperation, recoverAfterUnlock, getPendingOperations, getRecoveredOperations, getPendingOpsQuarantine, getConsolidationStatus,
     getLoadout, loadItem, unloadItem,
     getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,
