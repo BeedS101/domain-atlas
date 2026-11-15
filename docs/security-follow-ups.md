@@ -71,13 +71,26 @@ that was not authorized for its own origin:
 - Switching the wallet window's identity does not change what any site is answered with.
 - A frame cannot use another page's bridge; only top frames get a bridge at all.
 
+Fixed after the audit: a site bound to an identity that was later removed (or exported away) used to be answered
+by the main identity without a prompt once no sub-identity was left. The binding is now kept as a marker
+(`writeSubIdentityVault` only drops unreadable entries), and `getSiteIdentity` answers `ask` for it, in the
+remembered vault and in the session-only store, whether one identity or the last one was removed. The site gets a
+key only after an explicit choice, which replaces the marker. No stored data is migrated. Sites that never had a
+binding keep the normal single-identity answer. Regression test: `test/manual-site-identity-removal.js`.
+
+- Markers are not listed among remembered sites and cannot be forgotten from the list; they count toward the
+  500-site limit and are dropped first when the table is full. Choosing an identity for the site replaces one.
+- A full backup carries the marker (`siteIdentities`) and a restore keeps it, so a restored wallet still asks.
+  Chrome sync merges (`mirrorSubIdentityVaultToSync`) do not carry markers for identities the receiving device
+  lacks; that device treats the site as it did before.
+- A session-only choice leaves no trace after locking, by design, so once the wallet is locked a site whose
+  session-only identity was removed is treated as a site with no binding.
+- A marker names the removed identity's public key. If that identity is restored (backup or import), the site is
+  bound to it again.
+- Bindings already dropped by earlier versions cannot be recovered, so those sites behave as they did.
+
 Observations, not exploitable by a page, left as they are:
 
-- Removing the last sub-identity returns the wallet to single-identity mode, so a site that was bound to it is
-  then answered by the main identity without a prompt (`writeSubIdentityVault` drops bindings to removed
-  identities, and `getSiteIdentity` answers `default` when no sub-identity exists). While another sub-identity
-  remains, the site asks again. The option is to keep a "bound to a removed identity" marker so such a site always
-  asks; it changes the single-identity behaviour and the stored binding format, so it needs a decision first.
 - The bridge denial cooldown lives in the service worker's memory and resets when the worker restarts. Prompts per
   origin are bounded by `BRIDGE_CONFIRM_MAX_PENDING`, so the effect is a few extra prompts, not a bypass.
 - For a site that has no binding in a wallet that has sub-identities the overlay follows the wallet window's

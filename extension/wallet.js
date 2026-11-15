@@ -720,10 +720,11 @@ const AtlasWallet = (() => {
   async function writeSubIdentityVault(account, vault) {
     const { atlasSubIdentities } = await chrome.storage.local.get('atlasSubIdentities');
     const all = atlasSubIdentities || {};
-    // A site binding never outlives the identity it points to.
+    // A binding to an identity that no longer exists is kept as a marker: getSiteIdentity answers it with `ask`, so
+    // the site never silently moves to another identity. Only unreadable entries are dropped.
     if (vault.siteBindings) {
       for (const [site, binding] of Object.entries(vault.siteBindings)) {
-        if (!binding || (binding.identity !== 'main' && !vault.identities.some((e) => e.publicKey === binding.identity))) delete vault.siteBindings[site];
+        if (!binding || typeof binding.identity !== 'string') delete vault.siteBindings[site];
       }
     }
     all[account.publicKey] = await encryptAtRest(account, SUB_IDENTITY_STORE, vault);
@@ -930,6 +931,13 @@ const AtlasWallet = (() => {
     return entry ? { kind: 'sub', id: entry.id, label: entry.label, publicKey: entry.publicKey } : null;
   }
 
+  // Makes room in a full binding table by dropping the markers of removed identities.
+  function dropRemovedBindings(account, vault) {
+    for (const [site, binding] of Object.entries(vault.siteBindings || {})) {
+      if (!siteTarget(account, vault, binding.identity)) delete vault.siteBindings[site];
+    }
+  }
+
   async function readSiteSession(account) {
     const { atlasSiteIdentitySession } = await chrome.storage.session.get('atlasSiteIdentitySession');
     const all = atlasSiteIdentitySession || {};
@@ -946,17 +954,22 @@ const AtlasWallet = (() => {
     const main = { kind: 'main', id: null, label: 'Main identity', publicKey: account.publicKey };
     if (account.mode !== 'local') return { state: 'default', ...main };
     const vault = await readSubIdentityVault(account);
+    // A binding whose identity is gone (removed, or exported away) stays a marker: the site was kept apart from the
+    // main identity on purpose, so it asks again instead of being answered by whatever is left.
+    let removedBinding = false;
     const bound = vault.siteBindings && vault.siteBindings[site];
     if (bound) {
       const target = siteTarget(account, vault, bound.identity);
       if (target) return { state: 'bound', remembered: true, ...target };
+      removedBinding = true;
     }
     const { mine } = await readSiteSession(account);
     if (mine[site]) {
       const target = siteTarget(account, vault, mine[site]);
       if (target) return { state: 'bound', remembered: false, ...target };
+      removedBinding = true;
     }
-    if (!vault.identities.length) return { state: 'default', ...main };
+    if (!vault.identities.length && !removedBinding) return { state: 'default', ...main };
     return { state: 'ask', publicKey: null };
   }
 
@@ -979,6 +992,7 @@ const AtlasWallet = (() => {
     const key = target.kind === 'main' ? 'main' : target.publicKey;
     if (remember) {
       vault.siteBindings = vault.siteBindings || {};
+      if (!vault.siteBindings[site] && Object.keys(vault.siteBindings).length >= SITE_BINDING_LIMIT) dropRemovedBindings(account, vault);
       if (!vault.siteBindings[site] && Object.keys(vault.siteBindings).length >= SITE_BINDING_LIMIT) throw new Error('Too many sites are remembered. Forget some first.');
       vault.siteBindings[site] = { identity: key, boundAt: new Date().toISOString() };
       await writeSubIdentityVault(account, vault);
@@ -6912,8 +6926,8 @@ const AtlasWallet = (() => {
       .map(([origin, b]) => ({ origin, identity: b.identity === 'main' ? 'main' : b.identity, boundAt: b.boundAt || null }));
   }
 
-  // Merges backed-up bindings into the vault: a site that already has a binding keeps it, and a binding whose
-  // identity is not in the vault is skipped.
+  // Merges backed-up bindings into the vault: a site that already has a binding keeps it. A binding whose identity
+  // is not in the vault is restored as a marker, so that site still asks.
   async function restoreSiteIdentities(account, entries) {
     let restored = 0;
     await withSubIdentityLock(async () => {
@@ -6924,7 +6938,7 @@ const AtlasWallet = (() => {
         let site;
         try { site = normalizeSiteOrigin(e.origin); } catch (err) { continue; }
         if (vault.siteBindings[site] || Object.keys(vault.siteBindings).length >= SITE_BINDING_LIMIT) continue;
-        if (!siteTarget(account, vault, e.identity)) continue;
+        if (!siteTarget(account, vault, e.identity) && !/^[A-Za-z0-9_-]{16,200}$/.test(e.identity)) continue;
         vault.siteBindings[site] = { identity: e.identity === account.publicKey ? 'main' : e.identity, boundAt: typeof e.boundAt === 'string' ? e.boundAt : new Date().toISOString() };
         restored++;
       }

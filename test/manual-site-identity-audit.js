@@ -4,7 +4,7 @@
 // Three origins (localhost, 127.0.0.1, 127.0.0.2) are three sites on one throw-away issuer. Nothing here touches a
 // live site.
 //
-// Run with a display, e.g.:  xvfb-run -a node test/manual-site-identities.js
+// Run with a display, e.g.:  xvfb-run -a node test/manual-site-identity-audit.js
 
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -192,11 +192,13 @@ async function startIssuer() {
     const chosen = await chooseMain;
     check('choosing the main identity answers with it and remembers the choice', chosen.publicKey === main && (await W(async (o) => AtlasWallet.getSiteIdentity(o), SITE_A)).state === 'bound');
 
-    console.log('--- with no sub-identity left the wallet is in single-identity mode ---');
+    console.log('--- with no sub-identity left, a site that was bound to one still asks ---');
     await W(async (id) => AtlasWallet.removeSubIdentity(id), shopping.id);
     check('the account has only its main identity', (await W(() => AtlasWallet.listSubIdentities())).length === 0);
-    const single = await W(async (o) => AtlasWallet.getSiteIdentity(o), SITE_B);
-    check('a site then gets the only identity there is, with no prompt', single.state === 'default' && single.publicKey === main, single);
+    const orphaned = await W(async (o) => AtlasWallet.getSiteIdentity(o), SITE_B);
+    check('site B, bound to the removed identity, is not given the main identity', orphaned.state === 'ask' && !orphaned.publicKey, orphaned);
+    const fresh = await W(async (o) => AtlasWallet.getSiteIdentity(o), SITE_C);
+    check('a site that never had a binding gets the only identity there is, with no prompt', fresh.state === 'default' && fresh.publicKey === main, fresh);
 
     console.log(failures ? '\n' + failures + ' CHECK(S) FAILED' : '\nALL CHECKS PASSED');
   } finally {
