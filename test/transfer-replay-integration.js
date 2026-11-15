@@ -118,9 +118,15 @@ const send = (l, body) => l.postRaw('/atlas/asset/transfer', body);
     const r = await send(l, transferBody(a, cred, b, { omitRequestId: true }));
     assert.equal(r.status, 200, r.text);
     assert.equal(r.json.credential.owner.publicKey, b.publicKeyB64);
+    // The same request sent again (an answer that never arrived) gets the first result back: no second credential.
     const again = await send(l, transferBody(a, cred, b, { omitRequestId: true }));
-    assert.equal(again.status, 400, 'a second send of the spent original is refused');
-    assert.equal(again.json.code, 'revoked');
+    assert.equal(again.status, 200, again.text);
+    assert.equal(again.json.credential.id, r.json.credential.id, 'the repeat returns the recorded credential');
+    // A different recipient for the spent original is refused.
+    const c = makeIdentity('raw-ecdsa');
+    const other = await send(l, transferBody(a, cred, c, { omitRequestId: true }));
+    assert.equal(other.status, 400, 'a second send of the spent original to someone else is refused');
+    assert.equal(other.json.code, 'revoked');
   });
 
   await test('a transfer to oneself is refused and spends nothing', async () => {

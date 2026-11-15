@@ -103,9 +103,9 @@ function startNodeServer(bundleDir, port, domain, stateDir, docrootDir) {
 function injectUnconditionalSettleFailure(bundleDir) {
   const serverPath = path.join(bundleDir, 'server.js');
   let src = fs.readFileSync(serverPath, 'utf8');
-  const marker = "const settled = await fulfillTradeSideSettlement(credential, spendQuantity, newOwnerPublicKey, mailNotice);";
+  const marker = "const settled = await fulfillTradeSideSettlement(credential, spendQuantity, newOwnerPublicKey, mailNotice, tradeId);";
   if (!src.includes(marker)) throw new Error('marker not found in server.js — shape changed, update this test');
-  src = src.replace(marker, "return sendJson(res, 500, { error: 'INJECTED: simulated relay-settle failure for this test only' });\n        " + marker);
+  src = src.replace(marker, "return sendJson(res, 400, { error: 'INJECTED: simulated relay-settle refusal for this test only' });\n        " + marker);
   fs.writeFileSync(serverPath, src);
 }
 

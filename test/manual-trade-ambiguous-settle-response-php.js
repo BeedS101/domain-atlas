@@ -85,9 +85,9 @@ function setTrustedPeers(bundleDir, peers) {
 function injectFirstResponseLostThenRecovers(bundleDir) {
   const filePath = path.join(bundleDir, 'lib', 'bootstrap.php');
   let src = fs.readFileSync(filePath, 'utf8');
-  const marker = "if ($res['status'] !== 200) {\n      throw new Exception(isset($res['body']['error']) ? $res['body']['error'] : ($domain . ' refused the trade settle (HTTP ' . $res['status'] . ')'));\n    }\n    return $res['body'];";
+  const marker = "    return $body;\n  };\n  try {\n    return $attempt();";
   if (!src.includes(marker)) throw new Error('marker not found in bootstrap.php — shape changed, update this test');
-  const replacement = "if ($res['status'] !== 200) {\n      throw new Exception(isset($res['body']['error']) ? $res['body']['error'] : ($domain . ' refused the trade settle (HTTP ' . $res['status'] . ')'));\n    }\n    static $calls = 0;\n    $calls++;\n    if ($calls === 1) throw new Exception('could not reach ' . $domain . \" (INJECTED: simulated dropped connection AFTER the remote already applied the settle, for this test only -- call #1 only)\");\n    return $res['body'];";
+  const replacement = "    static $calls = 0;\n    $calls++;\n    if ($calls === 1) throw new AtlasRelayOutcomeException('could not reach ' . $domain . \" (INJECTED: simulated dropped connection AFTER the remote already applied the settle, for this test only -- call #1 only)\", false);\n" + marker;
   src = src.replace(marker, replacement);
   fs.writeFileSync(filePath, src);
 }

@@ -80,7 +80,8 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
 }
 
 async function dropItem(base, identity, credential, world, position) {
-  const payload = { action: 'drop', credentialId: credential.id, world, droppedAt: new Date().toISOString() };
+  // The intent names the domain hosting the world and a drop id, so it cannot be replayed at another domain.
+  const payload = { action: 'drop', credentialId: credential.id, world, domain: new URL(base).host, dropId: 'urn:atlas:worlddrop:' + require('crypto').randomUUID(), droppedAt: new Date().toISOString() };
   const proof = await signPayload(identity, payload);
   return post(base, '/atlas/world/drop', { credential, world, position, intent: { payload, proof } });
 }
@@ -181,9 +182,9 @@ function startPhpServer(bundleDir, port) {
     const carol = await generateIdentity();
     const [claimBob, claimCarol] = await Promise.all([claimDrop(BASE_A, bob, raceDropId), claimDrop(BASE_A, carol, raceDropId)]);
     const successes = [claimBob, claimCarol].filter((r) => r.status === 200);
-    const failures = [claimBob, claimCarol].filter((r) => r.status === 404);
+    const failures = [claimBob, claimCarol].filter((r) => r.status === 404 || r.status === 409);
     if (successes.length !== 1 || failures.length !== 1) {
-      throw new Error('Expected exactly one winner and one "already gone" rejection, got: ' + JSON.stringify([claimBob, claimCarol]));
+      throw new Error('Expected exactly one winner and one rejection (busy or gone), got: ' + JSON.stringify([claimBob, claimCarol]));
     }
     console.log('PASS: concurrent double-claim is resolved to exactly one winner ->', failures[0].body.error);
 

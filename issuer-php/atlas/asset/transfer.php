@@ -50,7 +50,15 @@ if ($recipientPublicKey === $senderPub) send_json(400, ['error' => 'cannot trans
 // original is revoked and stored for a repeat, so an answer that never arrives can be asked for again. The
 // intent must then name the requestId and nothing else beyond the three transfer fields.
 $requestId = atlas_parse_request_id($body);
-if ($requestId !== null) {
+// A request without an id is journalled under one derived from what is asked, so the older request shape is as
+// recoverable as the new one: the same request, sent again after a stop, finds the recorded result.
+$derivedId = $requestId === null;
+if ($derivedId) {
+  // A stored result is the recipient's credential, so it is only ever handed to the credential's own owner.
+  if (($credential['owner']['publicKey'] ?? null) !== $senderPub) send_json(400, atlas_spend_problem_body('asset does not belong to this signer', $credential));
+  $requestId = atlas_derived_request_id('transfer', $credential['id'] ?? '', ['recipientPublicKey' => $recipientPublicKey]);
+  atlas_begin_replacement($kp['publicKeyB64url'], $requestId, 'transfer', [$credential], ['recipientPublicKey' => $recipientPublicKey]);
+} else {
   atlas_require_owner_intent($body, [
     'action' => 'transfer', 'credentialId' => $credential['id'] ?? null, 'recipientPublicKey' => $recipientPublicKey, 'requestId' => $requestId,
   ], [$credential]);
@@ -60,17 +68,10 @@ if ($requestId !== null) {
 $problem = check_presented_giftable_asset($kp['publicKeyB64url'], $credential, $senderPub, $credential['asset']['class'] ?? null);
 if ($problem) send_json(400, atlas_spend_problem_body($problem, $credential));
 
-if ($requestId !== null) {
-  $received = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $recipientPublicKey, $credential['asset'], $credential['quantity'], $credential['id'], true);
-  $responseJson = atlas_commit_replacement(
-    $requestId, 'transfer', [$credential['id']], 'transferred', ['recipientPublicKey' => $recipientPublicKey],
-    [$received], ['status' => 'transferred', 'credential' => $received]
-  );
-  archive_if_audited($credential, 'transferred');
-  atlas_send_committed($responseJson);
-}
-
-$received = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $recipientPublicKey, $credential);
-atlas_revoke($credential['id'], 'transferred');
-archive_if_audited($credential, 'transferred');
-send_json(200, ['status' => 'transferred', 'credential' => $received]);
+$received = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $recipientPublicKey, $credential['asset'], $credential['quantity'], $credential['id'], true);
+$responseJson = atlas_commit_replacement(
+  $requestId, 'transfer', [$credential['id']], 'transferred', ['recipientPublicKey' => $recipientPublicKey],
+  [$received], ['status' => 'transferred', 'credential' => $received], null,
+  [['kind' => 'archive', 'credential' => $credential, 'reason' => 'transferred']]
+);
+atlas_send_committed($responseJson);

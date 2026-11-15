@@ -89,6 +89,11 @@ if (!empty(ATLAS_ASSET_CATALOG[$credential['asset']['class'] ?? '']['restrictedI
 }
 $busy = atlas_spend_lock($credential['id']);
 if ($busy !== null) send_json(409, ['error' => $busy]);
+// Journalled like a split: the result is decided and recorded before the old credential is revoked, and asking again
+// after a stop returns it. The administrator sends no request id, so one is derived from what is being asked.
+$replaceParams = ['tradeScope' => $hasTradeScope ? $tradeScope : null, 'properties' => $hasProperties ? $properties : null];
+$requestId = atlas_derived_request_id('reissue', $credential['id'], $replaceParams);
+atlas_begin_replacement($kp['publicKeyB64url'], $requestId, 'reissue', [$credential], $replaceParams);
 if (is_revoked($credential['id'])) send_json(400, ['error' => 'credential is already revoked']);
 if (is_suspended($credential['id'])) send_json(400, ['error' => 'credential is currently suspended pending review']);
 
@@ -105,14 +110,14 @@ if ($hasProperties) {
 $newAsset = $credential['asset'];
 if ($hasTradeScope) $newAsset['tradeScope'] = $tradeScope;
 if ($hasProperties) $newAsset['properties'] = merge_properties($newAsset['properties'] ?? [], $properties);
-$newCredential = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $credential['owner']['publicKey'], $newAsset, $credential['quantity'], $credential['id']);
+$newCredential = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $credential['owner']['publicKey'], $newAsset, $credential['quantity'], $credential['id'], true);
 
-// Same ordering guarantee §5.4's split/consolidate already give: the new
-// credential is signed FIRST, then the old one revoked — a crash between
-// the two would leave an extra valid asset rather than a holder with
-// neither.
-atlas_revoke($credential['id'], 'superseded');
-archive_if_audited($credential, 'superseded');
-append_asset_update(['id' => $credential['id'], 'status' => 'superseded', 'reason' => 'superseded', 'newCredential' => $newCredential]);
-
-send_json(200, ['newCredential' => $newCredential]);
+// Signed first, revoked second, and published last: the update below is applied only once the revocation has
+// committed (lib/replacement.php), so a stop at any point leaves the owner with the old credential or with the new
+// one, never neither and never both.
+$update = ['id' => $credential['id'], 'status' => 'superseded', 'reason' => 'superseded', 'newCredential' => $newCredential];
+$responseJson = atlas_commit_replacement(
+  $requestId, 'reissue', [$credential['id']], 'superseded', $replaceParams, [$newCredential], ['newCredential' => $newCredential], null,
+  [['kind' => 'archive', 'credential' => $credential, 'reason' => 'superseded'], ['kind' => 'asset-update', 'update' => $update]]
+);
+atlas_send_committed($responseJson);

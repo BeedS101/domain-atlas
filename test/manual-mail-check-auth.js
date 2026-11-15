@@ -52,6 +52,9 @@ function derSignature(raw) {
   const r = trim(Buffer.from(raw.slice(0, 32))), s = trim(Buffer.from(raw.slice(32)));
   return Buffer.concat([Buffer.from([0x30, 2 + r.length + 2 + s.length, 0x02, r.length]), r, Buffer.from([0x02, s.length]), s]);
 }
+// The passkey belongs to the wallet extension: its origin, and the relying party that is its id.
+const WALLET_ID = 'abcdefghijklmnopabcdefghijklmnop';
+const WALLET_ORIGIN = 'chrome-extension://' + WALLET_ID;
 async function passkeyIdentity() {
   const kp = await webcrypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   return { kp, publicKey: H.b64url(new Uint8Array(await webcrypto.subtle.exportKey('spki', kp.publicKey))) };
@@ -59,8 +62,8 @@ async function passkeyIdentity() {
 async function passkeyEnvelope(identity, payload, o) {
   o = o || {};
   const hash = new Uint8Array(await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(H.canonicalize(payload))));
-  const clientDataJSON = Buffer.from(JSON.stringify({ type: o.type || 'webauthn.get', challenge: o.challenge || H.b64url(hash), origin: 'chrome-extension://test' }));
-  const authData = Buffer.concat([Buffer.alloc(32, 7), Buffer.from([o.flags === undefined ? 0x05 : o.flags]), Buffer.from([0, 0, 0, 1])]);
+  const clientDataJSON = Buffer.from(JSON.stringify({ type: o.type || 'webauthn.get', challenge: o.challenge || H.b64url(hash), origin: WALLET_ORIGIN }));
+  const authData = Buffer.concat([require('crypto').createHash('sha256').update(WALLET_ID).digest(), Buffer.from([o.flags === undefined ? 0x05 : o.flags]), Buffer.from([0, 0, 0, 1])]);
   const clientHash = Buffer.from(await webcrypto.subtle.digest('SHA-256', clientDataJSON));
   const raw = new Uint8Array(await webcrypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, Buffer.concat([authData, clientHash])));
   return {

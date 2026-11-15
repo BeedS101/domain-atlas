@@ -1,0 +1,27 @@
+{
+  "production": {
+    "accept": ["peer-a.example", "evtec.co.za", "sub.domain-atlas.co.za", "xn--bcher-kva.example", "peer-a.example:443", "A.Example"],
+    "reject": [
+      "http://peer-a.example", "https://peer-a.example", "https://peer-a.example/", "peer-a.example/path", "peer-a.example/", "peer-a.example?x=1", "peer-a.example#frag",
+      "user@peer-a.example", "user:pw@peer-a.example", "peer-a.example@evil.example", "peer-a.example:8443", "peer-a.example:0", "peer-a.example:99999", "peer-a.example:",
+      "localhost", "localhost:8001", "127.0.0.1", "127.0.0.1:80", "[::1]", "[::1]:8001", "10.0.0.1", "169.254.169.254", "169.254.169.254:80", "192.168.1.1", "2130706433", "0x7f.1", "127.1", "017700000001",
+      "metadata.google.internal", "metadata", "foo.internal", "foo.local", "foo.localhost", "a.localdomain", "printer.lan", "router.home.arpa",
+      "a..example", "-a.example", "a-.example", "", " peer-a.example", "peer-a.example ", "peer-a.example\\@evil.example", "peer-a.example%2f", "a b.example", "example", "1.2.3.4", "peer-a.example.", "a.123",
+      "[2001:db8::1]", "[::ffff:127.0.0.1]", "ａ.example", "peer-a.example\u0000", "peer-a.example\r\nHost: evil.example", "peer-a.example\\evil"
+    ],
+    "rejectNonStrings": [null, 5, {}, [], true]
+  },
+  "local": {
+    "accept": ["localhost:8001", "127.0.0.1:8002", "[::1]:8003", "localhost", "a.localhost:8000", "peer-a.example"],
+    "reject": ["http://localhost:8001", "localhost/x", "user@localhost", "10.0.0.1", "169.254.169.254", "192.168.0.1:80", "metadata.google.internal", "foo.internal", "peer-a.example:8443", "0.0.0.0", "[fe80::1]"]
+  },
+  "addresses": {
+    "public": ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111", "::ffff:8.8.8.8", "2a00:1450:4001:81b::200e"],
+    "nonPublic": [
+      "0.0.0.0", "10.0.0.1", "10.255.255.255", "100.64.0.1", "100.100.100.200", "127.0.0.1", "127.255.255.254", "169.254.169.254", "169.254.1.1", "172.16.0.1", "172.31.255.255",
+      "192.0.0.1", "192.0.2.1", "192.88.99.1", "192.168.0.1", "198.18.0.1", "198.51.100.5", "203.0.113.5", "224.0.0.1", "239.255.255.250", "240.0.0.1", "255.255.255.255",
+      "::", "::1", "fc00::1", "fd00:ec2::254", "fe80::1", "febf::1", "fec0::1", "ff02::1", "2001:db8::1", "2001:0:4136:e378::1", "2002:7f00:1::", "64:ff9b::7f00:1",
+      "::ffff:127.0.0.1", "::ffff:7f00:1", "::ffff:10.0.0.1", "::ffff:a9fe:a9fe", "::127.0.0.1", "not-an-ip", "", "1.2.3", "999.1.1.1"
+    ]
+  }
+}

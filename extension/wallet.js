@@ -4154,7 +4154,10 @@ const AtlasWallet = (() => {
     const dropper = (await identityOf('self')).publicKey;
     await assertWalletWritable(dropper);
     await assertSettled(dropper, [credential.id]);
-    const payload = { action: 'drop', credentialId: credential.id, world, droppedAt: new Date().toISOString() };
+    // The signed intent names the hosting domain and the drop id, so the credential's issuer can later tell that its
+    // owner authorized exactly this drop when the hosting domain relays a claim to it.
+    const dropId = 'urn:atlas:worlddrop:' + crypto.randomUUID();
+    const payload = { action: 'drop', credentialId: credential.id, world, domain: worldDomain, dropId, droppedAt: new Date().toISOString() };
     const proof = await signWithSelf(payload);
     const res = await fetch(baseUrl(worldDomain) + '/atlas/world/drop', {
       method: 'POST',
@@ -4191,7 +4194,7 @@ const AtlasWallet = (() => {
   // fulfillWorldDropClaim()'s own comment server-side. Always yields a
   // freshly-minted credential, added to this wallet like any other mint.
   async function pickUpItem(worldDomain, dropId) {
-    const payload = { action: 'claim', dropId, claimedAt: new Date().toISOString() };
+    const payload = { action: 'claim', dropId, domain: worldDomain, claimedAt: new Date().toISOString() };
     const proof = await signWithSelf(payload);
     const res = await fetch(baseUrl(worldDomain) + '/atlas/world/drops/claim', {
       method: 'POST',

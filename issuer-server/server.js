@@ -461,6 +461,14 @@ const RELAY_SETTLE_RESULTS_FILE = path.join(STATE_DIR, 'atlas-relay-settle-resul
 // anything, not from a lock on the file itself, see removeWorldDrop's own
 // call sites in /atlas/world/drops/claim and /atlas/world/drops/relay-claim.
 const WORLD_DROPS_FILE = path.join(STATE_DIR, 'atlas-world-drops-store.json');
+const WORLD_DROP_ID_PATTERN = /^urn:atlas:worlddrop:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// Domains whose relayed claims may omit the owner's and claimant's signed intents (drops listed before wallets signed
+// them). Empty unless an operator sets ATLAS_LEGACY_DROP_PEERS.
+const LEGACY_DROP_PEERS = new Set((process.env.ATLAS_LEGACY_DROP_PEERS || '').split(',').map((d) => d.trim()).filter(Boolean));
+// The journal key for settling one drop of one credential: the same drop and credential always map to the same id.
+function worldDropRequestId(dropId, credentialId) {
+  return 'wd-' + createHash('sha256').update(String(dropId) + '\n' + String(credentialId)).digest('hex').slice(0, 48);
+}
 // Third-party attestations (SPEC.md §5.11): one flat store of every
 // attestation THIS domain has issued — this file only ever holds this
 // domain's own signed opinions about assets, never a mirror of anything
@@ -674,14 +682,6 @@ function removeTrustedTradePeer(domain) {
   fs.writeFileSync(TRUSTED_TRADE_PEERS_FILE, JSON.stringify(doc, null, 2));
   return doc.peers.length !== before;
 }
-
-// Every genuinely cross-host request this server ever makes (fetching
-// another domain's published key, relaying mail/world-drop claims) sends
-// this — some hosts' own bot/WAF protection blocks a request with no
-// recognizable User-Agent, which a browser request from the same page
-// never hits. Named plainly so a receiving host's admin can see what it
-// is. Mirrors issuer-php/lib/bootstrap.php's ATLAS_OUTBOUND_REQUEST_HEADERS.
-const OUTBOUND_REQUEST_HEADERS = { 'User-Agent': 'DomainAtlas-Relay/1.0', Accept: 'application/json' };
 
 // One catalog for every asset class this issuer knows how to mint —
 // unique and fungible alike (SPEC.md §5, task #44's merge of the former
@@ -1815,35 +1815,30 @@ function unwrapBridgeSigned(signed) {
 }
 
 // Verifies a signed-payload "envelope" as produced by wallet.js's
-// signWithSelf() (a real WebAuthn assertion, challenge = hash of the
-// payload, or a direct ECDSA signature for a local identity). Same
-// dual-mode check on both ends of the wire, same as canonicalize().
+// signWithSelf(): a passkey assertion whose challenge is the hash of the
+// payload (lib-webauthn.js says what must hold of it), or a direct ECDSA
+// signature for a local identity. Same checks on both ends of the wire, same
+// canonicalize(). Never throws; anything malformed is simply not verified.
 // A bridge-signed payload is refused here; see BRIDGE_SIGN_CTX.
 async function verifyEnvelope(payload, envelope, opts) {
-  if (isBridgeSigned(payload) && !(opts && opts.allowBridge)) return false;
-  const dataHash = new Uint8Array(await subtle.digest('SHA-256', new TextEncoder().encode(canonicalize(payload))));
+  try {
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) return false;
+    if (isBridgeSigned(payload) && !(opts && opts.allowBridge)) return false;
 
-  if (envelope.signerRole === 'webauthn') {
-    const clientDataJSON = fromB64url(envelope.clientDataJSON);
-    const clientData = JSON.parse(Buffer.from(clientDataJSON).toString('utf8'));
-    if (clientData.challenge !== b64url(dataHash)) return false;
-    const authData = fromB64url(envelope.authenticatorData);
-    const clientDataHash = new Uint8Array(await subtle.digest('SHA-256', clientDataJSON));
-    const signedData = new Uint8Array(authData.length + clientDataHash.length);
-    signedData.set(authData, 0);
-    signedData.set(clientDataHash, authData.length);
-    const rawSig = derToRawEcdsaSig(fromB64url(envelope.signature));
-    const pub = await subtle.importKey('spki', fromB64url(envelope.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
-    return subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, rawSig, signedData);
+    if (envelope.signerRole === 'webauthn') {
+      return await verifyWebauthnEnvelope(canonicalize(payload), envelope, policyFromEnv(process.env, ownOrigins()));
+    }
+
+    if (envelope.signerRole === 'raw-ecdsa') {
+      const pub = await subtle.importKey('raw', fromB64url(envelope.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+      const data = new TextEncoder().encode(canonicalize(payload));
+      return await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, fromB64url(envelope.signature), data);
+    }
+
+    return false;
+  } catch (err) {
+    return false;
   }
-
-  if (envelope.signerRole === 'raw-ecdsa') {
-    const pub = await subtle.importKey('raw', fromB64url(envelope.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
-    const data = new TextEncoder().encode(canonicalize(payload));
-    return subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, fromB64url(envelope.signature), data);
-  }
-
-  return false;
 }
 
 // ---------- Admin request authentication ----------
@@ -1904,10 +1899,8 @@ function sendAdminAuthFailure(res, auth) {
   return sendJson(res, auth.status || 401, body);
 }
 
-// verifyEnvelope() plus what an admin assertion needs from a passkey: it must
-// be a "get" assertion and the user must have been present. Same rule the
-// signed mail reads use (verifyMailEnvelope).
-const verifyAdminEnvelope = (payload, envelope, opts) => verifyMailEnvelope(payload, envelope, opts);
+// Admin requests take the same assertions as every other signed request.
+const verifyAdminEnvelope = (payload, envelope, opts) => verifyEnvelope(payload, envelope, opts);
 
 // What each scope needs. 'admin' (the default for every route) is the
 // administrator role only; 'moderation' is the moderation-grant route and
@@ -2251,16 +2244,12 @@ function recordRelayAttempt(relayingDomain) {
   fs.writeFileSync(RELAY_RATE_FILE, JSON.stringify(doc, null, 2));
 }
 
-// Same http(s)-scheme-by-hostname convention extension/wallet.js's own
-// baseUrl() already uses (plain HTTP for localhost/loopback, since every
-// demo/test domain in this project runs that way; HTTPS otherwise) — kept
-// in exact sync with that function on purpose, since a mismatch here would
-// mean this server tries to relay to another domain over the wrong scheme.
-function baseUrl(domain) {
-  if (domain.startsWith('http')) return domain.replace(/\/$/, '');
-  const isLocalHost = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(domain);
-  return ((isLocalHost ? 'http://' : 'https://') + domain).replace(/\/$/, '');
-}
+// Every request this server makes to another domain goes through lib-outbound.js (peer authority validation,
+// public-address-only pinned connections, no redirects, size and time limits, rate limits, client-safe errors).
+const { createOutbound, OutboundError } = require('./lib-outbound');
+const { verifyWebauthnEnvelope, policyFromEnv } = require('./lib-webauthn');
+const outbound = createOutbound({ ownDomain: DOMAIN });
+const peerRequest = (domain, pathAndQuery, opts) => outbound.request(domain, pathAndQuery, opts);
 
 // Task #97 (SPEC.md §11.4 step 3): fetches ANOTHER domain's own published
 // signing key, the exact same cross-domain trust bootstrap
@@ -2272,15 +2261,43 @@ function baseUrl(domain) {
 // is checked at the moment it arrives, not against some earlier issuedAt the
 // way an asset credential's own verification is), rather than requiring the
 // caller to know which key era they're in.
+// A peer's published key is remembered briefly, so a burst of messages or claims from one domain costs one lookup
+// instead of one per message (the lookups are rate limited). Failures are never remembered. A key a peer rotates out is
+// trusted for at most this long; ATLAS_OUTBOUND_KEY_CACHE_MS=0 turns the memory off. Revocation documents are not cached.
+const peerKeyCache = new Map(); // lowercased domain -> { key, until }
+const PEER_KEY_CACHE_MAX = 256;
+function peerKeyCacheMs() {
+  const raw = process.env.ATLAS_OUTBOUND_KEY_CACHE_MS;
+  const n = raw === undefined || raw === '' ? 60000 : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 60000;
+}
+
 async function fetchDomainPublicKey(domain) {
+  const ttl = peerKeyCacheMs();
+  const cacheKey = typeof domain === 'string' ? domain.toLowerCase() : null;
+  if (ttl > 0 && cacheKey) {
+    const hit = peerKeyCache.get(cacheKey);
+    if (hit && hit.until > Date.now()) return hit.key;
+    peerKeyCache.delete(cacheKey);
+  }
+  const key = await fetchDomainPublicKeyUncached(domain);
+  if (ttl > 0 && cacheKey) {
+    peerKeyCache.set(cacheKey, { key, until: Date.now() + ttl });
+    while (peerKeyCache.size > PEER_KEY_CACHE_MAX) peerKeyCache.delete(peerKeyCache.keys().next().value);
+  }
+  return key;
+}
+
+async function fetchDomainPublicKeyUncached(domain) {
   let res;
   try {
-    res = await fetch(baseUrl(domain) + '/.well-known/atlas-key.json', { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS });
+    res = await peerRequest(domain, '/.well-known/atlas-key.json', { kind: 'key' });
   } catch (err) {
-    throw new Error('could not reach ' + domain + ' to fetch its published key' + ((err.cause && err.cause.message) ? ' (' + err.cause.message + ')' : ' (' + err.message + ')'));
+    throw new Error(err instanceof OutboundError ? err.message : 'could not reach ' + domain + ' to fetch its published key');
   }
   if (!res.ok) throw new Error('could not fetch ' + domain + '\'s published key (HTTP ' + res.status + ')');
-  const keyDoc = await res.json();
+  let keyDoc;
+  try { keyDoc = res.json(); } catch (err) { throw new Error(domain + '\'s published key is not valid JSON'); }
   const now = Date.now();
   const activeKey = (keyDoc.keys || []).find((k) => {
     const from = new Date(k.validFrom).getTime();
@@ -2710,8 +2727,16 @@ function revocationEntryOf(id) {
 }
 // Test-only: ATLAS_TEST_CRASH_AT=<point> makes the process stop dead right
 // after that step has been written, as if it had crashed there.
+// "<point>" stops at the first time the point is reached, "<point>@N" at the Nth.
+const faultHits = {};
 function faultPoint(name) {
-  if (process.env.ATLAS_TEST_CRASH_AT === name) process.exit(86);
+  const at = process.env.ATLAS_TEST_CRASH_AT;
+  if (!at) return;
+  const m = /^(.*)@(\d+)$/.exec(at);
+  if (!m) { if (at === name) process.exit(86); return; }
+  if (m[1] !== name) return;
+  faultHits[name] = (faultHits[name] || 0) + 1;
+  if (faultHits[name] === Number(m[2])) process.exit(86);
 }
 
 // Creates the record for a freshly minted file. The caller must have just
@@ -3180,6 +3205,7 @@ function revokeMany(ids, reason, txn) {
   const revokedAt = new Date().toISOString();
   for (const id of ids) doc.revoked.push(txn ? { id, revokedAt, reason, txn } : { id, revokedAt, reason });
   writeFileAtomic(REVOCATIONS_FILE, JSON.stringify(doc, null, 2));
+  faultPoint('revoke:written');
 }
 function revoke(id, reason) {
   revokeMany([id], reason);
@@ -3241,6 +3267,16 @@ function replayLookup(requestId, op, predecessorIds, params) {
     JSON.stringify(rec.predecessors) === JSON.stringify([...predecessorIds].sort()) &&
     JSON.stringify(rec.params) === JSON.stringify(params);
   return same ? { response: rec.response } : { conflict: true };
+}
+// The recorded response for a request id and operation whatever its parameters were, or null.
+function replayPeek(requestId, op) {
+  try {
+    const rec = JSON.parse(fs.readFileSync(replayFile(requestId), 'utf8'));
+    if (!rec || rec.op !== op || typeof rec.createdAt !== 'string' || Date.now() - Date.parse(rec.createdAt) > REPLAY_TTL_MS) return null;
+    return rec.response;
+  } catch (err) {
+    return null;
+  }
 }
 function replayStore(requestId, op, predecessorIds, params, response) {
   try {
@@ -3336,10 +3372,54 @@ function txnRegister(rec) {
   // A record written before `f` existed describes a fungible successor.
   for (const s of rec.successors) holdingsNoteIssued(s.owner, { fungible: s.f !== false, class: s.cls }, s.id, s.q);
 }
+// What a committed replacement must also make visible besides the signed successors: the update a wallet polls for,
+// the audit-history copy of the old credential, a mail notice carrying the new credential, a membership roster entry
+// that points at the old credential. They are recorded in the journal entry before anything is revoked and applied only
+// once the revocation has committed, so a successor is never published while its predecessor is still live, and a stop
+// after the revocation is completed by recovery. Every effect is safe to apply again.
+function txnApplyEffects(rec) {
+  for (const e of rec.effects || []) {
+    if (!e || typeof e !== 'object') continue;
+    if (e.kind === 'asset-update') appendAssetUpdateOnce(e.update);
+    else if (e.kind === 'mail') appendMailOnce(e.message);
+    else if (e.kind === 'archive') archiveIfAudited(e.credential, e.reason);
+    else if (e.kind === 'membership') reassignMembership(e.class, e.oldId, e.newId, e.owner);
+  }
+}
+// Re-points a membership roster entry at a replacement credential and its new owner. Looks the entry up by the old
+// credential id, so a second application finds nothing to change.
+function reassignMembership(cls, oldId, newId, owner) {
+  if (cls === 'atlas.postoffice.membership') {
+    const doc = readPostOfficeMembers();
+    const member = doc.members.find((m) => m.credentialId === oldId);
+    if (!member) return;
+    member.credentialId = newId;
+    member.ownerPublicKey = owner;
+    member.sendLog = [];
+    member.recentSendCount = 0;
+    member.flagged = false;
+    writeFileAtomic(POSTOFFICE_MEMBERS_FILE, JSON.stringify(doc, null, 2));
+  } else if (cls === 'atlas.tradingstation.membership') {
+    const doc = readTradingStationMembers();
+    const member = doc.members.find((m) => m.credentialId === oldId);
+    if (!member) return;
+    member.credentialId = newId;
+    member.ownerPublicKey = owner;
+    writeFileAtomic(TRADINGSTATION_MEMBERS_FILE, JSON.stringify(doc, null, 2));
+  }
+}
+// A request id for an operation whose client does not send one (an administrator's reissue or clawback, a transfer in
+// the older request shape): the same request always maps to the same id, so asking again after a stop finds the
+// journalled result instead of failing on the already revoked predecessor.
+function derivedRequestId(op, predecessorId, params) {
+  return 'auto-' + createHash('sha256').update(op + '|' + predecessorId + '|' + JSON.stringify(params)).digest('hex').slice(0, 40);
+}
 // Completes a committed transaction. Every step is safe to repeat. The journal
 // entry is removed only after the replay record is stored.
 function txnFinish(rec) {
   txnRegister(rec);
+  txnApplyEffects(rec);
+  faultPoint('txn:effects-applied');
   const stored = rec.requestId ? replayStore(rec.requestId, rec.op, rec.predecessors, rec.params, rec.response) : true;
   faultPoint('txn:replay-stored');
   if (!stored) throw new Error('the replay record could not be stored; the journal entry is kept');
@@ -3392,7 +3472,7 @@ async function txnSweep() {
 // Runs the five steps above for already-signed (not yet recorded) successors.
 // `successors` are the signed credentials; `response` is what the client gets.
 // The caller holds the lease for `requestId`, or passes none and gets one here.
-async function commitReplacement(res, { requestId, op, predecessorIds, reason, params, successors, response }) {
+async function commitReplacement(res, { requestId, op, predecessorIds, reason, params, successors, response, effects }) {
   const rec = {
     txn: webcrypto.randomUUID().replace(/-/g, '').slice(0, 16),
     requestId: requestId || null,
@@ -3400,6 +3480,7 @@ async function commitReplacement(res, { requestId, op, predecessorIds, reason, p
     predecessors: [...predecessorIds].sort(),
     successors: successors.map((c) => ({ owner: c.owner.publicKey, cls: c.asset.class, id: c.id, q: c.quantity, f: c.asset.fungible === true })),
     response,
+    effects: effects || [],
     createdAt: new Date().toISOString()
   };
   rec.key = rec.requestId || rec.txn;
@@ -3731,6 +3812,8 @@ function archiveIfAudited(credential, reason) {
   const catalogEntry = ASSET_CATALOG[credential.asset.class];
   if (!catalogEntry || !catalogEntry.auditHistory) return;
   const doc = readAssetHistory();
+  // A credential is superseded once; a journalled replacement that is completed again must not archive it twice.
+  if (doc.archived.some((a) => a && a.id === credential.id)) return;
   doc.archived.push({ ...credential, archivedAt: new Date().toISOString(), reason });
   fs.writeFileSync(ASSET_HISTORY_FILE, JSON.stringify(doc, null, 2));
 }
@@ -3922,7 +4005,13 @@ function appendMail(message) {
     const dropIds = new Set(own.slice(0, own.length - MAILBOX_CAP).map((m) => m.id));
     doc.messages = doc.messages.filter((m) => !dropIds.has(m.id));
   }
-  fs.writeFileSync(MAIL_FILE, JSON.stringify(doc, null, 2));
+  writeFileAtomic(MAIL_FILE, JSON.stringify(doc, null, 2));
+}
+// appendMail(), unless a message with this id is already stored: a journalled replacement applies its notices again
+// if it was stopped part-way.
+function appendMailOnce(message) {
+  if (readMail().messages.some((m) => m && m.id === message.id)) return;
+  appendMail(message);
 }
 
 // Removes the given messages from the mailboxes of the given credential ids.
@@ -3966,24 +4055,10 @@ function consumeMailNonce(signerKey, nonce, nowMs) {
   return 'ok';
 }
 
-// verifyEnvelope() plus what a read grant needs from a passkey assertion:
-// it must be a "get" assertion and the user must have been present.
-async function verifyMailEnvelope(payload, envelope, opts) {
-  try {
-    if (!envelope || typeof envelope !== 'object') return false;
-    if (envelope.signerRole === 'webauthn') {
-      const clientData = JSON.parse(Buffer.from(fromB64url(envelope.clientDataJSON)).toString('utf8'));
-      if (clientData.type !== 'webauthn.get') return false;
-      const authData = fromB64url(envelope.authenticatorData);
-      if (authData.length < 37 || (authData[32] & 0x01) === 0) return false;
-    } else if (envelope.signerRole !== 'raw-ecdsa') {
-      return false;
-    }
-    return await verifyEnvelope(payload, envelope, opts);
-  } catch (e) {
-    return false;
-  }
-}
+// Mail reads and admin requests take the same assertions as every other
+// signed request; verifyEnvelope() already refuses a passkey assertion that is
+// not a present-user "get".
+const verifyMailEnvelope = (payload, envelope, opts) => verifyEnvelope(payload, envelope, opts);
 
 function mailAuthError(status, code, message, extra) {
   return { error: { status, body: { error: message, code, ...(extra || {}) } } };
@@ -4074,7 +4149,13 @@ function readAssetUpdates() {
 function appendAssetUpdate(update) {
   const doc = readAssetUpdates();
   doc.updates.push(update);
-  fs.writeFileSync(ASSET_UPDATES_FILE, JSON.stringify(doc, null, 2));
+  writeFileAtomic(ASSET_UPDATES_FILE, JSON.stringify(doc, null, 2));
+}
+// appendAssetUpdate(), unless this exact update (same old id, same new credential) is already there.
+function appendAssetUpdateOnce(update) {
+  const newId = update.newCredential && update.newCredential.id;
+  if (readAssetUpdates().updates.some((u) => u && u.id === update.id && (u.newCredential && u.newCredential.id) === newId)) return;
+  appendAssetUpdate(update);
 }
 
 // Relay-settle result store (SPEC.md §7 v1.35) — see
@@ -4666,20 +4747,63 @@ function readWorldDrops() {
 function appendWorldDrop(entry) {
   const doc = readWorldDrops();
   doc.drops.push(entry);
-  fs.writeFileSync(WORLD_DROPS_FILE, JSON.stringify(doc, null, 2));
+  writeWorldDrops(doc);
 }
-// Returns the removed entry (or null if it was already gone) so the caller
-// can tell "I just won the reservation" from "someone else already claimed
-// this" without a second read — the exact race the claim endpoints below
-// exist to close.
+// Deletes the listing and returns the removed entry (null if it was already gone).
 function removeWorldDrop(dropId) {
   const doc = readWorldDrops();
   const found = doc.drops.find((d) => d.dropId === dropId) || null;
   if (found) {
     doc.drops = doc.drops.filter((d) => d.dropId !== dropId);
-    fs.writeFileSync(WORLD_DROPS_FILE, JSON.stringify(doc, null, 2));
+    writeWorldDrops(doc);
   }
   return found;
+}
+function writeWorldDrops(doc) {
+  const tmp = WORLD_DROPS_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(doc, null, 2));
+  fs.renameSync(tmp, WORLD_DROPS_FILE);
+}
+// A drop being picked up is a three-step state on its listing, so a claimant whose request or answer is lost can ask
+// again and be given the same item:
+//   listed    no claimedBy, no live reservation
+//   reserved  reservedBy/reservedAt: only that claimant (or anyone, once the reservation lapses) may settle it
+//   claimed   claimedBy/claimedAt: settlement is committed in the journal; only that claimant can ask again, to be
+//             handed the recorded result. Kept for the replay window, then pruned.
+// The listing is deleted outright only when the claim is refused for good (removeWorldDrop).
+const DROP_RESERVE_MS = (parseFloat(process.env.ATLAS_DROP_RESERVE_SECONDS) > 0 ? parseFloat(process.env.ATLAS_DROP_RESERVE_SECONDS) : 120) * 1000;
+// { status: 'ok', drop }, { status: 'gone' } or { status: 'busy' }.
+function reserveWorldDrop(dropId, claimant) {
+  const doc = readWorldDrops();
+  const now = Date.now();
+  const kept = doc.drops.filter((d) => !(d.claimedAt && now - d.claimedAt > REPLAY_TTL_MS));
+  let changed = kept.length !== doc.drops.length;
+  doc.drops = kept;
+  const d = doc.drops.find((x) => x.dropId === dropId);
+  let result = { status: 'gone' };
+  if (d) {
+    if (d.claimedBy) result = d.claimedBy === claimant ? { status: 'ok', drop: d } : { status: 'gone' };
+    else if (d.reservedBy && d.reservedBy !== claimant && now - (d.reservedAt || 0) < DROP_RESERVE_MS) result = { status: 'busy' };
+    else {
+      d.reservedBy = claimant;
+      d.reservedAt = now;
+      changed = true;
+      result = { status: 'ok', drop: d };
+    }
+  }
+  if (changed) writeWorldDrops(doc);
+  return result;
+}
+// Settlement committed: keep the listing as a record only the claimant can use, hidden from the public listing.
+function finishWorldDrop(dropId, claimant) {
+  const doc = readWorldDrops();
+  const d = doc.drops.find((x) => x.dropId === dropId);
+  if (!d || d.claimedBy) return;
+  delete d.reservedBy;
+  delete d.reservedAt;
+  d.claimedBy = claimant;
+  d.claimedAt = Date.now();
+  writeWorldDrops(doc);
 }
 
 // Third-party attestations (SPEC.md §5.11) — same plain read/append shape
@@ -5224,13 +5348,10 @@ async function main() {
   // properties, so re-deriving from the catalog is exactly the point — but
   // it was silently wrong for a unique item changing hands, discarding
   // whatever made that specific instance unique and replacing it with the
-  // class's static fallback. Used by fulfillWorldDropClaim() below (fixing
-  // that latent bug — a serialized item like the ring was nominally
-  // droppable in the plaza's own acceptedItemClasses before this, so this
-  // was a live gap, not just theoretical) and by the Trading Station
-  // settlement's own unique-item side (see POST /atlas/trade/claim).
-  async function transferUniqueAsset(newOwnerPublicKey, credential) {
-    return issueAsset(newOwnerPublicKey, credential.asset, credential.quantity, credential.id);
+  // class's static fallback. Used by the Trading Station settlement's
+  // own unique-item side (see POST /atlas/trade/claim).
+  async function transferUniqueAsset(newOwnerPublicKey, credential, deferHoldings) {
+    return issueAsset(newOwnerPublicKey, credential.asset, credential.quantity, credential.id, deferHoldings);
   }
 
   // The signed payload shape (SPEC.md §5: canonicalize({id, asset, owner,
@@ -5282,13 +5403,32 @@ async function main() {
       ...(patch.tradeScope !== undefined ? { tradeScope: patch.tradeScope } : {}),
       ...(patch.properties ? { properties: mergeProperties(credential.asset.properties, patch.properties) } : {})
     };
-    const newCredential = await issueAsset(credential.owner.publicKey, newAsset, credential.quantity, credential.id);
-    revoke(credential.id, 'class-patch');
-    archiveIfAudited(credential, 'class-patch');
-    const update = { id: credential.id, status: 'superseded', reason: 'class-patch', newCredential };
-    appendAssetUpdate(update);
-    console.log('Auto-reissued (class patch)', credential.asset.name, credential.id, '->', newCredential.id);
-    return update;
+    // Journalled like a split: the result is recorded before the old credential is revoked, and a check-in repeated
+    // after a stop receives it. The id is derived from the credential and the patch applied.
+    const replaceParams = { tradeScope: patch.tradeScope !== undefined ? patch.tradeScope : null, properties: patch.properties || null };
+    const requestId = derivedRequestId('class-patch', credential.id, replaceParams);
+    const release = await acquireSpendLock('rid:' + requestId, SPEND_LOCK_WAIT_MS);
+    if (!release) return null;
+    try {
+      txnRecoverKey(requestId);
+      const prior = replayLookup(requestId, 'class-patch', [credential.id], replaceParams);
+      if (prior) return prior.conflict ? null : prior.response;
+      if (isRevoked(credential.id)) return null;
+      const newCredential = await issueAsset(credential.owner.publicKey, newAsset, credential.quantity, credential.id, true);
+      const update = { id: credential.id, status: 'superseded', reason: 'class-patch', newCredential };
+      await commitReplacement(null, {
+        requestId, op: 'class-patch', predecessorIds: [credential.id], reason: 'class-patch', params: replaceParams,
+        successors: [newCredential], response: update,
+        effects: [{ kind: 'archive', credential, reason: 'class-patch' }, { kind: 'asset-update', update }]
+      });
+      console.log('Auto-reissued (class patch)', credential.asset.name, credential.id, '->', newCredential.id);
+      return update;
+    } catch (err) {
+      console.error('class patch not applied:', err.message);
+      return null;
+    } finally {
+      release();
+    }
   }
 
   // Builds `asset` fresh from ASSET_CATALOG[cls] and signs it via
@@ -5424,7 +5564,7 @@ async function main() {
   // balances cannot wait on each other, then answers a repeated request id from
   // the stored result (after checking the presented balances are genuinely this
   // issuer's). True when a response has already been sent.
-  async function beginReplacement(res, requestId, op, presented, params) {
+  async function beginReplacement(res, requestId, op, presented, params, onReplay) {
     const ids = presented.map((c) => c && c.id);
     for (const id of [...ids].filter(Boolean).sort()) {
       const busy = await lockSpend(id);
@@ -5448,6 +5588,7 @@ async function main() {
         return true;
       }
     }
+    if (onReplay) onReplay();
     sendJson(res, 200, prior.response);
     return true;
   }
@@ -5582,28 +5723,40 @@ async function main() {
   // reasoning as issuer-php/lib/bootstrap.php's verify_foreign_asset_
   // credential(), which used to have this exact blanket "swallow every
   // failure into a plain false" shape too.
-  async function verifyForeignAssetCredential(credential) {
-    const base = baseUrl(credential.issuer.domain);
-    let keyRes, revRes, susRes;
-    try {
-      [keyRes, revRes, susRes] = await Promise.all([
-        fetch(base + '/.well-known/atlas-key.json', { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS }),
-        fetch(base + '/.well-known/atlas-revocations.json', { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS }),
-        fetch(base + '/.well-known/atlas-suspensions.json', { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS })
-      ]);
-    } catch (err) {
-      return 'could not reach it (' + ((err.cause && err.cause.message) ? err.cause.message : err.message) + ')';
-    }
+  // signatureOnly: confirm only that the issuer published the key that signed this credential. For a claim resumed after
+  // its first leg was relayed, where revocation and suspension (our own lock, or the leg itself) no longer say anything.
+  async function verifyForeignAssetCredential(credential, signatureOnly) {
+    const issuerDomain = credential.issuer.domain;
+    const [keyAttempt, revAttempt, susAttempt] = await Promise.allSettled([
+      peerRequest(issuerDomain, '/.well-known/atlas-key.json', { kind: 'key' }),
+      peerRequest(issuerDomain, '/.well-known/atlas-revocations.json'),
+      peerRequest(issuerDomain, '/.well-known/atlas-suspensions.json')
+    ]);
+    const why = (attempt) => (attempt.reason instanceof OutboundError ? attempt.reason.message : 'could not reach it');
+    if (keyAttempt.status !== 'fulfilled') return why(keyAttempt);
+    const keyRes = keyAttempt.value;
+    if (revAttempt.status !== 'fulfilled') return 'could not confirm whether it has revoked this credential (' + why(revAttempt) + ')';
+    if (susAttempt.status !== 'fulfilled') return 'could not confirm whether it has suspended this credential (' + why(susAttempt) + ')';
+    const revRes = revAttempt.value;
+    const susRes = susAttempt.value;
     if (!keyRes.ok) return 'it returned HTTP ' + keyRes.status + ' for its own published key';
-    const keyDoc = await keyRes.json();
-    if (!keyDoc.keys || !keyDoc.keys.length) return 'it returned no usable key document';
-    const revDoc = revRes.ok ? await revRes.json() : { revoked: [] };
-    // SUSPENSIONS_FILE is published the same way revocations are (see its
-    // own comment), so a foreign credential's live suspension is honored
-    // here too, not just a same-domain one — a missing or unreachable
-    // document is treated as "nothing suspended," same fail-open posture
-    // revDoc already has for a domain that doesn't publish one.
-    const susDoc = susRes.ok ? await susRes.json() : { suspended: [] };
+    let keyDoc;
+    try { keyDoc = keyRes.json(); } catch (err) { return 'it returned an unreadable key document'; }
+    if (!keyDoc || !keyDoc.keys || !keyDoc.keys.length) return 'it returned no usable key document';
+    // What the issuer has revoked or suspended must be known, not assumed: a document that cannot be read counts as
+    // "could not confirm", never as an empty list. The one allowance is a missing suspensions document (HTTP 404),
+    // which an issuer that predates suspensions never published.
+    if (!revRes.ok) return 'could not confirm whether it has revoked this credential (HTTP ' + revRes.status + ')';
+    let revDoc;
+    try { revDoc = revRes.json(); } catch (err) { revDoc = null; }
+    if (!revDoc || !Array.isArray(revDoc.revoked)) return 'could not confirm whether it has revoked this credential (its revocation list is unreadable)';
+    let susDoc = { suspended: [] };
+    if (susRes.ok) {
+      try { susDoc = susRes.json(); } catch (err) { susDoc = null; }
+      if (!susDoc || !Array.isArray(susDoc.suspended)) return 'could not confirm whether it has suspended this credential (its suspension list is unreadable)';
+    } else if (susRes.status !== 404) {
+      return 'could not confirm whether it has suspended this credential (HTTP ' + susRes.status + ')';
+    }
     const issuedAt = new Date(credential.issuedAt).getTime();
     const activeKey = (keyDoc.keys || []).find((k) => {
       const from = new Date(k.validFrom).getTime();
@@ -5613,6 +5766,7 @@ async function main() {
     if (!activeKey) return 'no key matching this credential was valid at its own issuedAt';
     const sigOk = await verifyDomainSignature(activeKey.publicKey, assetPayloadOf(credential), credential.signature);
     if (!sigOk) return "signature doesn't match its own published key";
+    if (signatureOnly) return true;
     if ((revDoc.revoked || []).some((r) => r.id === credential.id)) return 'it has revoked this credential';
     const now = Date.now();
     if ((susDoc.suspended || []).some((s) => s.id === credential.id && (!s.expiresAt || new Date(s.expiresAt).getTime() > now))) return 'it has suspended this credential';
@@ -5790,30 +5944,70 @@ async function main() {
     return null;
   }
 
-  // Task #250 — the actual custody change once a claim is legitimate,
-  // shared by both branches of POST /atlas/world/drops/claim: the local
-  // same-domain path (this domain issued the dropped credential itself)
-  // and POST /atlas/world/drops/relay-claim (a different domain issued it,
-  // and THIS call only happens on that domain's own server, reached via
-  // the relay below). Same revoke-old/mint-new-owner primitive every other
-  // real transfer in this file already uses (trade settlement, split,
-  // consolidate) — a dropped item was never "in limbo" ownership-wise
-  // while it sat in the world, so claiming it is exactly as much a fresh
-  // mint as any of those, just to a owner nobody negotiated with directly.
-  //
-  // Fungible drops still go through mintAssetByClass — re-deriving from
-  // the catalog is correct there (every balance of a fungible class is
-  // identical by definition). A non-fungible drop instead goes through
-  // transferUniqueAsset() (task #250 fourth follow-up) so its actual
-  // per-instance state survives the claim — see that function's own
-  // comment for the bug this fixes.
-  async function fulfillWorldDropClaim(credential, claimantPublicKey) {
+  // The custody change once a claim is legitimate, shared by the same-domain branch of POST /atlas/world/drops/claim
+  // and by POST /atlas/world/drops/relay-claim (this domain issued the credential, another domain hosts the drop).
+  // A unique item keeps its signed per-instance state (issueAsset with the presented asset); a fungible stack is
+  // re-derived from the catalog, which is correct because every balance of a class is identical.
+  // Settles a claimed drop through the replacement journal, keyed by the drop and the credential: a retry of the
+  // same claim returns the stored result, the same drop for another claimant is refused, and the predecessor is
+  // revoked together with the successor's registration. The credential is checked again here because it sat
+  // un-revoked while listed: its owner may have spent it elsewhere since.
+  async function settleWorldDropClaim(res, { credential, claimantPublicKey, dropId, viaDomain }) {
+    const requestId = worldDropRequestId(dropId, credential.id);
+    const params = { claimantPublicKey, viaDomain };
+    // The listing lives here only when this domain hosts the drop itself; for a relayed claim the host keeps its own.
+    const listedHere = viaDomain === DOMAIN;
+    if (await beginReplacement(res, requestId, 'world-drop-claim', [credential], params, () => { if (listedHere) finishWorldDrop(dropId, claimantPublicKey); })) return;
+    const problem = await checkPresentedTransferableAsset(credential, credential.owner && credential.owner.publicKey, credential.asset && credential.asset.class);
+    if (problem) {
+      if (listedHere) removeWorldDrop(dropId);
+      return sendJson(res, 400, spendProblemBody(problem, credential));
+    }
     const received = credential.asset.fungible === false
-      ? await transferUniqueAsset(claimantPublicKey, credential)
-      : await mintAssetByClass(claimantPublicKey, credential.asset.class, credential.quantity, credential.id);
-    revoke(credential.id, 'claimed from a world drop');
+      ? await issueAsset(claimantPublicKey, credential.asset, credential.quantity, credential.id, true)
+      : await mintAssetByClass(claimantPublicKey, credential.asset.class, credential.quantity, credential.id, undefined, true);
+    const result = { status: 'claimed', credential: received };
+    await commitReplacement(res, {
+      requestId, op: 'world-drop-claim', predecessorIds: [credential.id], reason: 'claimed from a world drop', params,
+      successors: [received], response: result
+    });
+    if (listedHere) finishWorldDrop(dropId, claimantPublicKey);
     archiveIfAudited(credential, 'claimed from a world drop');
-    return received;
+    console.log('World drop claimed' + (viaDomain === DOMAIN ? ' locally' : ' via ' + viaDomain) + ':', credential.quantity, credential.asset.class, '->', claimantPublicKey.slice(0, 16) + '...');
+    return sendJson(res, 200, result);
+  }
+
+  // Why a relayed drop claim may not proceed, as {status, error, code}, or null. The owner's drop intent must be
+  // signed by the credential's owner and name this credential, the relaying domain, its world and the drop; the
+  // claimant's intent must name the same drop and be signed by the key the attestation delivers to.
+  // ATLAS_LEGACY_DROP_PEERS lists domains whose relays may omit both intents, for drops listed before owners signed
+  // them; it is empty unless an operator sets it.
+  async function worldDropRelayProblem({ credential, attestation, dropIntent, claimIntent }) {
+    const deny = (error, code) => ({ status: 403, error, code: code || 'owner-authorization-required' });
+    const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+    if (dropIntent === undefined || dropIntent === null) {
+      if (LEGACY_DROP_PEERS.has(attestation.relayingDomain)) return null;
+      return deny('This claim carries no drop intent signed by the credential\'s owner.');
+    }
+    if (!isObject(dropIntent) || !isObject(dropIntent.payload) || !isObject(dropIntent.proof)) return deny('The drop intent is malformed.');
+    const d = dropIntent.payload;
+    if (d.action !== 'drop' || d.credentialId !== credential.id || d.world !== attestation.world || d.domain !== attestation.relayingDomain || d.dropId !== attestation.dropId) {
+      return deny('The owner\'s drop intent does not authorize this credential in this world, domain and drop.');
+    }
+    let ownerOk = false;
+    try { ownerOk = typeof dropIntent.proof.publicKey === 'string' && await verifyEnvelope(d, dropIntent.proof); } catch (err) { ownerOk = false; }
+    if (!ownerOk) return deny('The owner\'s drop intent signature does not check out.', 'owner-signature-invalid');
+    if (!credential.owner || dropIntent.proof.publicKey !== credential.owner.publicKey) return deny('The drop intent was not signed by the owner of this credential.', 'not-owner');
+    if (!isObject(claimIntent) || !isObject(claimIntent.payload) || !isObject(claimIntent.proof)) return deny('This claim carries no claim intent signed by the claimant.');
+    const c = claimIntent.payload;
+    if (c.action !== 'claim' || c.dropId !== attestation.dropId || (c.domain !== undefined && c.domain !== attestation.relayingDomain)) {
+      return deny('The claimant\'s intent does not authorize claiming this drop.');
+    }
+    let claimantOk = false;
+    try { claimantOk = typeof claimIntent.proof.publicKey === 'string' && await verifyEnvelope(c, claimIntent.proof); } catch (err) { claimantOk = false; }
+    if (!claimantOk) return deny('The claimant\'s intent signature does not check out.', 'owner-signature-invalid');
+    if (claimIntent.proof.publicKey !== attestation.claimantPublicKey) return deny('The claim intent was not signed by the key this claim delivers to.', 'not-claimant');
+    return null;
   }
 
   // SPEC.md §7 v1.29 — the one settlement operation a Trading Station
@@ -5841,40 +6035,122 @@ async function main() {
   // it's already signed, so the wallet verifies it the same way it
   // verifies everything else, not because this domain vouches for it
   // twice over.
-  async function fulfillTradeSideSettlement(credential, spendQuantity, newOwnerPublicKey, mailNotice) {
+  // The journal key for one trade leg: the same trade and balance always map to the same id, so a leg that is asked for
+  // again (a retried claim, a relaying domain that never saw the answer) finds its recorded result.
+  function tradeLegRequestId(tradeId, credentialId) {
+    return 'tl-' + createHash('sha256').update(String(tradeId) + '\n' + String(credentialId)).digest('hex').slice(0, 48);
+  }
+  function tradeLegParams(tradeId, spendQuantity, newOwnerPublicKey, mail) {
+    return { newOwnerPublicKey, spendQuantity, tradeId: tradeId === undefined ? null : tradeId, mail: !!mail };
+  }
+  // Settles one side of a trade through the replacement journal: the successors are signed first, the balance is
+  // revoked in one atomic step, and the remainder notice and the mail to the absent party are applied as journalled
+  // effects, so a stop at any point leaves either the old balance or its successors live and a repeat returns the
+  // same result.
+  async function fulfillTradeSideSettlement(credential, spendQuantity, newOwnerPublicKey, mailNotice, tradeId) {
     const isUnique = credential.asset && credential.asset.fungible === false;
     const originalOwner = credential.owner.publicKey;
+    const params = tradeLegParams(tradeId, spendQuantity, newOwnerPublicKey, mailNotice);
+    const requestId = tradeId !== undefined && tradeId !== null ? tradeLegRequestId(tradeId, credential.id) : derivedRequestId('trade-leg', credential.id, params);
+    const busy = await lockSpend(credential.id);
+    if (busy) throw new Error(busy);
+    const release = await acquireSpendLock('rid:' + requestId, SPEND_LOCK_WAIT_MS);
+    if (!release) throw new Error('this balance is being settled by another request - try again');
+    try {
+      txnRecoverKey(requestId);
+      const prior = replayLookup(requestId, 'trade-leg', [credential.id], params);
+      if (prior) {
+        if (prior.conflict) throw new Error('this balance was already settled differently');
+        return prior.response;
+      }
 
-    let received, remainder;
-    if (isUnique) {
-      received = await transferUniqueAsset(newOwnerPublicKey, credential);
-      remainder = null;
-    } else {
-      const leftover = credential.quantity - spendQuantity;
-      [remainder, received] = await Promise.all([
-        leftover > 0 ? mintAssetByClass(originalOwner, credential.asset.class, leftover, credential.id) : Promise.resolve(null),
-        mintAssetByClass(newOwnerPublicKey, credential.asset.class, spendQuantity, credential.id)
-      ]);
+      let received, remainder;
+      if (isUnique) {
+        received = await transferUniqueAsset(newOwnerPublicKey, credential, true);
+        remainder = null;
+      } else {
+        const leftover = credential.quantity - spendQuantity;
+        [remainder, received] = await Promise.all([
+          leftover > 0 ? mintAssetByClass(originalOwner, credential.asset.class, leftover, credential.id, undefined, true) : Promise.resolve(null),
+          mintAssetByClass(newOwnerPublicKey, credential.asset.class, spendQuantity, credential.id, undefined, true)
+        ]);
+      }
+
+      const effects = [{ kind: 'archive', credential, reason: 'superseded' }];
+      if (mailNotice) {
+        if (remainder) effects.push({ kind: 'asset-update', update: { id: credential.id, status: 'superseded', reason: 'superseded', newCredential: remainder } });
+        const noticePayload = {
+          id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
+          credentialId: credential.id,
+          subject: mailNotice.subject,
+          body: mailNotice.body,
+          attachedAsset: mailNotice.attachedAsset,
+          sentAt: new Date().toISOString()
+        };
+        effects.push({ kind: 'mail', message: { ...noticePayload, signature: await sign(noticePayload) } });
+      }
+      const result = { received, remainder };
+      await commitReplacement(null, {
+        requestId, op: 'trade-leg', predecessorIds: [credential.id], reason: 'superseded', params,
+        successors: [received, remainder].filter(Boolean), response: result, effects
+      });
+      return result;
+    } finally {
+      release();
     }
+  }
 
-    revoke(credential.id, 'superseded');
-    archiveIfAudited(credential, 'superseded');
-
-    if (mailNotice) {
-      if (remainder) appendAssetUpdate({ id: credential.id, status: 'superseded', reason: 'superseded', newCredential: remainder });
-      const noticePayload = {
-        id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
-        credentialId: credential.id,
-        subject: mailNotice.subject,
-        body: mailNotice.body,
-        attachedAsset: mailNotice.attachedAsset,
-        sentAt: new Date().toISOString()
-      };
-      const noticeSignature = await sign(noticePayload);
-      appendMail({ ...noticePayload, signature: noticeSignature });
+  // True when this balance of this domain's own was already spent for this trade leg by an earlier request that then
+  // stopped (or whose answer was lost): the journal holds the committed leg for the same trade, new owner and
+  // quantity, and the presented credential is the genuine one for the party named. The ordinary "still live" checks
+  // cannot apply to it any more, and a retry resumes with the recorded result instead.
+  // True when a trade leg for this balance has committed in this domain's journal (whoever it was for).
+  async function tradeLegSettled(tradeId, credential) {
+    const requestId = tradeLegRequestId(tradeId, credential.id);
+    const release = await acquireSpendLock('rid:' + requestId, SPEND_LOCK_WAIT_MS);
+    if (!release) return false;
+    try {
+      txnRecoverKey(requestId);
+      return replayPeek(requestId, 'trade-leg') !== null;
+    } finally {
+      release();
     }
-
-    return { received, remainder };
+  }
+  // A claim whose first leg is settled by a foreign issuer leaves a record before anything is relayed, so a retry after a
+  // lost answer can tell its own earlier attempt from a balance that was spent some other way.
+  function tradeAttemptId(tradeId, credentialId) {
+    return 'tx-' + createHash('sha256').update(String(tradeId) + '\n' + String(credentialId)).digest('hex').slice(0, 48);
+  }
+  function tradeAttemptParams(claimantPublicKey, spendQuantity) { return { claimantPublicKey, spendQuantity }; }
+  function tradeAttemptMark(tradeId, credential, claimantPublicKey, spendQuantity) {
+    replayStore(tradeAttemptId(tradeId, credential.id), 'trade-attempt', [credential.id], tradeAttemptParams(claimantPublicKey, spendQuantity), {});
+  }
+  // True for a foreign balance this same claimant already tried to spend for this trade. The balance must still be the
+  // genuine credential, signed by its issuer, owned by the claimant and of the right class and size; what the issuer says
+  // about its revocation is left to the relay, which is the authority on it.
+  async function tradeAttemptResumable(tradeId, credential, claimantPublicKey, cls, spendQuantity) {
+    if (!credential || credential.credential !== 'domain-atlas-asset/1.0' || !credential.issuer || credential.issuer.domain === DOMAIN) return false;
+    if (!credential.owner || credential.owner.publicKey !== claimantPublicKey || !credential.asset || credential.asset.class !== cls) return false;
+    if (!(credential.quantity >= spendQuantity) || !isTrustedTradePeer(credential.issuer.domain)) return false;
+    const prior = replayLookup(tradeAttemptId(tradeId, credential.id), 'trade-attempt', [credential.id], tradeAttemptParams(claimantPublicKey, spendQuantity));
+    if (!prior || prior.conflict) return false;
+    return (await verifyForeignAssetCredential(credential, true)) === true;
+  }
+  async function tradeLegResumable(tradeId, credential, ownerPublicKey, cls, spendQuantity, newOwnerPublicKey, mail) {
+    if (!credential || credential.credential !== 'domain-atlas-asset/1.0' || !credential.issuer || credential.issuer.domain !== DOMAIN) return false;
+    if (!(await verifyOwnCredentialSignature(credential, assetPayloadOf(credential)))) return false;
+    if (!credential.owner || credential.owner.publicKey !== ownerPublicKey || !credential.asset || credential.asset.class !== cls) return false;
+    if (!isRevoked(credential.id)) return false;
+    const requestId = tradeLegRequestId(tradeId, credential.id);
+    const release = await acquireSpendLock('rid:' + requestId, SPEND_LOCK_WAIT_MS);
+    if (!release) return false;
+    try {
+      txnRecoverKey(requestId);
+      const prior = replayLookup(requestId, 'trade-leg', [credential.id], tradeLegParams(tradeId, spendQuantity, newOwnerPublicKey, mail));
+      return !!prior && !prior.conflict;
+    } finally {
+      release();
+    }
   }
 
   // Compensates a claimant whose balance was already spent by
@@ -5896,11 +6172,29 @@ async function main() {
   // fungible class, or the exact same unique item (transferred back,
   // preserving its instance state) for a non-fungible one.
   async function refundFailedSecondLeg(aReceived, offerB, claimantPublicKey) {
-    revoke(aReceived.id, 'refund: counterparty leg of this trade failed to settle');
-    archiveIfAudited(aReceived, 'refund: counterparty leg of this trade failed to settle');
-    return aReceived.asset.fungible === false
-      ? await transferUniqueAsset(claimantPublicKey, aReceived)
-      : await mintAssetByClass(claimantPublicKey, offerB.class, offerB.quantity, aReceived.id);
+    const params = { claimantPublicKey };
+    const requestId = derivedRequestId('trade-refund', aReceived.id, params);
+    const release = await acquireSpendLock('rid:' + requestId, SPEND_LOCK_WAIT_MS);
+    if (!release) throw new Error('this refund is already being processed - try again');
+    try {
+      txnRecoverKey(requestId);
+      const prior = replayLookup(requestId, 'trade-refund', [aReceived.id], params);
+      if (prior) {
+        if (prior.conflict) throw new Error('this refund was already settled differently');
+        return prior.response.refund;
+      }
+      const refund = aReceived.asset.fungible === false
+        ? await transferUniqueAsset(claimantPublicKey, aReceived, true)
+        : await mintAssetByClass(claimantPublicKey, offerB.class, offerB.quantity, aReceived.id, undefined, true);
+      const reason = 'refund: counterparty leg of this trade failed to settle';
+      await commitReplacement(null, {
+        requestId, op: 'trade-refund', predecessorIds: [aReceived.id], reason, params,
+        successors: [refund], response: { refund }, effects: [{ kind: 'archive', credential: aReceived, reason }]
+      });
+      return refund;
+    } finally {
+      release();
+    }
   }
 
   // SPEC.md §7 v1.29 — the OUTBOUND half of the /atlas/trade/relay-lock
@@ -5918,15 +6212,11 @@ async function main() {
     const attestationSignature = await sign(attestation);
     let res;
     try {
-      res = await fetch(baseUrl(domain) + '/atlas/trade/relay-lock', {
-        method: 'POST',
-        headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ credential, attestation, attestationSignature })
-      });
+      res = await peerRequest(domain, '/atlas/trade/relay-lock', { method: 'POST', body: { credential, attestation, attestationSignature } });
     } catch (err) {
-      throw new Error('could not reach ' + domain + ' (' + ((err.cause && err.cause.message) ? err.cause.message : err.message) + ')');
+      throw new Error(err instanceof OutboundError ? err.message : 'could not reach ' + domain);
     }
-    const body = await res.json().catch(() => ({}));
+    const body = await (async () => { try { return res.json(); } catch (e) { return {}; } })();
     if (!res.ok) throw new Error(body.error || (domain + ' refused the trade lock (HTTP ' + res.status + ')'));
     return body;
   }
@@ -5960,19 +6250,21 @@ async function main() {
     const attestation = { relayingDomain: DOMAIN, tradeId, credentialId: credential.id, spendQuantity, newOwnerPublicKey };
     if (mailDeliverAttachedAsset) attestation.mailDeliverAttachedAsset = mailDeliverAttachedAsset;
     const attestationSignature = await sign(attestation);
+    // An error carries `definite` when the issuer certainly did not settle the balance: it answered 400 or 403, which
+    // it does only before it changes anything. A lost connection, a timeout, a server error, or an answer that is not a
+    // settlement leaves the outcome unknown, and the caller must not undo its own side then.
+    const failure = (message, definite) => Object.assign(new Error(message), { definite: definite === true });
     const attempt = async () => {
       let res;
       try {
-        res = await fetch(baseUrl(domain) + '/atlas/trade/relay-settle', {
-          method: 'POST',
-          headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ credential, attestation, attestationSignature })
-        });
+        res = await peerRequest(domain, '/atlas/trade/relay-settle', { method: 'POST', body: { credential, attestation, attestationSignature } });
       } catch (err) {
-        throw new Error('could not reach ' + domain + ' (' + ((err.cause && err.cause.message) ? err.cause.message : err.message) + ')');
+        throw failure(err instanceof OutboundError ? err.message : 'could not reach ' + domain, false);
       }
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.error || (domain + ' refused the trade settle (HTTP ' + res.status + ')'));
+      let body = null;
+      try { body = await res.json(); } catch (e) { body = null; }
+      if (!res.ok) throw failure((body && body.error) || (domain + ' refused the trade settle (HTTP ' + res.status + ')'), res.status === 400 || res.status === 403);
+      if (!body || body.status !== 'settled' || !body.received || typeof body.received !== 'object') throw failure(domain + ' gave no usable answer to the trade settle', false);
       return body;
     };
     try {
@@ -5981,7 +6273,7 @@ async function main() {
       try {
         return await attempt();
       } catch (secondErr) {
-        throw new Error(firstErr.message + ' (retried once, also failed: ' + secondErr.message + ')');
+        throw failure(firstErr.message + ' (retried once, also failed: ' + secondErr.message + ')', secondErr.definite);
       }
     }
   }
@@ -7151,11 +7443,11 @@ async function main() {
         const { requestingDomain, id } = payload;
         let fetched;
         try {
-          const fetchRes = await fetch(baseUrl(requestingDomain) + '/atlas/demo/reserve/consortium/mint/?id=' + encodeURIComponent(id), { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS });
-          fetched = await fetchRes.json().catch(() => ({}));
+          const fetchRes = await peerRequest(requestingDomain, '/atlas/demo/reserve/consortium/mint/?id=' + encodeURIComponent(id));
+          fetched = await (async () => { try { return fetchRes.json(); } catch (e) { return {}; } })();
           if (!fetchRes.ok) throw new Error(fetched.error || ('HTTP ' + fetchRes.status));
         } catch (err) {
-          return sendJson(res, 502, { error: 'could not read the pending request from ' + requestingDomain + ': ' + err.message });
+          return sendJson(res, 502, { error: 'could not read the pending request from ' + requestingDomain + ': ' + (err instanceof OutboundError ? err.message : 'the domain did not give a usable answer') });
         }
         const request = fetched.request;
         if (!request || request.status !== 'pending') {
@@ -7169,14 +7461,10 @@ async function main() {
         const attestationSignature = await sign(attestation);
         let relayRes, relayBody;
         try {
-          relayRes = await fetch(baseUrl(requestingDomain) + '/atlas/demo/reserve/consortium/approve', {
-            method: 'POST',
-            headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id, attestation, attestationSignature })
-          });
-          relayBody = await relayRes.json().catch(() => ({}));
+          relayRes = await peerRequest(requestingDomain, '/atlas/demo/reserve/consortium/approve', { method: 'POST', body: { id, attestation, attestationSignature } });
+          relayBody = await (async () => { try { return relayRes.json(); } catch (e) { return {}; } })();
         } catch (err) {
-          return sendJson(res, 502, { error: 'could not reach ' + requestingDomain + ' to relay the co-sign: ' + err.message });
+          return sendJson(res, 502, { error: 'could not reach ' + requestingDomain + ' to relay the co-sign' });
         }
         if (!relayRes.ok) return sendJson(res, 400, { error: relayBody.error || (requestingDomain + ' refused the co-sign (HTTP ' + relayRes.status + ')') });
         console.log('Demo reserve consortium: co-signed', id, 'for', requestingDomain, 'as', DOMAIN);
@@ -7842,6 +8130,12 @@ async function main() {
           return sendJson(res, 400, { error: "reissue only applies to a non-fungible asset — a fungible class's properties/tradeScope are fixed per class (SPEC.md §5.1), not per credential" });
         }
         { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
+        // Journalled like a split: the result is decided and recorded before the old credential is revoked, and
+        // asking again after a stop returns it. The administrator sends no request id, so one is derived from what
+        // is being asked.
+        const replaceParams = { tradeScope: hasTradeScope ? tradeScope : null, properties: hasProperties ? properties : null };
+        const reissueRequestId = derivedRequestId('reissue', credential.id, replaceParams);
+        if (await beginReplacement(res, reissueRequestId, 'reissue', [credential], replaceParams)) return;
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
         if (isSuspended(credential.id)) return sendJson(res, 400, { error: 'credential is currently suspended pending review' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
@@ -7858,14 +8152,16 @@ async function main() {
           ...(hasTradeScope ? { tradeScope } : {}),
           ...(hasProperties ? { properties: mergeProperties(credential.asset.properties, properties) } : {})
         };
-        const newCredential = await issueAsset(credential.owner.publicKey, newAsset, credential.quantity, credential.id);
-        // Same ordering guarantee §5.4's split/consolidate already give:
-        // the new credential is signed FIRST, then the old one revoked —
-        // a crash between the two would leave an extra valid asset rather
-        // than a holder with neither.
-        revoke(credential.id, 'superseded');
-        archiveIfAudited(credential, 'superseded');
-        appendAssetUpdate({ id: credential.id, status: 'superseded', reason: 'superseded', newCredential });
+        const newCredential = await issueAsset(credential.owner.publicKey, newAsset, credential.quantity, credential.id, true);
+        // Signed first, revoked second, and published last: the update is applied only once the revocation has
+        // committed (see txnApplyEffects), so a stop at any point leaves the owner with the old credential or with
+        // the new one, never neither and never both.
+        const update = { id: credential.id, status: 'superseded', reason: 'superseded', newCredential };
+        await commitReplacement(res, {
+          requestId: reissueRequestId, op: 'reissue', predecessorIds: [credential.id], reason: 'superseded', params: replaceParams,
+          successors: [newCredential], response: { newCredential },
+          effects: [{ kind: 'archive', credential, reason: 'superseded' }, { kind: 'asset-update', update }]
+        });
         console.log('Reissued', credential.asset.name, credential.id, '->', newCredential.id);
         return sendJson(res, 200, { newCredential });
       }
@@ -8251,13 +8547,23 @@ async function main() {
           return sendJson(res, 400, { error: "toPublicKey already matches the credential's current owner — nothing to claw back" });
         }
         { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
+        // Journalled like a split: what the clawback produces is decided and recorded before the old credential is
+        // revoked, and asking again after a stop returns it. The administrator sends no request id, so one is
+        // derived from what is being asked.
+        const replaceParams = { toPublicKey };
+        const clawbackRequestId = derivedRequestId('clawback', credential.id, replaceParams);
+        if (await beginReplacement(res, clawbackRequestId, 'clawback', [credential], replaceParams)) return;
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked — nothing to claw back' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
 
-        const newCredential = await issueAsset(toPublicKey, credential.asset, credential.quantity, credential.id);
-        revoke(credential.id, 'clawback');
-        archiveIfAudited(credential, 'clawback');
+        const newCredential = await issueAsset(toPublicKey, credential.asset, credential.quantity, credential.id, true);
+        // The mail notice and the membership roster entry are applied only once the revocation has committed (see
+        // txnApplyEffects), and again by recovery if the request stopped before they were. The notice is looked up
+        // before the roster is re-pointed: clawing back a membership straight to its rightful owner already hands
+        // them the new credential in the response, and re-pointing first would make the lookup mail them a
+        // redundant copy.
+        const effects = [{ kind: 'archive', credential, reason: 'clawback' }];
 
         const recipientMember = findLiveMember(readPostOfficeMembers(), toPublicKey);
         let delivered = false;
@@ -8271,37 +8577,16 @@ async function main() {
             sentAt: new Date().toISOString()
           };
           const noticeSignature = await sign(noticePayload);
-          appendMail({ ...noticePayload, signature: noticeSignature });
+          effects.push({ kind: 'mail', message: { ...noticePayload, signature: noticeSignature } });
           delivered = true;
         }
-
-        // Roster fix-up runs AFTER the mail-delivery lookup above, not
-        // before: clawing back a membership credential straight back to
-        // its own rightful owner already hands them the new credential
-        // directly in the response, the way a hijacked account gets reset
-        // — re-pointing the roster first would make the lookup above find
-        // that very entry and mail them a redundant copy of what they're
-        // already holding.
-        if (credential.asset.class === 'atlas.postoffice.membership') {
-          const poDoc = readPostOfficeMembers();
-          const member = poDoc.members.find((m) => m.credentialId === credential.id);
-          if (member) {
-            member.credentialId = newCredential.id;
-            member.ownerPublicKey = toPublicKey;
-            member.sendLog = [];
-            member.recentSendCount = 0;
-            member.flagged = false;
-            fs.writeFileSync(POSTOFFICE_MEMBERS_FILE, JSON.stringify(poDoc, null, 2));
-          }
-        } else if (credential.asset.class === 'atlas.tradingstation.membership') {
-          const tsDoc = readTradingStationMembers();
-          const member = tsDoc.members.find((m) => m.credentialId === credential.id);
-          if (member) {
-            member.credentialId = newCredential.id;
-            member.ownerPublicKey = toPublicKey;
-            fs.writeFileSync(TRADINGSTATION_MEMBERS_FILE, JSON.stringify(tsDoc, null, 2));
-          }
+        if (credential.asset.class === 'atlas.postoffice.membership' || credential.asset.class === 'atlas.tradingstation.membership') {
+          effects.push({ kind: 'membership', class: credential.asset.class, oldId: credential.id, newId: newCredential.id, owner: toPublicKey });
         }
+        await commitReplacement(res, {
+          requestId: clawbackRequestId, op: 'clawback', predecessorIds: [credential.id], reason: 'clawback', params: replaceParams,
+          successors: [newCredential], response: { status: 'clawed-back', newCredential, delivered }, effects
+        });
 
         console.log('Clawed back', credential.asset.class, credential.id, '-> reissued to', toPublicKey.slice(0, 16) + '...', delivered ? '(delivered by mail)' : '(returned in response only)', 'by admin', auth.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { status: 'clawed-back', newCredential, delivered });
@@ -8574,32 +8859,30 @@ async function main() {
         // With a requestId the transfer is a replacement like a split: the signed result is journalled before
         // the original is revoked and stored for a repeat, so an answer that never arrives can be asked for
         // again. The intent must then name the requestId and nothing else beyond the three transfer fields.
-        const requestId = parseRequestId(transferBody);
+        // A request without an id is journalled under one derived from what is asked, so the older request shape is as
+        // recoverable as the new one: the same request, sent again after a stop, finds the recorded result.
+        let requestId = parseRequestId(transferBody);
         if (requestId) {
           const refusal = await ownerIntentProblem(transferBody, { action: 'transfer', credentialId: credential.id, recipientPublicKey, requestId }, [credential]);
           if (refusal) return sendJson(res, 403, refusal);
-          if (await beginReplacement(res, requestId, 'transfer', [credential], { recipientPublicKey })) return;
+        } else {
+          // A stored result is the recipient's credential, so it is only ever handed to the credential's own owner.
+          if (!credential.owner || credential.owner.publicKey !== senderPub) return sendJson(res, 400, spendProblemBody('asset does not belong to this signer', credential));
+          requestId = derivedRequestId('transfer', credential.id, { recipientPublicKey });
         }
+        if (await beginReplacement(res, requestId, 'transfer', [credential], { recipientPublicKey })) return;
 
         const problem = await checkPresentedGiftableAsset(credential, senderPub, credential.asset && credential.asset.class);
         if (problem) return sendJson(res, 400, spendProblemBody(problem, credential));
 
-        if (requestId) {
-          const received = await issueAsset(recipientPublicKey, credential.asset, credential.quantity, credential.id, true);
-          const transferResult = { status: 'transferred', credential: received };
-          await commitReplacement(res, {
-            requestId, op: 'transfer', predecessorIds: [credential.id], reason: 'transferred', params: { recipientPublicKey },
-            successors: [received], response: transferResult
-          });
-          archiveIfAudited(credential, 'transferred');
-          console.log('Transferred', credential.asset.class, credential.id, '->', recipientPublicKey.slice(0, 16) + '...');
-          return sendJson(res, 200, transferResult);
-        }
-        const received = await transferUniqueAsset(recipientPublicKey, credential);
-        revoke(credential.id, 'transferred');
-        archiveIfAudited(credential, 'transferred');
+        const received = await issueAsset(recipientPublicKey, credential.asset, credential.quantity, credential.id, true);
+        const transferResult = { status: 'transferred', credential: received };
+        await commitReplacement(res, {
+          requestId, op: 'transfer', predecessorIds: [credential.id], reason: 'transferred', params: { recipientPublicKey },
+          successors: [received], response: transferResult, effects: [{ kind: 'archive', credential, reason: 'transferred' }]
+        });
         console.log('Transferred', credential.asset.class, credential.id, '->', recipientPublicKey.slice(0, 16) + '...');
-        return sendJson(res, 200, { status: 'transferred', credential: received });
+        return sendJson(res, 200, transferResult);
       }
 
       // SPEC.md §13's "entering the system" — transfer's own sibling,
@@ -9344,7 +9627,11 @@ async function main() {
         // decided by that side's own presented balance's signed fungible
         // flag — see /atlas/trade/submit's own comment on this same choice.
         const offerBIsUnique = !!(balanceB && balanceB.asset && balanceB.asset.fungible === false);
-        const claimantBalanceProblem = offerBIsUnique
+        // A claimant whose earlier attempt stopped after this balance was spent for this trade resumes from the recorded
+        // result instead (tradeLegResumable).
+        const balanceBResumed = (await tradeLegResumable(posted.id, balanceB, claimantPub, offerB.class, offerB.quantity, posterPub, false))
+          || (await tradeAttemptResumable(posted.id, balanceB, claimantPub, offerB.class, offerB.quantity));
+        const claimantBalanceProblem = balanceBResumed ? null : offerBIsUnique
           ? await checkPresentedUniqueAsset(balanceB, claimantPub, offerB.class)
           : await checkPresentedAsset(balanceB, claimantPub, offerB.class, offerB.quantity);
         if (claimantBalanceProblem) return sendJson(res, 400, { error: 'balance: ' + claimantBalanceProblem });
@@ -9353,7 +9640,11 @@ async function main() {
         // when it was posted) in case it was since spent or revoked some
         // other way.
         const offerAIsUnique = !!(balanceA && balanceA.asset && balanceA.asset.fungible === false);
-        const posterBalanceProblem = offerAIsUnique
+        const balanceAResumed = await tradeLegResumable(posted.id, balanceA, posterPub, offerA.class, offerA.quantity, claimantPub, true);
+        // The poster's balance comes from the listing, not from the claimant. When this claim's first leg already settled,
+        // the issuer of the poster's balance is the authority on whether its own leg did too, so a revocation there is not
+        // grounds to withdraw the listing.
+        const posterBalanceProblem = (balanceAResumed || balanceBResumed) ? null : offerAIsUnique
           ? await checkPresentedUniqueAsset(balanceA, posterPub, offerA.class)
           : await checkPresentedAsset(balanceA, posterPub, offerA.class, offerA.quantity);
         if (posterBalanceProblem) {
@@ -9375,6 +9666,8 @@ async function main() {
         const tradeId = posted.id;
         const lockExpiresAt = new Date(Date.now() + 120000).toISOString();
 
+        if (issuerBDomain !== DOMAIN) tradeAttemptMark(tradeId, balanceB, claimantPub, offerB.quantity);
+
         // Lock phase first, BEFORE either side mutates anything: if a
         // foreign issuer refuses the lock, nothing has been spent yet, and
         // whichever lock did succeed just self-expires (relayTradeLock's
@@ -9395,7 +9688,7 @@ async function main() {
         let bSide;
         try {
           bSide = issuerBDomain === DOMAIN
-            ? await fulfillTradeSideSettlement(balanceB, offerB.quantity, posterPub, null)
+            ? await fulfillTradeSideSettlement(balanceB, offerB.quantity, posterPub, null, tradeId)
             : await relayTradeSettle(issuerBDomain, tradeId, balanceB, offerB.quantity, posterPub, null);
         } catch (err) {
           return sendJson(res, 502, { error: "could not settle the claimant's balance at " + issuerBDomain + ': ' + err.message, code: 'claim-unresolved' });
@@ -9410,7 +9703,7 @@ async function main() {
         let aSide;
         try {
           aSide = issuerADomain === DOMAIN
-            ? await fulfillTradeSideSettlement(balanceA, offerA.quantity, claimantPub, mailNotice)
+            ? await fulfillTradeSideSettlement(balanceA, offerA.quantity, claimantPub, mailNotice, tradeId)
             : await relayTradeSettle(issuerADomain, tradeId, balanceA, offerA.quantity, claimantPub, aReceived);
         } catch (err) {
           // B's side already settled above — balanceB is genuinely spent
@@ -9419,6 +9712,12 @@ async function main() {
           // refundFailedSecondLeg()'s own comment); a foreign spend has
           // no refund path yet, so the claimant is told plainly instead
           // of being left to discover a silently-revoked balance later.
+          // A foreign issuer whose outcome is unknown may have settled the poster's balance. Refunding then would pay the
+          // claimant twice, so nothing is undone and the stored outcome is left open: the same claim asked again finds the
+          // issuer's recorded result (or settles it), or a definite refusal, which is refunded.
+          if (issuerADomain !== DOMAIN && err.definite !== true) {
+            return sendJson(res, 502, { error: "could not confirm the poster's settlement at " + issuerADomain + ' (' + err.message + ') - ask again with the same claim; nothing has been refunded or lost', code: 'claim-unresolved' });
+          }
           let refund = null, refundNote;
           if (issuerBDomain === DOMAIN) {
             try {
@@ -9474,7 +9773,10 @@ async function main() {
         if (!isTrustedTradePeer(relayingDomain)) return sendJson(res, 403, { error: 'this domain does not accept trade relays from ' + relayingDomain });
 
         { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
-        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that balance has already been revoked' });
+        // A balance already spent by this very trade's settlement is not an error: the relaying domain is asking again
+        // after a lost answer, and the settle that follows replays the recorded result.
+        const settledForThisTrade = isRevoked(credential.id) && await tradeLegSettled(attestation.tradeId, credential);
+        if (isRevoked(credential.id) && !settledForThisTrade) return sendJson(res, 400, { error: 'that balance has already been revoked' });
         // Any existing suspension that isn't THIS exact trade's own lock —
         // whether it's a different pending trade or an unrelated admin
         // review — means this balance isn't free to lock right now.
@@ -9500,6 +9802,7 @@ async function main() {
         // findSuspension() already gives every other suspension in this
         // file, instead of standing up a second code path that itself
         // needs to be reachable and trusted to run.
+        if (settledForThisTrade) return sendJson(res, 200, { status: 'locked', expiresAt: attestation.expiresAt, settled: true });
         suspend(credential.id, 'trade-lock:' + attestation.tradeId, attestation.expiresAt);
         console.log('Trade balance locked for', relayingDomain + ':', credential.asset.class, credential.id);
         return sendJson(res, 200, { status: 'locked', expiresAt: attestation.expiresAt });
@@ -9565,6 +9868,25 @@ async function main() {
           return sendJson(res, 200, { status: 'settled', received: existingResult.received, remainder: existingResult.remainder });
         }
 
+        // A leg that committed in the journal but whose answer, unlock or recorded result did not happen is completed here.
+        {
+          const legParams = tradeLegParams(tradeId, spendQuantity, newOwnerPublicKey, !!attestation.mailDeliverAttachedAsset);
+          const legId = tradeLegRequestId(tradeId, credential.id);
+          const release = await acquireSpendLock('rid:' + legId, SPEND_LOCK_WAIT_MS);
+          if (!release) return sendJson(res, 503, { error: 'this balance is being settled by another request - try again', code: 'busy' });
+          let recorded = null;
+          try {
+            txnRecoverKey(legId);
+            const prior = replayLookup(legId, 'trade-leg', [credential.id], legParams);
+            if (prior && !prior.conflict) recorded = prior.response;
+          } finally { release(); }
+          if (recorded) {
+            unsuspend(credential.id);
+            recordRelaySettleResult(tradeId, credential.id, recorded.received, recorded.remainder);
+            return sendJson(res, 200, { status: 'settled', received: recorded.received, remainder: recorded.remainder });
+          }
+        }
+
         { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that balance has already been revoked' });
         const lock = findSuspension(credential.id);
@@ -9603,7 +9925,7 @@ async function main() {
           };
         }
 
-        const settled = await fulfillTradeSideSettlement(credential, spendQuantity, newOwnerPublicKey, mailNotice);
+        const settled = await fulfillTradeSideSettlement(credential, spendQuantity, newOwnerPublicKey, mailNotice, tradeId);
         unsuspend(credential.id);
         // Recorded BEFORE responding, so a response lost in transit from
         // this exact point onward is still recoverable by a retry (the
@@ -9666,6 +9988,14 @@ async function main() {
         if (intent.payload.credentialId !== credential.id || intent.payload.world !== world || intent.payload.action !== 'drop') {
           return sendJson(res, 400, { error: 'intent does not authorize dropping this credential into this world' });
         }
+        // The owner's intent also names the domain hosting the drop and the drop's id: that is what lets the
+        // credential's issuer, reached later by a relayed claim, tell this exact drop from any other use of a copy.
+        if (intent.payload.domain !== undefined && intent.payload.domain !== DOMAIN) {
+          return sendJson(res, 400, { error: 'intent names a different domain than this one' });
+        }
+        if (intent.payload.dropId !== undefined && !WORLD_DROP_ID_PATTERN.test(String(intent.payload.dropId))) {
+          return sendJson(res, 400, { error: 'intent carries a malformed drop id' });
+        }
 
         const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
         if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
@@ -9673,9 +10003,16 @@ async function main() {
         const dropperPub = intent.proof.publicKey;
         const problem = await checkPresentedTransferableAsset(credential, dropperPub, credential.asset && credential.asset.class);
         if (problem) return sendJson(res, 400, { error: problem });
+        const foreignItem = credential.issuer.domain !== DOMAIN;
+        if (foreignItem && (intent.payload.domain !== DOMAIN || intent.payload.dropId === undefined)) {
+          return sendJson(res, 400, { error: 'an item issued by another domain can only be dropped with an intent naming this domain and a drop id - update the wallet', code: 'owner-authorization-required' });
+        }
+        if (intent.payload.dropId !== undefined && readWorldDrops().drops.some((d) => d.dropId === intent.payload.dropId)) {
+          return sendJson(res, 409, { error: 'that drop id is already in use' });
+        }
 
-        const dropId = 'urn:atlas:worlddrop:' + webcrypto.randomUUID();
-        appendWorldDrop({ dropId, world, position, credential, droppedBy: dropperPub, droppedAt: new Date().toISOString() });
+        const dropId = intent.payload.dropId !== undefined ? intent.payload.dropId : 'urn:atlas:worlddrop:' + webcrypto.randomUUID();
+        appendWorldDrop({ dropId, world, position, credential, droppedBy: dropperPub, droppedAt: new Date().toISOString(), dropIntent: { payload: intent.payload, proof: intent.proof } });
         console.log('Dropped in', world + ':', credential.quantity, credential.asset.class, '(issued by', credential.issuer.domain + ')');
         return sendJson(res, 200, { status: 'dropped', dropId });
       }
@@ -9689,39 +10026,36 @@ async function main() {
       if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/world/drops') {
         const world = new URLSearchParams(req.url.split('?')[1] || '').get('world');
         if (!world) return sendJson(res, 400, { error: 'world is required' });
-        const drops = readWorldDrops().drops.filter((d) => d.world === world);
+        const drops = readWorldDrops().drops.filter((d) => d.world === world && !d.claimedBy).map(({ dropIntent, reservedBy, reservedAt, ...listed }) => listed);
         return sendJson(res, 200, { domain: DOMAIN, world, drops });
       }
 
-      // Claim (pick up) one specific drop by id. Reservation happens by
-      // REMOVING the entry before doing anything else — same "the file
-      // write is the lock" reasoning as removePendingTrade at trade-claim
-      // time (single-threaded Node here; issuer-php's mirror flock()s the
-      // equivalent file for the same reason its trade store already does).
-      // Whichever concurrent claim call's removeWorldDrop() actually finds
-      // and deletes the entry wins; a losing concurrent call gets a plain
-      // "gone" 404, the same experience as reaching for something someone
-      // else already picked up a half-second earlier.
+      // Claim (pick up) one specific drop by id. The listing is reserved for the claimant (reserveWorldDrop), settled
+      // through the replacement journal, and only then marked claimed (finishWorldDrop), so a claimant whose answer
+      // was lost asks again and is handed the recorded result. A concurrent claimant gets 409 while the reservation
+      // lives and a plain "gone" 404 once the item has been claimed.
       if (req.method === 'POST' && req.url === '/atlas/world/drops/claim') {
         const { dropId, intent } = JSON.parse((await readBody(req)) || '{}');
         if (!dropId || !intent) return sendJson(res, 400, { error: 'dropId and intent are both required' });
         if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
         if (intent.payload.dropId !== dropId || intent.payload.action !== 'claim') return sendJson(res, 400, { error: 'intent does not authorize claiming this drop' });
+        if (intent.payload.domain !== undefined && intent.payload.domain !== DOMAIN) return sendJson(res, 400, { error: 'intent names a different domain than this one' });
 
         const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
         if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
         const claimantPub = intent.proof.publicKey;
 
-        const won = removeWorldDrop(dropId);
-        if (!won) return sendJson(res, 404, { error: 'that item is gone — already picked up, or reclaimed by whoever dropped it' });
+        const reserved = reserveWorldDrop(dropId, claimantPub);
+        if (reserved.status === 'gone') return sendJson(res, 404, { error: 'that item is gone — already picked up, or reclaimed by whoever dropped it' });
+        if (reserved.status === 'busy') return sendJson(res, 409, { error: 'someone else is picking that item up right now — try again shortly', code: 'busy' });
+        faultPoint('drop:reserved');
+        const won = reserved.drop;
 
         const { credential, world } = won;
         if (credential.issuer.domain === DOMAIN) {
           // Same domain issued it and hosts the drop — no relay needed,
           // straight to the shared mint/revoke primitive.
-          const received = await fulfillWorldDropClaim(credential, claimantPub);
-          console.log('World drop claimed locally:', credential.quantity, credential.asset.class, '->', claimantPub.slice(0, 16) + '...');
-          return sendJson(res, 200, { status: 'claimed', credential: received });
+          return settleWorldDropClaim(res, { credential, claimantPublicKey: claimantPub, dropId, viaDomain: DOMAIN });
         }
 
         // Cross-domain: this server can host the listing but cannot
@@ -9734,52 +10068,51 @@ async function main() {
         const attestationSignature = await sign(attestation);
         let relayRes;
         try {
-          relayRes = await fetch(baseUrl(credential.issuer.domain) + '/atlas/world/drops/relay-claim', {
-            method: 'POST',
-            headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ credential, attestation, attestationSignature })
+          relayRes = await peerRequest(credential.issuer.domain, '/atlas/world/drops/relay-claim', {
+            method: 'POST', body: { credential, attestation, attestationSignature, dropIntent: won.dropIntent, claimIntent: intent }
           });
         } catch (err) {
-          // The reservation above already removed the listing — this is
-          // the same acknowledged gap trade/claim's own multi-mint
-          // Promise.all has (no cross-call rollback in this demo); a
-          // network failure here can strand the item rather than restore
-          // the listing. Documented, not hidden.
-          return sendJson(res, 502, { error: 'could not reach ' + credential.issuer.domain + ' to complete this claim: ' + ((err.cause && err.cause.message) ? err.cause.message : err.message) });
+          // Whether the issuer acted on the claim is unknown, so the reservation stays: the same claimant asking again
+          // is handed the issuer's recorded result, and the item is listed again for everyone once the reservation lapses.
+          return sendJson(res, 502, { error: 'could not reach ' + credential.issuer.domain + ' to complete this claim' });
         }
-        const relayBody = await relayRes.json().catch(() => ({}));
-        if (!relayRes.ok) {
-          return sendJson(res, relayRes.status, { error: credential.issuer.domain + ' rejected this claim: ' + (relayBody.error || 'unknown reason') });
+        let relayBody = {};
+        try { relayBody = (await relayRes.json()) || {}; } catch (e) { relayBody = {}; }
+        if (relayRes.ok) {
+          const delivered = relayBody.credential;
+          if (relayBody.status !== 'claimed' || !delivered || !delivered.owner || delivered.owner.publicKey !== claimantPub) {
+            return sendJson(res, 502, { error: credential.issuer.domain + ' gave no usable answer to this claim; ask again' });
+          }
+          finishWorldDrop(dropId, claimantPub);
+          console.log('World drop claimed via relay to', credential.issuer.domain + ':', credential.quantity, credential.asset.class, '->', claimantPub.slice(0, 16) + '...');
+          return sendJson(res, 200, relayBody);
         }
-        console.log('World drop claimed via relay to', credential.issuer.domain + ':', credential.quantity, credential.asset.class, '->', claimantPub.slice(0, 16) + '...');
-        return sendJson(res, 200, relayBody);
+        // A refusal that will not change (the owner never authorized it, the credential is spent) clears the listing;
+        // anything that may pass (busy, a conflicting claim still settling, a server error) keeps the reservation.
+        if ([400, 403, 404].includes(relayRes.status) && relayBody.code !== 'busy') removeWorldDrop(dropId);
+        return sendJson(res, relayRes.status, { error: credential.issuer.domain + ' rejected this claim: ' + (relayBody.error || 'unknown reason') });
       }
 
-      // The far end of the relay above: THIS domain is being told by
-      // ANOTHER domain (the one currently hosting the drop in one of its
-      // worlds) that a credential this domain itself issued has just been
-      // legitimately claimed by someone, naming who should receive it.
-      // Trust here rests on the SAME two checks /atlas/postoffice/relay's
-      // own receiving side already relies on: the attestation is signed by
-      // the domain it claims to be from (fetchDomainPublicKey + a fresh
-      // cross-domain fetch, not a cached/self-reported key), and the
-      // credential itself is genuinely this domain's own, still-live,
-      // unrevoked signature — this domain does NOT re-derive who originally
-      // dropped it or re-check the relaying domain's own bookkeeping; that
-      // domain's signed word on "this was a legitimate reservation" is the
-      // trust boundary, exactly as one federated domain's word on
-      // "this sender holds a valid membership" already is for mail relay.
+      // The far end of the relay above: another domain, hosting a drop in one of its worlds, asks this domain (the
+      // credential's issuer, the only holder of the key that can re-sign it) to settle a claim. The relaying domain's
+      // attestation proves who sent the request. It does not prove the owner placed the credential there, so the
+      // request must also carry the owner's signed drop intent and the claimant's signed claim intent
+      // (worldDropRelayProblem), and settlement goes through the replacement journal (settleWorldDropClaim).
       if (req.method === 'POST' && req.url === '/atlas/world/drops/relay-claim') {
-        const { credential, attestation, attestationSignature } = JSON.parse((await readBody(req)) || '{}');
+        const { credential, attestation, attestationSignature, dropIntent, claimIntent } = JSON.parse((await readBody(req)) || '{}');
         if (!credential || !attestation || !attestationSignature) return sendJson(res, 400, { error: 'credential, attestation, and attestationSignature are all required' });
         if (!credential.asset || !credential.issuer || credential.issuer.domain !== DOMAIN) return sendJson(res, 400, { error: 'this domain did not issue that credential' });
         if (attestation.credentialId !== credential.id) return sendJson(res, 400, { error: 'attestation does not name the credential it was sent with' });
-        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
-        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that credential has already been revoked — nothing to claim' });
-        if (isSuspended(credential.id)) return sendJson(res, 400, { error: 'that credential is currently suspended pending review — nothing to claim' });
-
+        if (typeof attestation.relayingDomain !== 'string' || typeof attestation.claimantPublicKey !== 'string' || typeof attestation.dropId !== 'string' || typeof attestation.world !== 'string') {
+          return sendJson(res, 400, { error: 'attestation must name the relaying domain, world, drop and claimant' });
+        }
         const ownSignatureOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!ownSignatureOk) return sendJson(res, 400, { error: 'credential signature does not check out against this domain\'s own key' });
+
+        // The relaying domain's signature says who sent this request. Whether the credential may move at all rests on
+        // the owner's own signed drop intent and the claimant's own signed claim, both checked here.
+        const refusal = await worldDropRelayProblem({ credential, attestation, dropIntent, claimIntent });
+        if (refusal) return sendJson(res, refusal.status, { error: refusal.error, code: refusal.code });
 
         let relayingDomainKey;
         try {
@@ -9790,9 +10123,7 @@ async function main() {
         const attestationOk = await verifyDomainSignature(relayingDomainKey, attestation, attestationSignature);
         if (!attestationOk) return sendJson(res, 400, { error: attestation.relayingDomain + '\'s attestation signature does not check out' });
 
-        const received = await fulfillWorldDropClaim(credential, attestation.claimantPublicKey);
-        console.log('World drop relay-claimed from', attestation.relayingDomain + ':', credential.quantity, credential.asset.class, '->', attestation.claimantPublicKey.slice(0, 16) + '...');
-        return sendJson(res, 200, { status: 'claimed', credential: received });
+        return settleWorldDropClaim(res, { credential, claimantPublicKey: attestation.claimantPublicKey, dropId: attestation.dropId, viaDomain: attestation.relayingDomain });
       }
 
       // --- mail (correspondence tied to a held credential — see task
@@ -9959,6 +10290,9 @@ async function main() {
         try { body = JSON.parse((await readBody(req)) || '{}'); } catch (e) { return sendJson(res, 400, { error: 'invalid JSON body' }); }
         const auth = await authenticateMailRequest(body, 'mail-check');
         if (auth.error) return sendJson(res, auth.error.status, auth.error.body);
+        // A replacement that stopped after its revocation is completed (its update published) before this check-in
+        // reads the updates.
+        await txnSweep().catch((err) => console.error('transaction recovery:', err.message));
         const requested = body.payload.credentialIds;
         const credentials = body.credentials;
         if (!Array.isArray(requested) || requested.length === 0 || requested.length > MAIL_CHECK_MAX_CREDENTIALS || !requested.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 512)) {
@@ -10210,15 +10544,11 @@ async function main() {
           const relaySignature = await sign(relayAttestation);
           let relayRes;
           try {
-            relayRes = await fetch(baseUrl(payload.to.domain) + '/atlas/postoffice/relay', {
-              method: 'POST',
-              headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ payload, proof, relayAttestation, relaySignature })
-            });
+            relayRes = await peerRequest(payload.to.domain, '/atlas/postoffice/relay', { method: 'POST', body: { payload, proof, relayAttestation, relaySignature } });
           } catch (err) {
-            return sendJson(res, 502, { error: 'could not reach ' + payload.to.domain + ' to relay this message: ' + ((err.cause && err.cause.message) ? err.cause.message : err.message) });
+            return sendJson(res, 502, { error: 'could not reach ' + payload.to.domain + ' to relay this message' });
           }
-          const relayBody = await relayRes.json().catch(() => ({}));
+          const relayBody = await (async () => { try { return relayRes.json(); } catch (e) { return {}; } })();
           if (!relayRes.ok) {
             return sendJson(res, relayRes.status, { error: payload.to.domain + ' rejected this message: ' + (relayBody.error || 'unknown reason') });
           }

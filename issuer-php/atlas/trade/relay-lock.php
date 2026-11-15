@@ -52,7 +52,10 @@ if (!atlas_is_trusted_trade_peer($relayingDomain)) {
 
 $busy = atlas_spend_lock($credential['id']);
 if ($busy !== null) send_json(409, ['error' => $busy]);
-if (is_revoked($credential['id'])) {
+// A balance already spent by this very trade's settlement is not an error: the relaying domain is asking again after a
+// lost answer, and the settle that follows replays the recorded result.
+$settledForThisTrade = is_revoked($credential['id']) && atlas_trade_leg_settled($attestation['tradeId'], $credential);
+if (is_revoked($credential['id']) && !$settledForThisTrade) {
   send_json(400, ['error' => 'that balance has already been revoked']);
 }
 // Any existing suspension that isn't THIS exact trade's own lock — whether
@@ -86,5 +89,6 @@ if (!$attestationOk) {
 // lifts itself, the same self-healing find_suspension() already gives
 // every other suspension in this bundle, instead of standing up a second
 // code path that itself needs to be reachable and trusted to run.
+if ($settledForThisTrade) send_json(200, ['status' => 'locked', 'expiresAt' => $attestation['expiresAt'], 'settled' => true]);
 atlas_suspend($credential['id'], 'trade-lock:' . $attestation['tradeId'], $attestation['expiresAt']);
 send_json(200, ['status' => 'locked', 'expiresAt' => $attestation['expiresAt']]);

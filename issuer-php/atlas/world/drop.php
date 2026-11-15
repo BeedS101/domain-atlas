@@ -42,13 +42,31 @@ if (($payload['credentialId'] ?? null) !== $credential['id'] || ($payload['world
   send_json(400, ['error' => 'intent does not authorize dropping this credential into this world']);
 }
 
+// The owner's intent also names the domain hosting the drop and the drop's id: that is what lets the credential's
+// issuer, reached later by a relayed claim, tell this exact drop from any other use of a copy.
+if (array_key_exists('domain', $payload) && $payload['domain'] !== atlas_domain()) {
+  send_json(400, ['error' => 'intent names a different domain than this one']);
+}
+if (array_key_exists('dropId', $payload) && (!is_string($payload['dropId']) || !preg_match(ATLAS_WORLD_DROP_ID_PATTERN, $payload['dropId']))) {
+  send_json(400, ['error' => 'intent carries a malformed drop id']);
+}
+
 $envelopeOk = verify_envelope($payload, $intent['proof']);
 if (!$envelopeOk) send_json(400, ['error' => 'intent signature does not check out']);
 $dropperPub = $intent['proof']['publicKey'];
 
 $problem = check_presented_transferable_asset($kp['publicKeyB64url'], $credential, $dropperPub, $credential['asset']['class'] ?? null);
 if ($problem) send_json(400, ['error' => $problem]);
+$foreignItem = ($credential['issuer']['domain'] ?? null) !== atlas_domain();
+if ($foreignItem && (($payload['domain'] ?? null) !== atlas_domain() || !isset($payload['dropId']))) {
+  send_json(400, ['error' => 'an item issued by another domain can only be dropped with an intent naming this domain and a drop id - update the wallet', 'code' => 'owner-authorization-required']);
+}
+if (isset($payload['dropId'])) {
+  foreach (read_world_drops()['drops'] as $existing) {
+    if (($existing['dropId'] ?? null) === $payload['dropId']) send_json(409, ['error' => 'that drop id is already in use']);
+  }
+}
 
-$dropId = 'urn:atlas:worlddrop:' . atlas_uuid();
-append_world_drop(['dropId' => $dropId, 'world' => $world, 'position' => $position, 'credential' => $credential, 'droppedBy' => $dropperPub, 'droppedAt' => iso_now()]);
+$dropId = $payload['dropId'] ?? ('urn:atlas:worlddrop:' . atlas_uuid());
+append_world_drop(['dropId' => $dropId, 'world' => $world, 'position' => $position, 'credential' => $credential, 'droppedBy' => $dropperPub, 'droppedAt' => iso_now(), 'dropIntent' => ['payload' => $payload, 'proof' => $intent['proof']]]);
 send_json(200, ['status' => 'dropped', 'dropId' => $dropId]);

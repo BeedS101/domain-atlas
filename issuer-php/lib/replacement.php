@@ -146,6 +146,16 @@ function atlas_replay_lookup($requestId, $op, $predecessorIds, $params) {
   return $same ? ['responseJson' => $rec['responseJson']] : ['conflict' => true];
 }
 
+// The recorded response text for a request id and operation whatever its parameters were, or null.
+function atlas_replay_peek($requestId, $op) {
+  $file = atlas_replay_file($requestId);
+  if (!is_file($file)) return null;
+  $rec = json_decode((string) @file_get_contents($file), true);
+  if (!is_array($rec) || !isset($rec['createdAt'], $rec['responseJson']) || ($rec['op'] ?? null) !== $op) return null;
+  if (time() - (int) strtotime($rec['createdAt']) > atlas_replay_ttl_seconds()) return null;
+  return $rec['responseJson'];
+}
+
 // $responseJson is the exact text sent to the client, so a replay is
 // byte-identical to the original answer.
 function atlas_replay_store($requestId, $op, $predecessorIds, $params, $responseJson) {
@@ -559,6 +569,28 @@ function atlas_begin_replacement($publicKeyB64url, $requestId, $op, $presented, 
   exit;
 }
 
+// begin for a caller that cannot let the request end here (it is one step of a larger answer): the spend lock and the
+// request lease are taken as above, but nothing is sent. Returns ['go'], ['replay', $responseJson] for a stored
+// result of the same request, or ['skip'] when the credential or request is busy, the id was used for something
+// else, or the journal cannot be trusted; the caller then leaves the credential alone for now.
+function atlas_try_begin_replacement($requestId, $op, $presented, $params) {
+  try {
+    atlas_txn_sweep();
+    $ids = array_map(function ($c) { return is_array($c) ? ($c['id'] ?? null) : null; }, $presented);
+    foreach ($ids as $id) {
+      if (is_string($id) && $id !== '' && atlas_spend_lock($id) !== null) return ['skip'];
+    }
+    if (atlas_request_lease($requestId) !== null) return ['skip'];
+    atlas_txn_recover_key($requestId);
+    $prior = atlas_replay_lookup($requestId, $op, $ids, $params);
+    if ($prior === null) return ['go'];
+    return isset($prior['conflict']) ? ['skip'] : ['replay', $prior['responseJson']];
+  } catch (Exception $e) {
+    error_log('atlas: could not begin a replacement: ' . $e->getMessage());
+    return ['skip'];
+  }
+}
+
 // ---------- transaction journal (crash recovery for replacements) ----------
 // Mirrors the "transaction journal" section of issuer-server/server.js; read
 // its comment for the design. In short: a replacement (split, consolidate,
@@ -636,10 +668,37 @@ function atlas_txn_register($rec) {
   }
 }
 
+// What a committed replacement must also make visible besides the signed successors: the update a wallet polls
+// for, the audit-history copy of the old credential, a mail notice carrying the new credential, a membership roster entry that points at the old credential.
+// They are recorded in the journal entry before anything is revoked and applied only once the revocation has
+// committed, so a successor is never published while its predecessor is still live, and a stop after the
+// revocation is completed by recovery. Every effect is safe to apply again.
+function atlas_txn_apply_effects($rec) {
+  foreach ($rec['effects'] ?? [] as $e) {
+    if (!is_array($e)) continue;
+    if ($e['kind'] === 'asset-update') append_asset_update_once($e['update']);
+    elseif ($e['kind'] === 'mail') append_mail_once($e['message']);
+    elseif ($e['kind'] === 'archive') archive_if_audited($e['credential'], $e['reason']);
+    elseif ($e['kind'] === 'membership') {
+      if ($e['class'] === 'atlas.postoffice.membership') reassign_postoffice_membership($e['oldId'], $e['newId'], $e['owner']);
+      elseif ($e['class'] === 'atlas.tradingstation.membership') reassign_tradingstation_membership($e['oldId'], $e['newId'], $e['owner']);
+    }
+  }
+}
+
+// A request id for an operation whose client does not send one (an administrator's reissue or clawback, a transfer in
+// the older request shape): the same request always maps to the same id, so asking again after a stop finds the
+// journalled result instead of failing on the already revoked predecessor.
+function atlas_derived_request_id($op, $predecessorId, $params) {
+  return 'auto-' . substr(hash('sha256', $op . '|' . $predecessorId . '|' . json_encode($params, JSON_UNESCAPED_SLASHES)), 0, 40);
+}
+
 // Completes a committed transaction. Every step is safe to repeat. The journal
 // entry is removed only after the replay record is stored.
 function atlas_txn_finish($rec) {
   atlas_txn_register($rec);
+  atlas_txn_apply_effects($rec);
+  atlas_fault_point('txn:effects-applied');
   $stored = !empty($rec['requestId'])
     ? atlas_replay_store($rec['requestId'], $rec['op'], $rec['predecessors'], $rec['params'], $rec['responseJson'])
     : true;
@@ -701,7 +760,7 @@ function atlas_txn_sweep() {
 // holds a lease on a transaction id of its own (taken before any owner lease,
 // to keep the lock order: spend locks, request/transaction lease, owner lease)
 // passes that id as `$txn`.
-function atlas_commit_replacement($requestId, $op, $predecessorIds, $reason, $params, $successors, $response, $txn = null) {
+function atlas_commit_replacement($requestId, $op, $predecessorIds, $reason, $params, $successors, $response, $txn = null, $effects = []) {
   $ids = array_values($predecessorIds);
   $sorted = $ids;
   sort($sorted);
@@ -721,6 +780,7 @@ function atlas_commit_replacement($requestId, $op, $predecessorIds, $reason, $pa
       return ['owner' => $c['owner']['publicKey'], 'cls' => $c['asset']['class'], 'id' => $c['id'], 'q' => $c['quantity'], 'f' => ($c['asset']['fungible'] ?? false) === true];
     }, $successors),
     'responseJson' => $responseJson,
+    'effects' => array_values($effects),
     'createdAt' => gmdate('Y-m-d\TH:i:s\Z'),
   ];
   if ($requestId === null && !$leaseHeldByCaller) {

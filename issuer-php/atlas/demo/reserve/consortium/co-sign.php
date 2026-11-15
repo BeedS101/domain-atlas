@@ -32,8 +32,8 @@ $id = $payload['id'];
 // Trailing slash required, not cosmetic — see atlas/demo/reserve/
 // consortium/mint/index.php's own comment for why.
 try {
-  $fetchRes = atlas_http_request('GET', atlas_base_url($requestingDomain) . '/atlas/demo/reserve/consortium/mint/?id=' . rawurlencode($id));
-} catch (Exception $e) {
+  $fetchRes = atlas_peer_request('GET', $requestingDomain, '/atlas/demo/reserve/consortium/mint/?id=' . rawurlencode($id));
+} catch (AtlasOutboundException $e) {
   send_json(502, ['error' => 'could not read the pending request from ' . $requestingDomain . ': ' . $e->getMessage()]);
 }
 $fetched = json_decode($fetchRes['raw'], true);
@@ -51,13 +51,13 @@ if (!in_array(atlas_domain(), $request['approverDomains'], true)) {
 $attestation = ['domain' => atlas_domain(), 'requestingDomain' => $requestingDomain, 'id' => $id, 'action' => $request['action']];
 $attestationSignature = atlas_sign($kp['privateKey'], $attestation);
 try {
-  $relayRes = atlas_http_post_json(atlas_base_url($requestingDomain) . '/atlas/demo/reserve/consortium/approve', [
+  $relayRes = atlas_peer_post_json($requestingDomain, '/atlas/demo/reserve/consortium/approve', [
     'id' => $id,
     'attestation' => $attestation,
     'attestationSignature' => $attestationSignature,
   ]);
-} catch (Exception $e) {
-  send_json(502, ['error' => 'could not reach ' . $requestingDomain . ' to relay the co-sign: ' . $e->getMessage()]);
+} catch (AtlasOutboundException $e) {
+  send_json(502, ['error' => 'could not reach ' . $requestingDomain . ' to relay the co-sign']);
 }
 if ($relayRes['status'] !== 200) {
   send_json(400, ['error' => isset($relayRes['body']['error']) ? $relayRes['body']['error'] : ($requestingDomain . ' refused the co-sign (HTTP ' . $relayRes['status'] . ')')]);

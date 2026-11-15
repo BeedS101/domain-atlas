@@ -108,6 +108,7 @@ $balanceA = $posted['balance'];
 $offerB = $intent['payload']['offer'];
 $wantB = $intent['payload']['want'];
 $balanceB = $balance;
+$tradeId = $posted['id'];
 
 $claimantShapeProblem = validate_trade_side_shape($offerB, 'offer') ?? validate_trade_side_shape($wantB, 'want');
 if ($claimantShapeProblem) send_json(400, ['error' => $claimantShapeProblem]);
@@ -127,17 +128,25 @@ if ($offerB['class'] !== $wantA['class'] || $offerB['quantity'] !== $wantA['quan
 // that side's own presented balance's signed fungible flag — see
 // atlas/trade/submit.php's own comment on this same choice.
 $offerBIsUnique = isset($balanceB['asset']['fungible']) && $balanceB['asset']['fungible'] === false;
-$claimantBalanceProblem = $offerBIsUnique
+// A claimant whose earlier attempt stopped after this balance was spent for this trade resumes from the recorded result
+// instead (atlas_trade_leg_resumable()).
+$balanceBResumed = atlas_trade_leg_resumable($kp, $tradeId, $balanceB, $claimantPub, $offerB['class'], $offerB['quantity'], $posterPub, false)
+  || atlas_trade_attempt_resumable($tradeId, $balanceB, $claimantPub, $offerB['class'], $offerB['quantity']);
+$claimantBalanceProblem = $balanceBResumed ? null : ($offerBIsUnique
   ? check_presented_unique_asset($kp['publicKeyB64url'], $balanceB, $claimantPub, $offerB['class'])
-  : check_presented_asset($kp['publicKeyB64url'], $balanceB, $claimantPub, $offerB['class'], $offerB['quantity']);
+  : check_presented_asset($kp['publicKeyB64url'], $balanceB, $claimantPub, $offerB['class'], $offerB['quantity']));
 if ($claimantBalanceProblem) send_json(400, ['error' => 'balance: ' . $claimantBalanceProblem]);
 
 // Re-checks the poster's own balance fresh (not just trusted from when it
 // was posted) in case it was since spent or revoked some other way.
 $offerAIsUnique = isset($balanceA['asset']['fungible']) && $balanceA['asset']['fungible'] === false;
-$posterBalanceProblem = $offerAIsUnique
+$balanceAResumed = atlas_trade_leg_resumable($kp, $tradeId, $balanceA, $posterPub, $offerA['class'], $offerA['quantity'], $claimantPub, true);
+// The poster's balance comes from the listing, not from the claimant. When this claim's first leg already settled, the
+// issuer of the poster's balance is the authority on whether its own leg did too, so a revocation there is not grounds
+// to withdraw the listing.
+$posterBalanceProblem = ($balanceAResumed || $balanceBResumed) ? null : ($offerAIsUnique
   ? check_presented_unique_asset($kp['publicKeyB64url'], $balanceA, $posterPub, $offerA['class'])
-  : check_presented_asset($kp['publicKeyB64url'], $balanceA, $posterPub, $offerA['class'], $offerA['quantity']);
+  : check_presented_asset($kp['publicKeyB64url'], $balanceA, $posterPub, $offerA['class'], $offerA['quantity']));
 if ($posterBalanceProblem) {
   remove_pending_trade($posted['id']); // no longer honorable — drop it rather than leave a dead listing others keep trying to claim
   send_json(400, ['error' => "the poster's balance no longer checks out (" . $posterBalanceProblem . ') — listing withdrawn']);
@@ -153,8 +162,9 @@ if ($posterBalanceProblem) {
 // before relaying.
 $issuerADomain = $balanceA['issuer']['domain'];
 $issuerBDomain = $balanceB['issuer']['domain'];
-$tradeId = $posted['id'];
 $lockExpiresAt = gmdate('Y-m-d\TH:i:s\Z', time() + 120);
+
+if ($issuerBDomain !== atlas_domain()) atlas_trade_attempt_mark($tradeId, $balanceB, $claimantPub, $offerB['quantity']);
 
 // Lock phase first, BEFORE either side mutates anything: if a foreign
 // issuer refuses the lock, nothing has been spent yet, and whichever lock
@@ -181,7 +191,7 @@ if ($issuerADomain !== atlas_domain()) {
 // poster's wallet is actually polling (fulfill_trade_side_settlement()'s
 // own comment in lib/bootstrap.php has the full reasoning).
 if ($issuerBDomain === atlas_domain()) {
-  $bSide = fulfill_trade_side_settlement($kp, $balanceB, $offerB['quantity'], $posterPub, null);
+  $bSide = fulfill_trade_side_settlement($kp, $balanceB, $offerB['quantity'], $posterPub, null, $tradeId);
 } else {
   try {
     $bSide = atlas_relay_trade_settle($kp, $issuerBDomain, $tradeId, $balanceB, $offerB['quantity'], $posterPub, null);
@@ -199,9 +209,15 @@ $mailNotice = [
 ];
 try {
   $aSide = $issuerADomain === atlas_domain()
-    ? fulfill_trade_side_settlement($kp, $balanceA, $offerA['quantity'], $claimantPub, $mailNotice)
+    ? fulfill_trade_side_settlement($kp, $balanceA, $offerA['quantity'], $claimantPub, $mailNotice, $tradeId)
     : atlas_relay_trade_settle($kp, $issuerADomain, $tradeId, $balanceA, $offerA['quantity'], $claimantPub, $aReceived);
 } catch (Exception $e) {
+  // A foreign issuer whose outcome is unknown may have settled the poster's balance. Refunding then would pay the claimant
+  // twice, so nothing is undone and the stored outcome is left open: the same claim asked again finds the issuer's
+  // recorded result (or settles it), or a definite refusal, which is refunded.
+  if ($issuerADomain !== atlas_domain() && !($e instanceof AtlasRelayOutcomeException && $e->definite)) {
+    send_json(502, ['error' => "could not confirm the poster's settlement at " . $issuerADomain . ' (' . $e->getMessage() . ') - ask again with the same claim; nothing has been refunded or lost', 'code' => 'claim-unresolved']);
+  }
   // B's side already settled above — balanceB is genuinely spent
   // server-side even though this request is about to report failure.
   // Refund it when that spend was local (see refund_failed_second_leg()'s

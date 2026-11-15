@@ -79,6 +79,12 @@ if ($toPublicKey === ($credential['owner']['publicKey'] ?? null)) {
 }
 $busy = atlas_spend_lock($credential['id']);
 if ($busy !== null) send_json(409, ['error' => $busy]);
+// Journalled like a split: what the clawback produces is decided and recorded before the old credential is revoked,
+// and asking again after a stop returns it. The administrator sends no request id, so one is derived from what is
+// being asked.
+$replaceParams = ['toPublicKey' => $toPublicKey];
+$requestId = atlas_derived_request_id('clawback', $credential['id'], $replaceParams);
+atlas_begin_replacement($kp['publicKeyB64url'], $requestId, 'clawback', [$credential], $replaceParams);
 if (is_revoked($credential['id'])) {
   send_json(400, ['error' => 'credential is already revoked — nothing to claw back']);
 }
@@ -87,10 +93,13 @@ if (!$sigOk) {
   send_json(400, ['error' => "credential signature does not check out against this issuer's key"]);
 }
 
-$newCredential = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $toPublicKey, $credential['asset'], $credential['quantity'], $credential['id']);
-atlas_revoke($credential['id'], 'clawback');
-archive_if_audited($credential, 'clawback');
+$newCredential = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $toPublicKey, $credential['asset'], $credential['quantity'], $credential['id'], true);
 
+// The mail notice and the membership roster entry are applied only once the revocation has committed
+// (lib/replacement.php), and again by recovery if the request stopped before they were. The notice is looked up
+// before the roster is re-pointed: clawing back a membership straight to its rightful owner already hands them the
+// new credential in the response, and re-pointing first would make the lookup mail them a redundant copy.
+$effects = [['kind' => 'archive', 'credential' => $credential, 'reason' => 'clawback']];
 $recipientMember = find_postoffice_membership($toPublicKey);
 $delivered = false;
 if ($recipientMember) {
@@ -103,20 +112,15 @@ if ($recipientMember) {
     'sentAt' => iso_now(),
   ];
   $noticeSignature = atlas_sign($kp['privateKey'], $noticePayload);
-  append_mail(array_merge($noticePayload, ['signature' => $noticeSignature]));
+  $effects[] = ['kind' => 'mail', 'message' => array_merge($noticePayload, ['signature' => $noticeSignature])];
   $delivered = true;
 }
-
-// Runs AFTER the mail-delivery lookup above, not before: clawing back a
-// membership credential straight back to its own rightful owner already
-// hands them the new credential directly in the response, the way a
-// hijacked account gets reset — re-pointing the roster first would make
-// the lookup above find that very entry and mail them a redundant copy
-// of what they're already holding.
-if ($credential['asset']['class'] === 'atlas.postoffice.membership') {
-  reassign_postoffice_membership($credential['id'], $newCredential['id'], $toPublicKey);
-} elseif ($credential['asset']['class'] === 'atlas.tradingstation.membership') {
-  reassign_tradingstation_membership($credential['id'], $newCredential['id'], $toPublicKey);
+if ($credential['asset']['class'] === 'atlas.postoffice.membership' || $credential['asset']['class'] === 'atlas.tradingstation.membership') {
+  $effects[] = ['kind' => 'membership', 'class' => $credential['asset']['class'], 'oldId' => $credential['id'], 'newId' => $newCredential['id'], 'owner' => $toPublicKey];
 }
 
-send_json(200, ['status' => 'clawed-back', 'newCredential' => $newCredential, 'delivered' => $delivered]);
+$responseJson = atlas_commit_replacement(
+  $requestId, 'clawback', [$credential['id']], 'clawback', $replaceParams, [$newCredential],
+  ['status' => 'clawed-back', 'newCredential' => $newCredential, 'delivered' => $delivered], null, $effects
+);
+atlas_send_committed($responseJson);
