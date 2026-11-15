@@ -16,6 +16,9 @@ const path = require('path');
 
 const REPO = path.resolve(__dirname, '..');
 const handedOut = new Set();
+// The simulated authenticator belongs to the wallet extension: its origin, and the relying party that is its id.
+const WALLET_RP_ID = 'abcdefghijklmnopabcdefghijklmnop';
+const WALLET_ORIGIN = 'chrome-extension://' + WALLET_RP_ID;
 const SITE_MODEL_STANDIN = 'SITE-OWN-MODEL: not a glTF or PNG, must never be read or changed by Studio';
 
 function freePort() {
@@ -59,9 +62,9 @@ function signBridge(identity, origin, payload, opts) {
     return { signerRole: 'raw-ecdsa', publicKey: identity.publicKeyB64, signature: b64u(sig), signedPayload };
   }
   const hash = crypto.createHash('sha256').update(canonicalize(signedPayload)).digest();
-  const clientData = Buffer.from(JSON.stringify({ type: opts.type || 'webauthn.get', challenge: b64u(hash), origin }));
+  const clientData = Buffer.from(JSON.stringify({ type: opts.type || 'webauthn.get', challenge: b64u(hash), origin: WALLET_ORIGIN }));
   const flags = opts.flags === undefined ? 0x05 : opts.flags;
-  const authData = Buffer.concat([crypto.createHash('sha256').update('rp').digest(), Buffer.from([flags]), Buffer.alloc(4)]);
+  const authData = Buffer.concat([crypto.createHash('sha256').update(WALLET_RP_ID).digest(), Buffer.from([flags]), Buffer.alloc(4)]);
   const signed = Buffer.concat([authData, crypto.createHash('sha256').update(clientData).digest()]);
   const sig = crypto.sign('sha256', signed, { key: identity.privateKey });
   return { signerRole: 'webauthn', publicKey: identity.publicKeyB64, signature: b64u(sig), clientDataJSON: b64u(clientData), authenticatorData: b64u(authData), signedPayload };
@@ -75,8 +78,8 @@ function signPayload(identity, payload) {
     return { signerRole: 'raw-ecdsa', publicKey: identity.publicKeyB64, signature: b64u(sig) };
   }
   const hash = crypto.createHash('sha256').update(canonicalize(payload)).digest();
-  const clientData = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge: b64u(hash), origin: 'http://wallet.test' }));
-  const authData = Buffer.concat([crypto.createHash('sha256').update('rp').digest(), Buffer.from([0x05]), Buffer.alloc(4)]);
+  const clientData = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge: b64u(hash), origin: WALLET_ORIGIN }));
+  const authData = Buffer.concat([crypto.createHash('sha256').update(WALLET_RP_ID).digest(), Buffer.from([0x05]), Buffer.alloc(4)]);
   const signed = Buffer.concat([authData, crypto.createHash('sha256').update(clientData).digest()]);
   const sig = crypto.sign('sha256', signed, { key: identity.privateKey });
   return { signerRole: 'webauthn', publicKey: identity.publicKeyB64, signature: b64u(sig), clientDataJSON: b64u(clientData), authenticatorData: b64u(authData) };
@@ -190,4 +193,4 @@ class StudioLab {
 
 const DESIGN = { schema: 'atlas.asset-studio.design/0.1', template: 'trophy', name: 'First Light', description: 'Awarded for the first walk through the lobby.', finish: 'gold' };
 
-module.exports = { SITE_MODEL_STANDIN, StudioLab, makeIdentity, signBridge, signPayload, canonicalize, b64u, request, DESIGN, REPO };
+module.exports = { WALLET_RP_ID, SITE_MODEL_STANDIN, StudioLab, makeIdentity, signBridge, signPayload, canonicalize, b64u, request, DESIGN, REPO };

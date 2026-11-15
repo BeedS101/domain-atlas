@@ -81,9 +81,9 @@ function setTrustedPeers(bundleDir, peers) {
 function injectUnconditionalSettleFailure(bundleDir) {
   const filePath = path.join(bundleDir, 'atlas', 'trade', 'relay-settle.php');
   let src = fs.readFileSync(filePath, 'utf8');
-  const marker = "$settled = fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwnerPublicKey, $mailNotice);";
+  const marker = "$settled = fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwnerPublicKey, $mailNotice, $tradeId);";
   if (!src.includes(marker)) throw new Error('marker not found in relay-settle.php — shape changed, update this test');
-  src = src.replace(marker, "send_json(500, ['error' => 'INJECTED: simulated relay-settle failure for this test only']);\n" + marker);
+  src = src.replace(marker, "send_json(400, ['error' => 'INJECTED: simulated relay-settle refusal for this test only']);\n" + marker);
   fs.writeFileSync(filePath, src);
 }
 

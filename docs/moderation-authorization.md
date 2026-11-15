@@ -958,8 +958,9 @@ no HTML from data and touches no wallet storage.
     live sessions, not a record.
 12. **PHP presence on shared hosting** makes an outbound request to the issuer when its cache is older than the refresh interval;
     hosting that blocks outbound requests will fail closed.
-13. **Hostnames on the PHP issuer.** The PHP issuer refuses grant requests that arrive under a host name other
-    than the configured domain; the Node issuer signs for its configured `ATLAS_DOMAIN` whatever the Host header says.
+13. **Hostnames on the PHP issuer.** The PHP issuer refuses a grant when the domain in the moderation configuration
+    differs from its own configured domain (`ATLAS_DOMAIN` or `lib/atlas-domain-config.json`); like the Node issuer it
+    signs for that configured domain whatever the Host header says, once one is set.
 14. **Only mute, unmute and kick exist.** `session.timeout`, persistent bans and mandatory membership tickets
     are not implemented; a grant naming `session.timeout` authorizes nothing.
 15. **A new visit bypasses a mute or kick.** Restrictions follow the per-visit id the wallet generates, not a

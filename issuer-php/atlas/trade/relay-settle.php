@@ -74,9 +74,24 @@ if (!$attestationOk) {
 // no way to recover the actual result to relay onward. Replaying the
 // recorded result instead means a lost response is actually recoverable
 // rather than looking identical to "never happened."
+$legOutcome = atlas_trade_leg_outcome($tradeId, $credential);
+if ($legOutcome['state'] === 'busy') send_json(503, ['error' => 'this balance is being settled by another request - try again', 'code' => 'busy']);
+if ($legOutcome['state'] === 'refunded') {
+  send_json(400, ['error' => 'this trade leg was refunded', 'code' => 'trade-refunded', 'refund' => $legOutcome['refund'], 'remainder' => $legOutcome['leg']['remainder'] ?? null]);
+}
 $existingResult = find_relay_settle_result($tradeId, $credential['id']);
 if ($existingResult) {
   send_json(200, ['status' => 'settled', 'received' => $existingResult['received'], 'remainder' => $existingResult['remainder']]);
+}
+
+// A leg that committed in the journal but whose answer, unlock or recorded result did not happen is completed here.
+$legParams = ['newOwnerPublicKey' => $newOwnerPublicKey, 'spendQuantity' => $spendQuantity, 'tradeId' => $tradeId, 'mail' => ($attestation['mailDeliverAttachedAsset'] ?? null) !== null];
+$begun = atlas_try_begin_replacement(atlas_trade_leg_request_id($tradeId, $credential['id']), 'trade-leg', [$credential], $legParams);
+if ($begun[0] === 'replay') {
+  $recorded = json_decode($begun[1], true);
+  atlas_unsuspend($credential['id']);
+  record_relay_settle_result($tradeId, $credential['id'], $recorded['received'], $recorded['remainder']);
+  send_json(200, ['status' => 'settled', 'received' => $recorded['received'], 'remainder' => $recorded['remainder']]);
 }
 
 $busy = atlas_spend_lock($credential['id']);
@@ -126,7 +141,7 @@ if ($mailDeliverAttachedAsset !== null) {
   ];
 }
 
-$settled = fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwnerPublicKey, $mailNotice);
+$settled = fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwnerPublicKey, $mailNotice, $tradeId);
 atlas_unsuspend($credential['id']);
 // Recorded BEFORE responding, so a response lost in transit from this
 // exact point onward is still recoverable by a retry (the

@@ -236,48 +236,30 @@ function atlas_unwrap_bridge_signed($signed) {
 }
 
 // Verifies a signed-payload "envelope" as produced by wallet.js's
-// signWithSelf() (a real WebAuthn assertion, challenge = hash of the
-// payload, or a direct ECDSA signature for a local identity). Same
-// dual-mode check server.js does, and the same canonicalize().
+// signWithSelf(): a passkey assertion whose challenge is the hash of the
+// payload (lib/webauthn.php says what must hold of it), or a direct ECDSA
+// signature for a local identity. Same checks on both ends of the wire, same
+// canonicalize(). Never throws; anything malformed is simply not verified.
 // A bridge-signed payload is refused unless $allowBridge is set.
 function verify_envelope($payload, $envelope, $allowBridge = false) {
-  if (!is_array($payload) || !is_array($envelope) || !isset($envelope['signerRole'])) return false;
-  if (atlas_is_bridge_signed($payload) && !$allowBridge) return false;
-  $dataHash = sha256_raw(canonicalize($payload));
+  try {
+    if (!is_array($payload) || !is_array($envelope) || !isset($envelope['signerRole'])) return false;
+    if (atlas_is_bridge_signed($payload) && !$allowBridge) return false;
 
-  if ($envelope['signerRole'] === 'webauthn') {
-    try {
-      $clientDataJSON = b64url_decode($envelope['clientDataJSON']);
-      $clientData = json_decode($clientDataJSON, true);
-      if (!is_array($clientData) || !isset($clientData['challenge'])) return false;
-      if ($clientData['challenge'] !== b64url_encode($dataHash)) return false;
-      $authData = b64url_decode($envelope['authenticatorData']);
-      $clientDataHash = sha256_raw($clientDataJSON);
-      $signedData = $authData . $clientDataHash;
-      // WebAuthn assertion signatures arrive DER-encoded already — unlike
-      // the Node version, we don't need to convert to raw, because
-      // openssl_verify() wants DER natively. (Node converts to raw because
-      // Web Crypto's verify() insists on raw — PHP has the easier end of this one.)
-      $derSig = b64url_decode($envelope['signature']);
-      $pubPem = spki_der_to_pem(b64url_decode($envelope['publicKey']));
-      return ecdsa_verify_der($pubPem, $derSig, $signedData);
-    } catch (Exception $e) {
-      return false;
+    if ($envelope['signerRole'] === 'webauthn') {
+      return atlas_webauthn_verify(canonicalize($payload), $envelope, atlas_webauthn_policy());
     }
-  }
 
-  if ($envelope['signerRole'] === 'raw-ecdsa') {
-    try {
+    if ($envelope['signerRole'] === 'raw-ecdsa') {
+      if (!is_string($envelope['publicKey'] ?? null) || !is_string($envelope['signature'] ?? null)) return false;
       $pubPem = ec_raw_point_to_pem(b64url_decode($envelope['publicKey']));
-      $data = canonicalize($payload);
-      $rawSig = b64url_decode($envelope['signature']);
-      return ecdsa_verify_raw($pubPem, $rawSig, $data);
-    } catch (Exception $e) {
-      return false;
+      return ecdsa_verify_raw($pubPem, b64url_decode($envelope['signature']), canonicalize($payload));
     }
-  }
 
-  return false;
+    return false;
+  } catch (Throwable $e) {
+    return false;
+  }
 }
 
 // Split, consolidate and convert spend credentials, and a credential is not a
@@ -333,22 +315,10 @@ function parse_iso_ms($value) {
   }
 }
 
-// verify_envelope() plus what a read grant needs from a passkey assertion:
-// it must be a "get" assertion and the user must have been present.
+// Mail reads take the same assertions as every other signed request;
+// verify_envelope() already refuses a passkey assertion that is not a
+// present-user "get".
 function verify_mail_envelope($payload, $envelope, $allowBridge = false) {
-  if (!is_array($envelope) || !isset($envelope['signerRole'])) return false;
-  if ($envelope['signerRole'] === 'webauthn') {
-    try {
-      $clientData = json_decode(b64url_decode($envelope['clientDataJSON']), true);
-      if (!is_array($clientData) || ($clientData['type'] ?? null) !== 'webauthn.get') return false;
-      $authData = b64url_decode($envelope['authenticatorData']);
-      if (strlen($authData) < 37 || (ord($authData[32]) & 0x01) === 0) return false;
-    } catch (Exception $e) {
-      return false;
-    }
-  } elseif ($envelope['signerRole'] !== 'raw-ecdsa') {
-    return false;
-  }
   return verify_envelope($payload, $envelope, $allowBridge);
 }
 
@@ -420,102 +390,10 @@ function verify_own_credential_signature($publicKeyB64url, $credential, $payload
 // verifyCredential()). Federation's relay step is the first time a SERVER
 // itself needs to.
 
-// Same http(s)-scheme-by-hostname convention issuer-server/server.js's own
-// baseUrl() and extension/wallet.js's own baseUrl() already use — kept in
-// sync on purpose, a mismatch here would mean this domain tries to relay to
-// or verify another domain over the wrong scheme.
-function atlas_base_url($domain) {
-  if (strpos($domain, 'http') === 0) return rtrim($domain, '/');
-  $isLocalHost = preg_match('/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/', $domain);
-  return rtrim(($isLocalHost ? 'http://' : 'https://') . $domain, '/');
-}
-
-// Every genuinely cross-host request this server ever makes identifies
-// itself with this — PHP's stream wrapper sends no User-Agent at all by
-// default, and a shared host's own bot/WAF protection (mod_security,
-// Imunify360, etc. — common on cPanel hosting) routinely blocks exactly
-// that as looking like a scanner, which a browser request from the same
-// page never hits. Named plainly so a receiving host's admin can see
-// what it is.
-const ATLAS_OUTBOUND_USER_AGENT = 'DomainAtlas-Relay/1.0';
-
-// The actual outbound HTTP call both atlas_http_post_json() and
-// fetch_domain_public_key() below build on. Tries the curl extension
-// FIRST, falling back to a plain file_get_contents() stream-wrapper
-// request only if curl isn't loaded — discovered the hard way: a shared
-// host can easily have the `openssl` PHP extension disabled (breaking
-// the https:// stream wrapper outright, "no suitable wrapper could be
-// found", with NO wrapper capable of an outbound HTTPS request at all)
-// while `curl` stays fully functional, since curl links its own TLS
-// support at the C level rather than going through PHP's stream-wrapper
-// registry. Every host this bundle has ever run on so far has had curl,
-// so this is the primary path now, not a fallback of last resort; the
-// stream-wrapper path stays only for the rare host without even that.
-// Returns ['status' => int, 'raw' => string] on any completed request
-// (2xx or not — a caller needs to see WHY the other domain rejected
-// something, not just that it did), or throws with the real underlying
-// reason on a connection that never completed at all.
-function atlas_http_request($method, $url, $jsonBody = null) {
-  $headers = ['User-Agent: ' . ATLAS_OUTBOUND_USER_AGENT, 'Accept: application/json'];
-  if ($jsonBody !== null) $headers[] = 'Content-Type: application/json';
-
-  if (function_exists('curl_init')) {
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-      CURLOPT_CUSTOMREQUEST => $method,
-      CURLOPT_HTTPHEADER => $headers,
-      CURLOPT_RETURNTRANSFER => true,
-      CURLOPT_TIMEOUT => 10,
-      CURLOPT_FOLLOWLOCATION => false,
-    ]);
-    if ($jsonBody !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($jsonBody));
-    $raw = curl_exec($ch);
-    if ($raw === false) {
-      $err = curl_error($ch);
-      curl_close($ch);
-      throw new Exception($err ?: 'curl request failed for an unknown reason');
-    }
-    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    return ['status' => $status, 'raw' => $raw];
-  }
-
-  $context = stream_context_create([
-    'http' => [
-      'method' => $method,
-      'header' => implode("\r\n", $headers) . "\r\n",
-      'content' => $jsonBody !== null ? json_encode($jsonBody) : null,
-      'ignore_errors' => true,
-      'timeout' => 10,
-    ],
-  ]);
-  error_clear_last();
-  $raw = @file_get_contents($url, false, $context);
-  if ($raw === false) {
-    $err = error_get_last();
-    throw new Exception($err ? $err['message'] : 'request failed for an unknown reason');
-  }
-  $status = 0;
-  if (isset($http_response_header)) {
-    foreach ($http_response_header as $header) {
-      if (preg_match('#^HTTP/\S+\s+(\d+)#', $header, $m)) { $status = (int) $m[1]; break; }
-    }
-  }
-  return ['status' => $status, 'raw' => $raw];
-}
-
-// POSTs JSON to another domain and returns its status + decoded body
-// regardless of whether that status was 2xx — a relay attempt needs to see
-// WHY the home domain rejected something, not just that it did.
-function atlas_http_post_json($url, $body) {
-  try {
-    $res = atlas_http_request('POST', $url, $body);
-  } catch (Exception $e) {
-    throw new Exception('could not reach ' . $url . ' (' . $e->getMessage() . ')');
-  }
-  $decoded = json_decode($res['raw'], true);
-  return ['status' => $res['status'], 'body' => is_array($decoded) ? $decoded : []];
-}
+// Every request this server makes to another domain goes through lib/outbound.php (peer authority validation,
+// public-address-only pinned connections, no redirects, size and time limits, rate limits, client-safe errors).
+require_once __DIR__ . '/outbound.php';
+require_once __DIR__ . '/webauthn.php';
 
 // Task #97 (SPEC.md §11.4 step 3): fetches another domain's own published
 // signing key — the exact same cross-domain trust bootstrap
@@ -525,10 +403,18 @@ function atlas_http_post_json($url, $body) {
 // checked at the moment it arrives, not against some earlier issuedAt),
 // same as issuer-server/server.js's fetchDomainPublicKey().
 function fetch_domain_public_key($domain) {
+  $cached = atlas_outbound_key_cache_get($domain);
+  if ($cached !== null) return $cached;
+  $key = fetch_domain_public_key_uncached($domain);
+  atlas_outbound_key_cache_put($domain, $key);
+  return $key;
+}
+
+function fetch_domain_public_key_uncached($domain) {
   try {
-    $res = atlas_http_request('GET', atlas_base_url($domain) . '/.well-known/atlas-key.json');
-  } catch (Exception $e) {
-    throw new Exception('could not fetch ' . $domain . '\'s published key (' . $e->getMessage() . ')');
+    $res = atlas_peer_request('GET', $domain, '/.well-known/atlas-key.json', null, 'key');
+  } catch (AtlasOutboundException $e) {
+    throw new Exception($e->getMessage());
   }
   if ($res['status'] !== 200) throw new Exception($domain . ' returned HTTP ' . $res['status'] . ' for its own published key');
   $keyDoc = json_decode($res['raw'], true);
@@ -576,15 +462,30 @@ function atlas_relay_trade_lock($kp, $domain, $tradeId, $credential, $expiresAt)
     'expiresAt' => $expiresAt,
   ];
   $attestationSignature = atlas_sign($kp['privateKey'], $attestation);
-  $res = atlas_http_post_json(atlas_base_url($domain) . '/atlas/trade/relay-lock', [
+  $res = atlas_peer_post_json($domain, '/atlas/trade/relay-lock', [
     'credential' => $credential,
     'attestation' => $attestation,
     'attestationSignature' => $attestationSignature,
   ]);
   if ($res['status'] !== 200) {
-    throw new Exception(isset($res['body']['error']) ? $res['body']['error'] : ($domain . ' refused the trade lock (HTTP ' . $res['status'] . ')'));
+    $message = isset($res['body']['error']) ? $res['body']['error'] : ($domain . ' refused the trade lock (HTTP ' . $res['status'] . ')');
+    // A leg that was refunded is answered with the refund itself, so a claim that lost its own record still hands it over.
+    if (($res['body']['code'] ?? null) === 'trade-refunded' && is_array($res['body']['refund'] ?? null)) {
+      throw new AtlasTradeRefundedException($message, $res['body']['refund'], is_array($res['body']['remainder'] ?? null) ? $res['body']['remainder'] : null);
+    }
+    throw new Exception($message);
   }
   return $res['body'];
+}
+
+class AtlasTradeRefundedException extends Exception {
+  public $refund;
+  public $remainder;
+  public function __construct($message, $refund, $remainder) {
+    parent::__construct($message);
+    $this->refund = $refund;
+    $this->remainder = $remainder;
+  }
 }
 
 // The SETTLE counterpart of atlas_relay_trade_lock() above — asks the
@@ -610,6 +511,14 @@ function atlas_relay_trade_lock($kp, $domain, $tradeId, $credential, $expiresAt)
 // the already-recorded result instead of re-mutating anything. Only if
 // BOTH attempts fail does the caller fall back to treating it as a
 // genuine failure.
+class AtlasRelayOutcomeException extends Exception {
+  public $definite;
+  public function __construct($message, $definite) {
+    parent::__construct($message);
+    $this->definite = $definite === true;
+  }
+}
+
 function atlas_relay_trade_settle($kp, $domain, $tradeId, $credential, $spendQuantity, $newOwnerPublicKey, $mailDeliverAttachedAsset = null) {
   $attestation = [
     'relayingDomain' => atlas_domain(),
@@ -620,25 +529,82 @@ function atlas_relay_trade_settle($kp, $domain, $tradeId, $credential, $spendQua
   ];
   if ($mailDeliverAttachedAsset !== null) $attestation['mailDeliverAttachedAsset'] = $mailDeliverAttachedAsset;
   $attestationSignature = atlas_sign($kp['privateKey'], $attestation);
+  // An exception carries ->definite when the issuer certainly did not settle the balance: it answered 400 or 403, which it
+  // does only before it changes anything. A lost connection, a timeout, a server error, or an answer that is not a
+  // settlement leaves the outcome unknown, and the caller must not undo its own side then.
   $attempt = function () use ($domain, $credential, $attestation, $attestationSignature) {
-    $res = atlas_http_post_json(atlas_base_url($domain) . '/atlas/trade/relay-settle', [
-      'credential' => $credential,
-      'attestation' => $attestation,
-      'attestationSignature' => $attestationSignature,
-    ]);
-    if ($res['status'] !== 200) {
-      throw new Exception(isset($res['body']['error']) ? $res['body']['error'] : ($domain . ' refused the trade settle (HTTP ' . $res['status'] . ')'));
+    try {
+      $res = atlas_peer_post_json($domain, '/atlas/trade/relay-settle', [
+        'credential' => $credential,
+        'attestation' => $attestation,
+        'attestationSignature' => $attestationSignature,
+      ]);
+    } catch (AtlasOutboundException $e) {
+      throw new AtlasRelayOutcomeException($e->getMessage(), false);
     }
-    return $res['body'];
+    $body = is_array($res['body'] ?? null) ? $res['body'] : null;
+    if ($res['status'] !== 200) {
+      throw new AtlasRelayOutcomeException(isset($body['error']) ? $body['error'] : ($domain . ' refused the trade settle (HTTP ' . $res['status'] . ')'), in_array($res['status'], [400, 403], true));
+    }
+    if ($body === null || ($body['status'] ?? null) !== 'settled' || !is_array($body['received'] ?? null)) {
+      throw new AtlasRelayOutcomeException($domain . ' gave no usable answer to the trade settle', false);
+    }
+    return $body;
   };
   try {
     return $attempt();
-  } catch (Exception $firstErr) {
+  } catch (AtlasRelayOutcomeException $firstErr) {
     try {
       return $attempt();
-    } catch (Exception $secondErr) {
-      throw new Exception($firstErr->getMessage() . ' (retried once, also failed: ' . $secondErr->getMessage() . ')');
+    } catch (AtlasRelayOutcomeException $secondErr) {
+      throw new AtlasRelayOutcomeException($firstErr->getMessage() . ' (retried once, also failed: ' . $secondErr->getMessage() . ')', $secondErr->definite);
     }
+  }
+}
+
+// Asks the issuer of the claimant's balance to undo the first leg of a trade whose second leg the poster's issuer refused: it
+// revokes the credit it minted for the poster and pays the claimant the same value (see refund_failed_second_leg()). The
+// issuer records the refund, so asking again, as a retry after a lost answer does, returns the same credential. Returns
+// ['refund' => ..., 'remainder' => ...]; throws AtlasRelayRefundException whose ->kind is 'refused' when the issuer answered
+// 400 or 403 (it refunded nothing), 'unsupported' when it has no such endpoint (an older issuer), and 'unknown' for anything
+// else, including a refund that may have happened. Mirrors relayTradeRefund() in issuer-server/server.js.
+class AtlasRelayRefundException extends Exception {
+  public $kind;
+  public function __construct($message, $kind) {
+    parent::__construct($message);
+    $this->kind = $kind;
+  }
+}
+
+function atlas_relay_trade_refund($kp, $domain, $tradeId, $credential) {
+  $attestation = ['relayingDomain' => atlas_domain(), 'tradeId' => $tradeId, 'credentialId' => $credential['id']];
+  $attestationSignature = atlas_sign($kp['privateKey'], $attestation);
+  $attempt = function () use ($domain, $credential, $attestation, $attestationSignature) {
+    try {
+      $res = atlas_peer_post_json($domain, '/atlas/trade/relay-refund', [
+        'credential' => $credential,
+        'attestation' => $attestation,
+        'attestationSignature' => $attestationSignature,
+      ]);
+    } catch (AtlasOutboundException $e) {
+      throw new AtlasRelayRefundException($e->getMessage(), 'unknown');
+    }
+    $body = is_array($res['body'] ?? null) ? $res['body'] : null;
+    if ($res['status'] !== 200) {
+      $kind = in_array($res['status'], [404, 405], true) ? 'unsupported' : (in_array($res['status'], [400, 403], true) ? 'refused' : 'unknown');
+      throw new AtlasRelayRefundException(isset($body['error']) ? $body['error'] : ($domain . ' refused the trade refund (HTTP ' . $res['status'] . ')'), $kind);
+    }
+    $refund = $body !== null && ($body['status'] ?? null) === 'refunded' ? ($body['refund'] ?? null) : null;
+    $genuine = is_array($refund) && ($refund['owner']['publicKey'] ?? null) === $credential['owner']['publicKey']
+      && ($refund['asset']['class'] ?? null) === $credential['asset']['class'] && ($refund['issuer']['domain'] ?? null) === $domain;
+    if (!$genuine) throw new AtlasRelayRefundException($domain . ' gave no usable answer to the trade refund', 'unknown');
+    return ['refund' => $refund, 'remainder' => is_array($body['remainder'] ?? null) ? $body['remainder'] : null];
+  };
+  try {
+    return $attempt();
+  } catch (AtlasRelayRefundException $firstErr) {
+    if ($firstErr->kind !== 'unknown') throw $firstErr;
+    return $attempt();
   }
 }
 
@@ -690,11 +656,25 @@ function apply_class_patch_if_stale($privateKey, $publicKeyB64url, $credential) 
   $newAsset = $credential['asset'];
   if (isset($patch['tradeScope'])) $newAsset['tradeScope'] = $patch['tradeScope'];
   if (isset($patch['properties'])) $newAsset['properties'] = merge_properties($newAsset['properties'] ?? [], $patch['properties']);
-  $newCredential = issue_asset($privateKey, $publicKeyB64url, $credential['owner']['publicKey'], $newAsset, $credential['quantity'], $credential['id']);
-  atlas_revoke($credential['id'], 'class-patch');
-  archive_if_audited($credential, 'class-patch');
+  // Journalled like a split (lib/replacement.php): the result is recorded before the old credential is revoked, and a
+  // check-in repeated after a stop receives it. The id is derived from the credential and the patch applied.
+  $replaceParams = ['tradeScope' => $patch['tradeScope'] ?? null, 'properties' => $patch['properties'] ?? null];
+  $requestId = atlas_derived_request_id('class-patch', $credential['id'], $replaceParams);
+  $begun = atlas_try_begin_replacement($requestId, 'class-patch', [$credential], $replaceParams);
+  if ($begun[0] === 'skip') return null;
+  if ($begun[0] === 'replay') return json_decode($begun[1], true);
+  if (is_revoked($credential['id'])) return null;
+  $newCredential = issue_asset($privateKey, $publicKeyB64url, $credential['owner']['publicKey'], $newAsset, $credential['quantity'], $credential['id'], true);
   $update = ['id' => $credential['id'], 'status' => 'superseded', 'reason' => 'class-patch', 'newCredential' => $newCredential];
-  append_asset_update($update);
+  try {
+    atlas_commit_replacement(
+      $requestId, 'class-patch', [$credential['id']], 'class-patch', $replaceParams, [$newCredential], $update, null,
+      [['kind' => 'archive', 'credential' => $credential, 'reason' => 'class-patch'], ['kind' => 'asset-update', 'update' => $update]]
+    );
+  } catch (Exception $e) {
+    error_log('atlas: class patch not applied: ' . $e->getMessage());
+    return null;
+  }
   return $update;
 }
 
@@ -1028,8 +1008,8 @@ function check_presented_unique_asset($publicKeyB64url, $credential, $expectedOw
 // also fixes (a serialized item was nominally droppable in the plaza's own
 // acceptedItemClasses before this, so re-deriving it fresh on claim was a
 // live gap, not just theoretical).
-function transfer_unique_asset($privateKey, $publicKeyB64url, $newOwnerPublicKey, $credential) {
-  return issue_asset($privateKey, $publicKeyB64url, $newOwnerPublicKey, $credential['asset'], $credential['quantity'], $credential['id']);
+function transfer_unique_asset($privateKey, $publicKeyB64url, $newOwnerPublicKey, $credential, $deferHoldings = false) {
+  return issue_asset($privateKey, $publicKeyB64url, $newOwnerPublicKey, $credential['asset'], $credential['quantity'], $credential['id'], $deferHoldings);
 }
 
 // Task #250 fourth follow-up — validates a trade intent's one side
@@ -1103,35 +1083,44 @@ function check_presented_membership($publicKeyB64url, $credential, $expectedOwne
 // already fixed. Returns true, or a short reason string on failure (never
 // a bare false) so a caller can surface WHY instead of a dead end — mirrors
 // issuer-server/server.js's verifyForeignAssetCredential().
-function verify_foreign_asset_credential($credential) {
+// $signatureOnly: confirm only that the issuer published the key that signed this credential. For a claim resumed after its
+// first leg was relayed, where revocation and suspension (our own lock, or the leg itself) no longer say anything.
+function verify_foreign_asset_credential($credential, $signatureOnly = false) {
   $issuerDomain = $credential['issuer']['domain'];
   try {
-    $keyRes = atlas_http_request('GET', atlas_base_url($issuerDomain) . '/.well-known/atlas-key.json');
-  } catch (Exception $e) {
-    return 'could not fetch its published key (' . $e->getMessage() . ')';
+    $keyRes = atlas_peer_request('GET', $issuerDomain, '/.well-known/atlas-key.json', null, 'key');
+  } catch (AtlasOutboundException $e) {
+    return $e->getMessage();
   }
   if ($keyRes['status'] !== 200) return 'it returned HTTP ' . $keyRes['status'] . ' for its own published key';
   $keyDoc = json_decode($keyRes['raw'], true);
   if (!is_array($keyDoc) || empty($keyDoc['keys'])) return 'it returned no usable key document';
 
-  // A missing or unreachable revocation/suspension document is treated as
-  // "nothing revoked/suspended" — same fail-open posture this always had,
-  // now just going through the same curl-first helper.
-  $revoked = [];
+  // What the issuer has revoked or suspended must be known, not assumed: a document that cannot be read counts as
+  // "could not confirm", never as an empty list. The one allowance is a missing suspensions document (HTTP 404), which
+  // an issuer that predates suspensions never published.
+  $revoked = null;
   try {
-    $revRes = atlas_http_request('GET', atlas_base_url($issuerDomain) . '/.well-known/atlas-revocations.json');
-    $revDoc = $revRes['status'] === 200 ? json_decode($revRes['raw'], true) : null;
-    if (is_array($revDoc) && isset($revDoc['revoked'])) $revoked = $revDoc['revoked'];
-  } catch (Exception $e) {
-    // fail-open, as above
+    $revRes = atlas_peer_request('GET', $issuerDomain, '/.well-known/atlas-revocations.json');
+  } catch (AtlasOutboundException $e) {
+    return 'could not confirm whether it has revoked this credential (' . $e->getMessage() . ')';
   }
+  $revDoc = $revRes['status'] === 200 ? json_decode($revRes['raw'], true) : null;
+  if ($revRes['status'] !== 200) return 'could not confirm whether it has revoked this credential (HTTP ' . $revRes['status'] . ')';
+  if (!is_array($revDoc) || !isset($revDoc['revoked']) || !is_array($revDoc['revoked'])) return 'could not confirm whether it has revoked this credential (its revocation list is unreadable)';
+  $revoked = $revDoc['revoked'];
   $suspended = [];
   try {
-    $susRes = atlas_http_request('GET', atlas_base_url($issuerDomain) . '/.well-known/atlas-suspensions.json');
-    $susDoc = $susRes['status'] === 200 ? json_decode($susRes['raw'], true) : null;
-    if (is_array($susDoc) && isset($susDoc['suspended'])) $suspended = $susDoc['suspended'];
-  } catch (Exception $e) {
-    // fail-open, as above
+    $susRes = atlas_peer_request('GET', $issuerDomain, '/.well-known/atlas-suspensions.json');
+  } catch (AtlasOutboundException $e) {
+    return 'could not confirm whether it has suspended this credential (' . $e->getMessage() . ')';
+  }
+  if ($susRes['status'] === 200) {
+    $susDoc = json_decode($susRes['raw'], true);
+    if (!is_array($susDoc) || !isset($susDoc['suspended']) || !is_array($susDoc['suspended'])) return 'could not confirm whether it has suspended this credential (its suspension list is unreadable)';
+    $suspended = $susDoc['suspended'];
+  } elseif ($susRes['status'] !== 404) {
+    return 'could not confirm whether it has suspended this credential (HTTP ' . $susRes['status'] . ')';
   }
 
   $issuedAt = strtotime($credential['issuedAt']);
@@ -1146,6 +1135,7 @@ function verify_foreign_asset_credential($credential) {
 
   $sigOk = verify_domain_signature($activeKey['publicKey'], asset_payload_of($credential), $credential['signature']);
   if (!$sigOk) return "signature doesn't match its own published key";
+  if ($signatureOnly) return true;
 
   foreach ($revoked as $r) {
     if (($r['id'] ?? null) === $credential['id']) return 'it has revoked this credential';
@@ -1334,28 +1324,86 @@ function check_presented_fulfillable_asset($publicKeyB64url, $credential) {
   return null;
 }
 
-// Shared by both the same-domain claim path (atlas/world/drops/claim.php)
-// and the cross-domain relay-claim handler
-// (atlas/world/drops/relay-claim.php) — the real ownership-transfer
-// primitive this whole protocol always uses (revoke the old credential,
-// mint a fresh one naming the new owner), same as trade settlement/split/
-// consolidate. Mirrors issuer-server/server.js's fulfillWorldDropClaim().
-//
-// Fungible drops still go through mint_asset_by_class() — re-deriving from
-// the catalog is correct there (every balance of a fungible class is
-// identical by definition). A non-fungible drop instead goes through
-// transfer_unique_asset() (task #250 fourth follow-up) so its actual
-// per-instance state survives the claim — see that function's own comment
-// for the bug this fixes.
-function fulfill_world_drop_claim($kp, $credential, $claimantPublicKey) {
-  if (isset($credential['asset']['fungible']) && $credential['asset']['fungible'] === false) {
-    $received = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $credential);
-  } else {
-    $received = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $credential['asset']['class'], $credential['quantity'], $credential['id']);
+// The custody change once a claim is legitimate, shared by the same-domain claim path
+// (atlas/world/drops/claim.php) and the cross-domain relay-claim handler
+// (atlas/world/drops/relay-claim.php). Mirrors issuer-server/server.js's settleWorldDropClaim().
+// It goes through the replacement journal, keyed by the drop and the credential: a retry of the same claim returns
+// the stored result, the same drop for another claimant is refused, and the predecessor is revoked together with the
+// successor's registration. The credential is checked again here because it sat un-revoked while listed: its owner may
+// have spent it elsewhere since. A unique item keeps its signed per-instance state; a fungible stack is re-derived from
+// the catalog, which is correct because every balance of a class is identical. Answers the request and exits.
+const ATLAS_WORLD_DROP_ID_PATTERN = '/^urn:atlas:worlddrop:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/';
+
+function atlas_world_drop_request_id($dropId, $credentialId) {
+  return 'wd-' . substr(hash('sha256', $dropId . "\n" . $credentialId), 0, 48);
+}
+
+function atlas_settle_world_drop_claim($kp, $credential, $claimantPublicKey, $dropId, $viaDomain) {
+  $requestId = atlas_world_drop_request_id($dropId, $credential['id']);
+  $params = ['claimantPublicKey' => $claimantPublicKey, 'viaDomain' => $viaDomain];
+  // The listing lives here only when this domain hosts the drop itself; for a relayed claim the host keeps its own.
+  $listedHere = $viaDomain === atlas_domain();
+  $begun = atlas_try_begin_replacement($requestId, 'world-drop-claim', [$credential], $params);
+  if ($begun[0] === 'replay') {
+    if ($listedHere) finish_world_drop($dropId, $claimantPublicKey);
+    atlas_send_committed($begun[1]);
   }
-  atlas_revoke($credential['id'], 'claimed from a world drop');
+  if ($begun[0] === 'skip') atlas_begin_replacement($kp['publicKeyB64url'], $requestId, 'world-drop-claim', [$credential], $params);
+  $problem = check_presented_transferable_asset($kp['publicKeyB64url'], $credential, $credential['owner']['publicKey'] ?? null, $credential['asset']['class'] ?? null);
+  if ($problem) {
+    if ($listedHere) remove_world_drop($dropId);
+    send_json(400, atlas_spend_problem_body($problem, $credential));
+  }
+  if (isset($credential['asset']['fungible']) && $credential['asset']['fungible'] === false) {
+    $received = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $credential['asset'], $credential['quantity'], $credential['id'], true);
+  } else {
+    $received = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $credential['asset']['class'], $credential['quantity'], $credential['id'], null, true);
+  }
+  $responseJson = atlas_commit_replacement(
+    $requestId, 'world-drop-claim', [$credential['id']], 'claimed from a world drop', $params,
+    [$received], ['status' => 'claimed', 'credential' => $received]
+  );
+  if ($listedHere) finish_world_drop($dropId, $claimantPublicKey);
   archive_if_audited($credential, 'claimed from a world drop');
-  return $received;
+  atlas_send_committed($responseJson);
+}
+
+// Domains whose relayed claims may omit the owner's and claimant's signed intents (drops listed before wallets signed
+// them). Empty unless an operator sets ATLAS_LEGACY_DROP_PEERS.
+function atlas_legacy_drop_peers() {
+  $raw = getenv('ATLAS_LEGACY_DROP_PEERS');
+  if (!is_string($raw) || $raw === '') return [];
+  return array_values(array_filter(array_map('trim', explode(',', $raw)), function ($d) { return $d !== ''; }));
+}
+
+// Why a relayed drop claim may not proceed, as [status, error, code], or null. The owner's drop intent must be signed
+// by the credential's owner and name this credential, the relaying domain, its world and the drop; the claimant's
+// intent must name the same drop and be signed by the key the attestation delivers to. Mirrors server.js's
+// worldDropRelayProblem().
+function atlas_world_drop_relay_problem($credential, $attestation, $dropIntent, $claimIntent) {
+  $deny = function ($error, $code = 'owner-authorization-required') { return [403, $error, $code]; };
+  if ($dropIntent === null) {
+    if (in_array($attestation['relayingDomain'], atlas_legacy_drop_peers(), true)) return null;
+    return $deny("This claim carries no drop intent signed by the credential's owner.");
+  }
+  if (!is_array($dropIntent) || !is_array($dropIntent['payload'] ?? null) || !is_array($dropIntent['proof'] ?? null)) return $deny('The drop intent is malformed.');
+  $d = $dropIntent['payload'];
+  if (($d['action'] ?? null) !== 'drop' || ($d['credentialId'] ?? null) !== $credential['id'] || ($d['world'] ?? null) !== $attestation['world']
+    || ($d['domain'] ?? null) !== $attestation['relayingDomain'] || ($d['dropId'] ?? null) !== $attestation['dropId']) {
+    return $deny("The owner's drop intent does not authorize this credential in this world, domain and drop.");
+  }
+  $ownerKey = $dropIntent['proof']['publicKey'] ?? null;
+  if (!is_string($ownerKey) || !verify_envelope($d, $dropIntent['proof'])) return $deny("The owner's drop intent signature does not check out.", 'owner-signature-invalid');
+  if (($credential['owner']['publicKey'] ?? null) !== $ownerKey) return $deny('The drop intent was not signed by the owner of this credential.', 'not-owner');
+  if (!is_array($claimIntent) || !is_array($claimIntent['payload'] ?? null) || !is_array($claimIntent['proof'] ?? null)) return $deny('This claim carries no claim intent signed by the claimant.');
+  $c = $claimIntent['payload'];
+  if (($c['action'] ?? null) !== 'claim' || ($c['dropId'] ?? null) !== $attestation['dropId'] || (array_key_exists('domain', $c) && $c['domain'] !== $attestation['relayingDomain'])) {
+    return $deny("The claimant's intent does not authorize claiming this drop.");
+  }
+  $claimantKey = $claimIntent['proof']['publicKey'] ?? null;
+  if (!is_string($claimantKey) || !verify_envelope($c, $claimIntent['proof'])) return $deny("The claimant's intent signature does not check out.", 'owner-signature-invalid');
+  if ($claimantKey !== $attestation['claimantPublicKey']) return $deny('The claim intent was not signed by the key this claim delivers to.', 'not-claimant');
+  return null;
 }
 
 // SPEC.md §7 v1.29 — the one settlement operation a Trading Station trade
@@ -1382,27 +1430,45 @@ function fulfill_world_drop_claim($kp, $credential, $claimantPublicKey) {
 // relay-settle.php's own caller) — either way it's already signed, so the
 // wallet verifies it the same way it verifies everything else, not
 // because this domain vouches for it twice over.
-function fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwnerPublicKey, $mailNotice = null) {
+// The journal key for one trade leg: the same trade and balance always map to the same id, so a leg that is asked for
+// again (a retried claim, a relaying domain that never saw the answer) finds its recorded result.
+function atlas_trade_leg_request_id($tradeId, $credentialId) {
+  return 'tl-' . substr(hash('sha256', (string) $tradeId . "\n" . (string) $credentialId), 0, 48);
+}
+
+// Settles one side of a trade through the replacement journal: the successors are signed first, the balance is revoked
+// in one atomic step, and the remainder notice and the mail to the absent party are applied as journalled effects, so a
+// stop at any point leaves either the old balance or its successors live and a repeat returns the same result.
+function fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwnerPublicKey, $mailNotice = null, $tradeId = null) {
   $isUnique = isset($credential['asset']['fungible']) && $credential['asset']['fungible'] === false;
   $originalOwner = $credential['owner']['publicKey'];
+  $params = ['newOwnerPublicKey' => $newOwnerPublicKey, 'spendQuantity' => $spendQuantity, 'tradeId' => $tradeId, 'mail' => $mailNotice !== null];
+  $requestId = $tradeId !== null
+    ? atlas_trade_leg_request_id($tradeId, $credential['id'])
+    : atlas_derived_request_id('trade-leg', $credential['id'], $params);
+
+  $begun = atlas_try_begin_replacement($requestId, 'trade-leg', [$credential], $params);
+  if ($begun[0] === 'replay') {
+    $recorded = json_decode($begun[1], true);
+    return ['received' => $recorded['received'], 'remainder' => $recorded['remainder']];
+  }
+  if ($begun[0] === 'skip') throw new Exception('this balance is being settled by another request, or was already settled differently', 409);
 
   if ($isUnique) {
-    $received = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $newOwnerPublicKey, $credential);
+    $received = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $newOwnerPublicKey, $credential, true);
     $remainder = null;
   } else {
     $leftover = $credential['quantity'] - $spendQuantity;
     $remainder = $leftover > 0
-      ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $originalOwner, $credential['asset']['class'], $leftover, $credential['id'])
+      ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $originalOwner, $credential['asset']['class'], $leftover, $credential['id'], null, true)
       : null;
-    $received = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $newOwnerPublicKey, $credential['asset']['class'], $spendQuantity, $credential['id']);
+    $received = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $newOwnerPublicKey, $credential['asset']['class'], $spendQuantity, $credential['id'], null, true);
   }
 
-  atlas_revoke($credential['id'], 'superseded');
-  archive_if_audited($credential, 'superseded');
-
+  $effects = [['kind' => 'archive', 'credential' => $credential, 'reason' => 'superseded']];
   if ($mailNotice !== null) {
     if ($remainder) {
-      append_asset_update(['id' => $credential['id'], 'status' => 'superseded', 'reason' => 'superseded', 'newCredential' => $remainder]);
+      $effects[] = ['kind' => 'asset-update', 'update' => ['id' => $credential['id'], 'status' => 'superseded', 'reason' => 'superseded', 'newCredential' => $remainder]];
     }
     $noticePayload = [
       'id' => 'urn:atlas:mail:' . atlas_uuid(),
@@ -1412,38 +1478,108 @@ function fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwn
       'attachedAsset' => $mailNotice['attachedAsset'],
       'sentAt' => iso_now(),
     ];
-    $noticeSignature = atlas_sign($kp['privateKey'], $noticePayload);
-    append_mail(array_merge($noticePayload, ['signature' => $noticeSignature]));
+    $effects[] = ['kind' => 'mail', 'message' => array_merge($noticePayload, ['signature' => atlas_sign($kp['privateKey'], $noticePayload)])];
   }
-
-  return ['received' => $received, 'remainder' => $remainder];
+  $responseJson = atlas_commit_replacement(
+    $requestId, 'trade-leg', [$credential['id']], 'superseded', $params,
+    array_values(array_filter([$received, $remainder])), ['received' => $received, 'remainder' => $remainder], null, $effects
+  );
+  $recorded = json_decode($responseJson, true);
+  return ['received' => $recorded['received'], 'remainder' => $recorded['remainder']];
 }
 
-// Compensates a claimant whose balance was already spent by
-// fulfill_trade_side_settlement() above (the B side, paid first) when the
-// OTHER leg (the A side, paid second) then fails — a network drop, a
-// foreign domain timing out on relay-settle, or any other error after B's
-// spend already committed. Only safe to call when B's side settled
-// LOCALLY (issuerBDomain === atlas_domain()): this domain is then the one
-// that both produced $aReceived (minted to the poster, who was never told
-// about it — the mail notice carrying it is built by the A-side
-// settlement that just failed, so it was never sent) and can safely undo
-// it, since nothing else has touched it in between. A spend on a FOREIGN
-// domain can't be refunded this way — that would need a new cross-domain
-// refund-relay endpoint this protocol doesn't have yet (see
-// atlas/trade/claim.php's own comment on this gap). Mirrors
-// issuer-server/server.js's refundFailedSecondLeg().
+// What this domain's journal records for one of its own balances spent for a trade leg: ['state' => 'none'] when no leg
+// committed, ['state' => 'settled', 'leg' => ...] while the credit minted for the counterparty stands, and ['state' =>
+// 'refunded', 'leg' => ..., 'refund' => ...] once a refund took that credit back and paid the balance's owner.
+// ['state' => 'busy'] when another request holds the leg or its journal cannot be recovered right now. A refunded leg is
+// never settled or replayed again: the counterparty's credit no longer exists. Mirrors tradeLegOutcome() in
+// issuer-server/server.js.
+function atlas_trade_leg_outcome($tradeId, $credential) {
+  $legId = atlas_trade_leg_request_id($tradeId, $credential['id']);
+  if (atlas_request_lease($legId) !== null) return ['state' => 'busy'];
+  try {
+    atlas_txn_recover_key($legId);
+  } catch (Exception $e) {
+    return ['state' => 'busy'];
+  }
+  $legJson = atlas_replay_peek($legId, 'trade-leg');
+  $leg = $legJson === null ? null : json_decode($legJson, true);
+  if (!is_array($leg) || !is_array($leg['received'] ?? null)) return ['state' => 'none'];
+  $refundId = atlas_derived_request_id('trade-refund', $leg['received']['id'], ['claimantPublicKey' => $credential['owner']['publicKey']]);
+  if (atlas_request_lease($refundId) !== null) return ['state' => 'busy'];
+  try {
+    atlas_txn_recover_key($refundId);
+  } catch (Exception $e) {
+    return ['state' => 'busy'];
+  }
+  $refundJson = atlas_replay_peek($refundId, 'trade-refund');
+  $refunded = $refundJson === null ? null : json_decode($refundJson, true);
+  if (is_array($refunded) && is_array($refunded['refund'] ?? null)) return ['state' => 'refunded', 'leg' => $leg, 'refund' => $refunded['refund']];
+  return ['state' => 'settled', 'leg' => $leg];
+}
+
+// A claim whose first leg is settled by a foreign issuer leaves a record before anything is relayed, so a retry after a lost
+// answer can tell its own earlier attempt from a balance that was spent some other way.
+function atlas_trade_attempt_id($tradeId, $credentialId) {
+  return 'tx-' . substr(hash('sha256', (string) $tradeId . "\n" . (string) $credentialId), 0, 48);
+}
+function atlas_trade_attempt_params($claimantPublicKey, $spendQuantity) {
+  return ['claimantPublicKey' => $claimantPublicKey, 'spendQuantity' => $spendQuantity];
+}
+function atlas_trade_attempt_mark($tradeId, $credential, $claimantPublicKey, $spendQuantity) {
+  atlas_replay_store(atlas_trade_attempt_id($tradeId, $credential['id']), 'trade-attempt', [$credential['id']], atlas_trade_attempt_params($claimantPublicKey, $spendQuantity), '{}');
+}
+// True for a foreign balance this same claimant already tried to spend for this trade. The balance must still be the
+// genuine credential, signed by its issuer, owned by the claimant and of the right class and size; what the issuer says
+// about its revocation is left to the relay, which is the authority on it.
+function atlas_trade_attempt_resumable($tradeId, $credential, $claimantPublicKey, $class, $spendQuantity) {
+  if (!is_array($credential) || ($credential['credential'] ?? null) !== 'domain-atlas-asset/1.0' || empty($credential['issuer']['domain']) || $credential['issuer']['domain'] === atlas_domain()) return false;
+  if (($credential['owner']['publicKey'] ?? null) !== $claimantPublicKey || ($credential['asset']['class'] ?? null) !== $class) return false;
+  if (!(($credential['quantity'] ?? 0) >= $spendQuantity) || !atlas_is_trusted_trade_peer($credential['issuer']['domain'])) return false;
+  $prior = atlas_replay_lookup(atlas_trade_attempt_id($tradeId, $credential['id']), 'trade-attempt', [$credential['id']], atlas_trade_attempt_params($claimantPublicKey, $spendQuantity));
+  if ($prior === null || isset($prior['conflict'])) return false;
+  return verify_foreign_asset_credential($credential, true) === true;
+}
+
+// True when this balance of this domain's own was already spent for this trade leg by an earlier request that then stopped
+// (or whose answer was lost): the journal holds the committed leg for the same trade, new owner and quantity, and the
+// presented credential is the genuine one for the party named. The ordinary "still live" checks cannot apply to it any
+// more, and a retry resumes with the recorded result instead.
+function atlas_trade_leg_resumable($kp, $tradeId, $credential, $ownerPublicKey, $class, $spendQuantity, $newOwnerPublicKey, $mail) {
+  if (!is_array($credential) || ($credential['credential'] ?? null) !== 'domain-atlas-asset/1.0' || ($credential['issuer']['domain'] ?? null) !== atlas_domain()) return false;
+  if (!verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential))) return false;
+  if (($credential['owner']['publicKey'] ?? null) !== $ownerPublicKey || ($credential['asset']['class'] ?? null) !== $class) return false;
+  if (!is_revoked($credential['id'])) return false;
+  $params = ['newOwnerPublicKey' => $newOwnerPublicKey, 'spendQuantity' => $spendQuantity, 'tradeId' => $tradeId, 'mail' => $mail];
+  $begun = atlas_try_begin_replacement(atlas_trade_leg_request_id($tradeId, $credential['id']), 'trade-leg', [$credential], $params);
+  return $begun[0] === 'replay';
+}
+
+// Gives a claimant their value back when the other leg of the trade cannot settle, after fulfill_trade_side_settlement()
+// above already spent the claimant's balance (the B side, paid first). Runs on the domain that issued that balance: from
+// atlas/trade/claim.php when it is that domain, otherwise from atlas/trade/relay-refund.php when the station asks. Only that
+// domain can do it: it produced $aReceived (minted to the poster, who was never told about it, since the mail notice
+// carrying it belongs to the A-side settlement that did not happen) and can revoke it. Mirrors issuer-server/server.js's
+// refundFailedSecondLeg().
 //
-// Revokes $aReceived (the never-delivered credit to the poster) and mints
-// its equivalent back to the claimant: a fresh balance for a fungible
-// class, or the exact same unique item (transferred back, preserving its
-// instance state) for a non-fungible one.
+// Revokes $aReceived and mints its equivalent back to the claimant: a fresh balance for a fungible class, or the exact same
+// unique item (transferred back, preserving its instance state) for a non-fungible one. The refund is a journalled
+// replacement keyed by $aReceived and the claimant, so asking again returns the same credential.
 function refund_failed_second_leg($kp, $aReceived, $offerB, $claimantPublicKey) {
-  atlas_revoke($aReceived['id'], 'refund: counterparty leg of this trade failed to settle');
-  archive_if_audited($aReceived, 'refund: counterparty leg of this trade failed to settle');
+  $params = ['claimantPublicKey' => $claimantPublicKey];
+  $requestId = atlas_derived_request_id('trade-refund', $aReceived['id'], $params);
+  $begun = atlas_try_begin_replacement($requestId, 'trade-refund', [$aReceived], $params);
+  if ($begun[0] === 'replay') return json_decode($begun[1], true)['refund'];
+  if ($begun[0] === 'skip') throw new Exception('this refund is already being processed, or was settled differently', 409);
   $isUnique = isset($aReceived['asset']['fungible']) && $aReceived['asset']['fungible'] === false;
-  return $isUnique
-    ? transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $aReceived)
-    : mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $offerB['class'], $offerB['quantity'], $aReceived['id']);
+  $refund = $isUnique
+    ? transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $aReceived, true)
+    : mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $offerB['class'], $offerB['quantity'], $aReceived['id'], null, true);
+  $reason = 'refund: counterparty leg of this trade failed to settle';
+  $responseJson = atlas_commit_replacement(
+    $requestId, 'trade-refund', [$aReceived['id']], $reason, $params,
+    [$refund], ['refund' => $refund], null, [['kind' => 'archive', 'credential' => $aReceived, 'reason' => $reason]]
+  );
+  return json_decode($responseJson, true)['refund'];
 }
 

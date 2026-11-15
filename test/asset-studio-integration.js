@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const os = require('os');
-const { SITE_MODEL_STANDIN, StudioLab, makeIdentity, signBridge, signPayload, canonicalize, b64u, DESIGN, REPO } = require('./studio-lab');
+const { WALLET_RP_ID, SITE_MODEL_STANDIN, StudioLab, makeIdentity, signBridge, signPayload, canonicalize, b64u, DESIGN, REPO } = require('./studio-lab');
 const { adminAuth } = require('../tools/lib/admin-auth');
 
 const FILTER = process.argv[2] || '';
@@ -151,17 +151,17 @@ async function credentialVerifies(l, cred) {
 
   await test('T5: optional WebAuthn relying-party pin (default off; configured pin is enforced)', async () => {
     const wa = makeIdentity('webauthn'), raw = makeIdentity('raw-ecdsa');
-    // The lab's simulated authenticator reports rpIdHash = SHA-256("rp").
+    // The lab's simulated authenticator is the wallet extension: its relying party is the extension id.
     let l = await lab({ mint: true, config: HIGH });
     assert.equal((await l.mintAs(wa, DESIGN)).mint.status, 200, 'no pin: accepted');
-    l = await lab({ mint: true, config: Object.assign({}, HIGH, { webauthnRpIds: ['rp'] }) });
+    l = await lab({ mint: true, config: Object.assign({}, HIGH, { webauthnRpIds: [WALLET_RP_ID] }) });
     assert.equal((await l.mintAs(wa, DESIGN)).mint.status, 200, 'matching pin: accepted');
     assert.equal((await l.mintAs(raw, DESIGN)).mint.status, 200, 'raw identities are not subject to the pin');
     l = await lab({ mint: true, config: Object.assign({}, HIGH, { webauthnRpIds: ['other.test'] }) });
     const r = await l.mintAs(wa, DESIGN);
     assert.equal(r.mint.status, 403, 'wrong rp: ' + r.mint.text);
     assert.equal(replays(l).length, 0, 'nothing issued');
-    for (const bad of [[], 'rp', [5], ['RP'], ['a b'], ['rp', 'a', 'b', 'c', 'd'], { a: 'rp' }]) {
+    for (const bad of [[], WALLET_RP_ID, [5], ['RP'], ['a b'], [WALLET_RP_ID, 'a', 'b', 'c', 'd'], { a: WALLET_RP_ID }]) {
       l = await lab({ mint: true, config: Object.assign({}, HIGH, { webauthnRpIds: bad }) });
       assert.equal((await l.status()).json.mintEnabled, false, 'bad pin ' + JSON.stringify(bad));
     }

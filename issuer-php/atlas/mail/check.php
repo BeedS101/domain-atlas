@@ -22,6 +22,8 @@ require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();
 $kp = atlas_load_keys(); // ensures .well-known files exist even if this is the very first request the site ever gets, and gives us the keypair apply_class_patch_if_stale() needs
+// A replacement that stopped after its revocation is completed (its update published) before this check-in reads them.
+try { atlas_txn_sweep(); } catch (Exception $e) { error_log('atlas: transaction recovery: ' . $e->getMessage()); }
 
 try {
   $body = read_json_body();

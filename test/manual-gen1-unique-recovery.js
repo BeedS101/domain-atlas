@@ -297,6 +297,7 @@ async function mintScenarios(kind) {
     const pages = [];
     for (let i = 0; i < 3; i++) { const p = await w.context.newPage(); await p.goto('chrome-extension://' + id + '/viewer.html'); await p.waitForFunction(() => typeof AtlasWallet !== 'undefined', null, { timeout: 15000 }); pages.push(p); }
     const results = await Promise.all([w.recover(), ...pages.map((p) => p.evaluate((k) => AtlasWallet.recoverPendingOperations(k), w.pub))]);
+    await waitFor(async () => (await w.pending()).length === 0 && (await shown(w, RING)).length === 1, 15000);
     const rows = await shown(w, RING);
     const completed = results.flat().filter((o) => o.status === 'completed' && o.applied === true).length;
     check('three pages and the worker recover at once: applied at most once, one ring, journal empty', completed <= 1 && rows.length === 1 && iss.serial(RING) === 1 && (await w.pending()).length === 0, { results, rows });
@@ -643,24 +644,26 @@ const walletClaim = (w, station, goldDomain) => w.W(async (a) => {
 // Trusted trade peers of a throw-away issuer.
 const trustPeers = (iss, domains) => fs.writeFileSync(path.join(iss.stateDir, 'atlas-trusted-trade-peers-store.json'), JSON.stringify({ peers: domains }));
 
-// An issuer whose relay-settle always fails right after its checks, before it changes anything (a timeout).
-function failingSettleOpts(kind) {
+// An issuer whose relay-settle always fails right after its checks, before it changes anything. By default it refuses (HTTP 400,
+// a definite answer: the claimant is refunded); with status 500 the outcome is unknown and the claim is held, never refunded.
+function failingSettleOpts(kind, status) {
+  status = status || 400;
   if (kind === 'php') {
     return { prepare: (bundle) => {
       const f = path.join(bundle, 'atlas', 'trade', 'relay-settle.php');
       const src = fs.readFileSync(f, 'utf8');
-      const mk = '$settled = fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwnerPublicKey, $mailNotice);';
+      const mk = '$settled = fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwnerPublicKey, $mailNotice';
       if (!src.includes(mk)) throw new Error('relay-settle.php changed shape');
-      fs.writeFileSync(f, src.replace(mk, "send_json(500, ['error' => 'INJECTED: simulated relay-settle failure']);\n" + mk));
+      fs.writeFileSync(f, src.replace(mk, "send_json(" + status + ", ['error' => 'INJECTED: simulated relay-settle failure']);\n" + mk));
     } };
   }
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-failing-settle-'));
   fs.cpSync(path.join(REPO, 'issuer-server'), path.join(root, 'issuer-server'), { recursive: true });
   const f = path.join(root, 'issuer-server', 'server.js');
   const src = fs.readFileSync(f, 'utf8');
-  const mk = 'const settled = await fulfillTradeSideSettlement(credential, spendQuantity, newOwnerPublicKey, mailNotice);';
+  const mk = 'const settled = await fulfillTradeSideSettlement(credential, spendQuantity, newOwnerPublicKey, mailNotice';
   if (!src.includes(mk)) throw new Error('server.js changed shape');
-  fs.writeFileSync(f, src.replace(mk, "return sendJson(res, 500, { error: 'INJECTED: simulated relay-settle failure' });\n        " + mk));
+  fs.writeFileSync(f, src.replace(mk, "return sendJson(res, " + status + ", { error: 'INJECTED: simulated relay-settle failure' });\n        " + mk));
   return { root };
 }
 
@@ -896,7 +899,7 @@ async function claimScenarios(kind) {
   }, { workers: 4 });
 
   await scenario(kind, 'C12 first leg fails with an unknown outcome: the claim stays visible and is not resent', async (w, iss, ctx) => {
-    const foreign = await ctx.issuer(kind, Object.assign({ workers: 4 }, failingSettleOpts(kind)));
+    const foreign = await ctx.issuer(kind, Object.assign({ workers: 4 }, failingSettleOpts(kind, 500)));
     trustPeers(iss, [foreign.domain]); trustPeers(foreign, [iss.domain]);
     await postListing(iss);
     const r0 = await mint(w, iss, MEMBER); if (r0 !== 'ok') throw new Error('membership failed');

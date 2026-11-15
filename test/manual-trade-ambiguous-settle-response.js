@@ -116,12 +116,11 @@ function startNodeServer(bundleDir, port, domain, stateDir, docrootDir) {
 function injectFirstResponseLostThenRecovers(bundleDir) {
   const serverPath = path.join(bundleDir, 'server.js');
   let src = fs.readFileSync(serverPath, 'utf8');
-  const marker = "if (!res.ok) throw new Error(body.error || (domain + ' refused the trade settle (HTTP ' + res.status + ')'));\n      return body;";
+  const marker = "      return body;\n    };\n    try {\n      return await attempt();";
   if (!src.includes(marker)) throw new Error('marker not found in server.js — shape changed, update this test');
-  const replacement = "if (!res.ok) throw new Error(body.error || (domain + ' refused the trade settle (HTTP ' + res.status + ')'));\n" +
-    "      global.__ATLAS_TEST_RELAY_SETTLE_CALLS = (global.__ATLAS_TEST_RELAY_SETTLE_CALLS || 0) + 1;\n" +
+  const replacement = "      global.__ATLAS_TEST_RELAY_SETTLE_CALLS = (global.__ATLAS_TEST_RELAY_SETTLE_CALLS || 0) + 1;\n" +
     "      if (global.__ATLAS_TEST_RELAY_SETTLE_CALLS === 1) throw new Error('could not reach ' + domain + \" (INJECTED: simulated dropped connection AFTER the remote already applied the settle, for this test only — call #1 only)\");\n" +
-    "      return body;";
+    "      return body;\n    };\n    try {\n      return await attempt();";
   src = src.replace(marker, replacement);
   fs.writeFileSync(serverPath, src);
 }

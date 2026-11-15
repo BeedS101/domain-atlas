@@ -83,12 +83,12 @@ if (!empty($to['domain']) && $to['domain'] !== atlas_domain()) {
   $relayAttestation = ['relayingDomain' => atlas_domain(), 'relayingDomainHandle' => $senderMembership['handle'] ?? null];
   $relaySignature = atlas_sign($kp['privateKey'], $relayAttestation);
   try {
-    $relayResult = atlas_http_post_json(
-      atlas_base_url($to['domain']) . '/atlas/postoffice/relay',
+    $relayResult = atlas_peer_post_json(
+      $to['domain'], '/atlas/postoffice/relay',
       ['payload' => $payload, 'proof' => $proof, 'relayAttestation' => $relayAttestation, 'relaySignature' => $relaySignature]
     );
-  } catch (Exception $e) {
-    send_json(502, ['error' => 'could not reach ' . $to['domain'] . ' to relay this message: ' . $e->getMessage()]);
+  } catch (AtlasOutboundException $e) {
+    send_json(502, ['error' => 'could not reach ' . $to['domain'] . ' to relay this message']);
   }
   if ($relayResult['status'] < 200 || $relayResult['status'] >= 300) {
     $reason = $relayResult['body']['error'] ?? 'unknown reason';

@@ -17,7 +17,7 @@
 //      reason: 'clawback'} — reusing the plain revocation channel, not a
 //      "superseded" entry (the replacement went to someone else, so the
 //      old holder's wallet has nothing to adopt).
-//   3. Clawing back an id that's already revoked is rejected — nothing
+//   3. Clawing back an id that's already revoked (to anyone but the original recipient) is rejected — nothing
 //      left to claw back.
 //   4. Clawing back to the SAME public key that already holds it is
 //      rejected outright (a same-owner "clawback" is not a real
@@ -180,11 +180,15 @@ async function adminDirectory(admin) {
     assert(!update.newCredential, 'expected no newCredential handed to the old (thief) id — it belongs to someone else now, got: ' + JSON.stringify(update));
     console.log('PASS: mail/check shows', JSON.stringify(update));
 
-    console.log('STEP 3: clawing back an already-revoked id is rejected');
-    const alreadyRevoked = await adminCall('/atlas/clawback', admin, { credential: stolen, toPublicKey: victim.publicKey });
+    console.log('STEP 3: clawing back an already-revoked id is rejected, and the same request sent again is answered with its recorded result');
+    const alreadyRevoked = await adminCall('/atlas/clawback', admin, { credential: stolen, toPublicKey: bystander.publicKey });
     assert(alreadyRevoked.status === 400, 'expected a 400 for an already-revoked credential, got ' + alreadyRevoked.status);
     assert(/already revoked/.test(alreadyRevoked.body.error || ''), 'expected an "already revoked" error, got: ' + JSON.stringify(alreadyRevoked.body));
     console.log('PASS: already-revoked clawback rejected ->', alreadyRevoked.body.error);
+    // The same request again (an answer that never arrived) gets the first result back, not a second credential.
+    const repeated = await adminCall('/atlas/clawback', admin, { credential: stolen, toPublicKey: victim.publicKey });
+    assert(repeated.status === 200 && repeated.body.newCredential && repeated.body.newCredential.id === clawbackRes.body.newCredential.id, 'expected the identical request to return the recorded result, got: ' + JSON.stringify(repeated.body));
+    console.log('PASS: the identical request returns the recorded credential');
 
     console.log('STEP 4: clawing back to the credential\'s own current owner is rejected — nothing to claw back');
     const freshHold = await issueAsset(bystander.publicKey, 'atlas.element.gold', 10);

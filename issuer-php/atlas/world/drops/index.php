@@ -37,7 +37,10 @@ $world = $_GET['world'] ?? null;
 if (!$world) send_json(400, ['error' => 'world is required']);
 
 $doc = read_world_drops();
-$drops = array_values(array_filter($doc['drops'], function ($d) use ($world) {
-  return $d['world'] === $world;
-}));
+$drops = array_values(array_map(function ($d) {
+  unset($d['dropIntent'], $d['reservedBy'], $d['reservedAt']);
+  return $d;
+}, array_filter($doc['drops'], function ($d) use ($world) {
+  return $d['world'] === $world && !isset($d['claimedBy']);
+})));
 send_json(200, ['domain' => atlas_domain(), 'world' => $world, 'drops' => $drops]);

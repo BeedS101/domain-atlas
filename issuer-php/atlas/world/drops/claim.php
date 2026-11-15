@@ -1,17 +1,17 @@
 <?php
-// POST /atlas/world/drops/claim (task #250, SPEC.md §5.5) — mirrors
+// POST /atlas/world/drops/claim (SPEC.md §5.5) — mirrors
 // issuer-server/server.js's own /atlas/world/drops/claim handler exactly.
 // Claims (picks up) one drop by id, whether it's a stranger's item or the
 // caller's own earlier drop — no special "reclaiming your own" case, same
-// as walking up to it in the scene and clicking it. Settled by REMOVING
-// the listing before minting anything (remove_world_drop() in lib/store.php)
-// — whichever concurrent claim's removal actually finds-and-deletes the
-// entry wins the item, same reservation-by-removal mechanism POST
-// /atlas/trade/claim already uses against atlas-pending-trades-store.json.
+// as walking up to it in the scene and clicking it. The listing is reserved
+// for the claimant (reserve_world_drop() in lib/store.php), settled through
+// the replacement journal, and only then marked claimed
+// (finish_world_drop()); a claimant who asks again after a lost answer is
+// handed the recorded result, and a reservation nobody finishes lapses.
 //
 // If this domain is the credential's own issuer, it fulfills the claim
-// directly (fulfill_world_drop_claim() in lib/bootstrap.php — mint+revoke,
-// the same real ownership-transfer primitive trade settlement/split/
+// directly (atlas_settle_world_drop_claim() in lib/bootstrap.php — mint+revoke
+// through the replacement journal, the same ownership-transfer primitive trade settlement/split/
 // consolidate already use). Otherwise it can't legitimately re-sign
 // someone else's credential to a new owner — only the actual issuer holds
 // that signing key — so it relays the claim there instead
@@ -42,19 +42,27 @@ if (($payload['dropId'] ?? null) !== $dropId || ($payload['action'] ?? null) !==
   send_json(400, ['error' => 'intent does not authorize claiming this drop']);
 }
 
+if (array_key_exists('domain', $payload) && $payload['domain'] !== atlas_domain()) {
+  send_json(400, ['error' => 'intent names a different domain than this one']);
+}
+
 $envelopeOk = verify_envelope($payload, $intent['proof']);
 if (!$envelopeOk) send_json(400, ['error' => 'intent signature does not check out']);
 $claimantPub = $intent['proof']['publicKey'];
 
-$won = remove_world_drop($dropId);
-if ($won === null) {
+$reserved = reserve_world_drop($dropId, $claimantPub);
+if ($reserved['status'] === 'gone') {
   send_json(404, ['error' => 'that item is gone — already picked up, or reclaimed by whoever dropped it']);
 }
+if ($reserved['status'] === 'busy') {
+  send_json(409, ['error' => 'someone else is picking that item up right now — try again shortly', 'code' => 'busy']);
+}
+atlas_fault_point('drop:reserved');
+$won = $reserved['drop'];
 $credential = $won['credential'];
 
 if ($credential['issuer']['domain'] === atlas_domain()) {
-  $received = fulfill_world_drop_claim($kp, $credential, $claimantPub);
-  send_json(200, ['status' => 'claimed', 'credential' => $received]);
+  atlas_settle_world_drop_claim($kp, $credential, $claimantPub, $dropId, atlas_domain());
 }
 
 $attestation = [
@@ -66,19 +74,27 @@ $attestation = [
 ];
 $attestationSignature = atlas_sign($kp['privateKey'], $attestation);
 try {
-  $relayResult = atlas_http_post_json(
-    atlas_base_url($credential['issuer']['domain']) . '/atlas/world/drops/relay-claim',
-    ['credential' => $credential, 'attestation' => $attestation, 'attestationSignature' => $attestationSignature]
+  $relayResult = atlas_peer_post_json(
+    $credential['issuer']['domain'], '/atlas/world/drops/relay-claim',
+    ['credential' => $credential, 'attestation' => $attestation, 'attestationSignature' => $attestationSignature,
+   'dropIntent' => $won['dropIntent'] ?? null, 'claimIntent' => $intent]
   );
-} catch (Exception $e) {
-  // The reservation above already removed the listing — same acknowledged
-  // gap the Node version documents: no cross-call rollback in this demo, so
-  // a network failure here can strand the item rather than restore the
-  // listing.
+} catch (AtlasOutboundException $e) {
+  // Whether the issuer acted on the claim is unknown, so the reservation stays: the same claimant asking again is
+  // handed the issuer's recorded result, and the item is listed again for everyone once the reservation lapses.
   send_json(502, ['error' => 'could not reach ' . $credential['issuer']['domain'] . ' to complete this claim: ' . $e->getMessage()]);
 }
-if ($relayResult['status'] < 200 || $relayResult['status'] >= 300) {
-  $reason = $relayResult['body']['error'] ?? 'unknown reason';
-  send_json($relayResult['status'] ?: 502, ['error' => $credential['issuer']['domain'] . ' rejected this claim: ' . $reason]);
+$relayBody = is_array($relayResult['body'] ?? null) ? $relayResult['body'] : [];
+if ($relayResult['status'] >= 200 && $relayResult['status'] < 300) {
+  $delivered = $relayBody['credential'] ?? null;
+  if (($relayBody['status'] ?? null) !== 'claimed' || !is_array($delivered) || ($delivered['owner']['publicKey'] ?? null) !== $claimantPub) {
+    send_json(502, ['error' => $credential['issuer']['domain'] . ' gave no usable answer to this claim; ask again']);
+  }
+  finish_world_drop($dropId, $claimantPub);
+  send_json(200, $relayBody);
 }
-send_json(200, $relayResult['body']);
+$reason = $relayBody['error'] ?? 'unknown reason';
+// A refusal that will not change (the owner never authorized it, the credential is spent) clears the listing; anything
+// that may pass (busy, a conflicting claim still settling, a server error) keeps the reservation.
+if (in_array($relayResult['status'], [400, 403, 404], true) && ($relayBody['code'] ?? null) !== 'busy') remove_world_drop($dropId);
+send_json($relayResult['status'] ?: 502, ['error' => $credential['issuer']['domain'] . ' rejected this claim: ' . $reason]);

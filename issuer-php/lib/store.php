@@ -2,21 +2,11 @@
 if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Domain Atlas — PHP issuer: configuration, key storage, revocation ledger.
 //
-// Mirrors issuer-server/server.js's three overridable settings, but PHP has
-// no long-lived process to read environment variables from at startup — a
-// shared host runs this fresh per request — so ATLAS_DOMAIN defaults to the
-// Host header instead (correct almost all the time on real hosting) and can
-// still be forced below if you're reverse-proxied or the Host header isn't
-// trustworthy for some reason.
-
-// ATLAS_DOMAIN — baked into every issued credential's issuer.domain field.
-// Get this wrong and re-verification tries to fetch the issuer's key from
-// the WRONG domain later. Auto-detected from the request; override if needed.
-function atlas_domain() {
-  $forced = null; // e.g. 'example.com' — set this if Host-header detection isn't right for your setup
-  if ($forced) return $forced;
-  return isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost';
-}
+// Mirrors issuer-server/server.js's overridable settings. PHP has no long-lived process to read environment variables
+// from at startup — a shared host runs this fresh per request — so the settings are read on each request.
+//
+// The issuer's own domain (atlas_domain()) is in lib/domain.php: it comes from configuration, not from the request.
+require_once __DIR__ . '/domain.php';
 
 // ATLAS_TRUSTED_TRADE_PEERS (SPEC.md §7) — the only other domains this
 // domain will treat as a genuine cross-domain trading counterpart, in
@@ -1780,27 +1770,30 @@ function atlas_demo_attestation_claims() {
   ];
 }
 
-// Reservation-by-removal (task #250's concurrency mechanism, same as
-// remove_pending_trade() above): whichever concurrent claim's removal
-// actually finds-and-deletes the entry wins the item; a losing concurrent
-// claim gets a clean "already gone" error from the caller instead. Returns
-// the removed entry (so the caller can still act on it), or null if it was
-// already gone. Mirrors issuer-server/server.js's removeWorldDrop().
-function remove_world_drop($dropId) {
-  $file = atlas_world_drops_file();
-  $fh = fopen($file, 'c+');
+// Picking up a drop is a three-step state on its listing, so a claimant whose request or answer is lost can ask again
+// and be given the same item:
+//   listed    no claimedBy, no live reservation
+//   reserved  reservedBy/reservedAt: only that claimant (or anyone, once the reservation lapses) may settle it
+//   claimed   claimedBy/claimedAt: settlement is committed in the journal; only that claimant can ask again, to be
+//             handed the recorded result. Kept for the replay window, then pruned.
+// The listing is deleted outright only when the claim is refused for good (remove_world_drop). Mirrors
+// issuer-server/server.js's reserveWorldDrop()/finishWorldDrop()/removeWorldDrop().
+function atlas_drop_reserve_seconds() {
+  $v = getenv('ATLAS_DROP_RESERVE_SECONDS');
+  return (is_numeric($v) && $v > 0) ? (float)$v : 120.0;
+}
+
+// $fn receives the decoded document by reference and returns the value to hand back; the document is written
+// back when $fn sets $changed.
+function atlas_world_drops_update($fn) {
+  $fh = fopen(atlas_world_drops_file(), 'c+');
   flock($fh, LOCK_EX);
   $data = stream_get_contents($fh);
   $doc = json_decode($data, true);
-  if (!is_array($doc)) $doc = ['drops' => []];
-  $found = null;
-  foreach ($doc['drops'] as $d) {
-    if ($d['dropId'] === $dropId) { $found = $d; break; }
-  }
-  if ($found !== null) {
-    $doc['drops'] = array_values(array_filter($doc['drops'], function ($d) use ($dropId) {
-      return $d['dropId'] !== $dropId;
-    }));
+  if (!is_array($doc) || !isset($doc['drops']) || !is_array($doc['drops'])) $doc = ['drops' => []];
+  $changed = false;
+  $out = $fn($doc, $changed);
+  if ($changed) {
     ftruncate($fh, 0);
     rewind($fh);
     fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
@@ -1808,7 +1801,61 @@ function remove_world_drop($dropId) {
   }
   flock($fh, LOCK_UN);
   fclose($fh);
-  return $found;
+  return $out;
+}
+
+// ['status' => 'ok', 'drop' => entry], ['status' => 'gone'] or ['status' => 'busy'].
+function reserve_world_drop($dropId, $claimant) {
+  return atlas_world_drops_update(function (&$doc, &$changed) use ($dropId, $claimant) {
+    $now = microtime(true);
+    $keep = [];
+    foreach ($doc['drops'] as $d) {
+      if (isset($d['claimedAt']) && $now - $d['claimedAt'] > atlas_replay_ttl_seconds()) { $changed = true; continue; }
+      $keep[] = $d;
+    }
+    $doc['drops'] = $keep;
+    foreach ($doc['drops'] as $i => $d) {
+      if ($d['dropId'] !== $dropId) continue;
+      if (isset($d['claimedBy'])) return $d['claimedBy'] === $claimant ? ['status' => 'ok', 'drop' => $d] : ['status' => 'gone'];
+      if (isset($d['reservedBy']) && $d['reservedBy'] !== $claimant && $now - ($d['reservedAt'] ?? 0) < atlas_drop_reserve_seconds()) return ['status' => 'busy'];
+      $d['reservedBy'] = $claimant;
+      $d['reservedAt'] = $now;
+      $doc['drops'][$i] = $d;
+      $changed = true;
+      return ['status' => 'ok', 'drop' => $d];
+    }
+    return ['status' => 'gone'];
+  });
+}
+
+// Settlement committed: keep the listing as a record that only the claimant can use, hidden from the public listing.
+function finish_world_drop($dropId, $claimant) {
+  atlas_world_drops_update(function (&$doc, &$changed) use ($dropId, $claimant) {
+    foreach ($doc['drops'] as $i => $d) {
+      if ($d['dropId'] !== $dropId || isset($d['claimedBy'])) continue;
+      unset($d['reservedBy'], $d['reservedAt']);
+      $d['claimedBy'] = $claimant;
+      $d['claimedAt'] = microtime(true);
+      $doc['drops'][$i] = $d;
+      $changed = true;
+      return;
+    }
+  });
+}
+
+// Deletes the listing; the removed entry is handed back (null if it was already gone).
+function remove_world_drop($dropId) {
+  return atlas_world_drops_update(function (&$doc, &$changed) use ($dropId) {
+    $found = null;
+    foreach ($doc['drops'] as $d) {
+      if ($d['dropId'] === $dropId) { $found = $d; break; }
+    }
+    if ($found !== null) {
+      $doc['drops'] = array_values(array_filter($doc['drops'], function ($d) use ($dropId) { return $d['dropId'] !== $dropId; }));
+      $changed = true;
+    }
+    return $found;
+  });
 }
 
 // Task #42: serialized/limited-edition support — one running total minted
@@ -3018,8 +3065,18 @@ function atlas_fsync_dir($dir) {
 
 // Test-only: ATLAS_TEST_CRASH_AT=<point> makes the request stop dead right
 // after that step, with no response, as if it had crashed there.
+// "<point>" stops at the first time the point is reached, "<point>@N" at the Nth within the request.
 function atlas_fault_point($name) {
-  if (getenv('ATLAS_TEST_CRASH_AT') === $name) exit(86);
+  static $hits = [];
+  $at = getenv('ATLAS_TEST_CRASH_AT');
+  if (!is_string($at) || $at === '') return;
+  if (!preg_match('/^(.*)@(\d+)$/', $at, $m)) {
+    if ($at === $name) exit(86);
+    return;
+  }
+  if ($m[1] !== $name) return;
+  $hits[$name] = ($hits[$name] ?? 0) + 1;
+  if ($hits[$name] === (int) $m[2]) exit(86);
 }
 
 // Temporary files left by a write that was interrupted. A live write
@@ -3077,6 +3134,7 @@ function atlas_revoke_many($ids, $reason, $txn = null) {
     flock($lock, LOCK_UN);
     fclose($lock);
   }
+  atlas_fault_point('revoke:written');
 }
 
 function atlas_revoke($id, $reason) {
@@ -3306,6 +3364,10 @@ function archive_if_audited($credential, $reason) {
   flock($fh, LOCK_EX);
   $doc = json_decode(stream_get_contents($fh), true);
   if (!is_array($doc) || !isset($doc['archived'])) $doc = ['archived' => []];
+  // A credential is superseded once; a journalled replacement that is completed again must not archive it twice.
+  foreach ($doc['archived'] as $a) {
+    if (($a['id'] ?? null) === ($credential['id'] ?? null)) { flock($fh, LOCK_UN); fclose($fh); return; }
+  }
   $doc['archived'][] = array_merge($credential, ['archivedAt' => gmdate('Y-m-d\TH:i:s\Z'), 'reason' => $reason]);
   ftruncate($fh, 0);
   rewind($fh);
@@ -3352,6 +3414,14 @@ function read_mail() {
   fclose($fh);
   $doc = json_decode($data, true);
   return is_array($doc) ? $doc : ['messages' => []];
+}
+
+// Same as append_mail(), unless a message with this id is already stored.
+function append_mail_once($message) {
+  $file = atlas_mail_file();
+  $doc = is_file($file) ? json_decode((string) @file_get_contents($file), true) : null;
+  foreach (is_array($doc) ? ($doc['messages'] ?? []) : [] as $m) if (($m['id'] ?? null) === ($message['id'] ?? null)) return;
+  append_mail($message);
 }
 
 function append_mail($message) {
@@ -3449,6 +3519,16 @@ function read_asset_updates() {
   fclose($fh);
   $doc = json_decode($data, true);
   return is_array($doc) ? $doc : ['updates' => []];
+}
+
+// Same as append_asset_update(), unless this exact update (same old id and same new credential) is already there:
+// a journalled replacement applies its updates again if it was stopped part-way.
+function append_asset_update_once($update) {
+  $newId = $update['newCredential']['id'] ?? null;
+  foreach (read_asset_updates()['updates'] ?? [] as $u) {
+    if (($u['id'] ?? null) === ($update['id'] ?? null) && (($u['newCredential']['id'] ?? null) === $newId)) return;
+  }
+  append_asset_update($update);
 }
 
 function append_asset_update($update) {
