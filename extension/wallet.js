@@ -2163,7 +2163,9 @@ const AtlasWallet = (() => {
     // running in another page does not send the same request at the same time.
     return withSlot(OPERATION_SLOT + requestId, async () => {
       await journalAdd(spec.owner, entry);
-      return sendOperation(entry, { fresh: true });
+      const result = await sendOperation(entry, { fresh: true });
+      // The request id travels with the result so the Activity entry can name the request that produced it.
+      return result && typeof result === 'object' ? Object.assign(result, { requestId }) : result;
     }, null, true);
   }
 
@@ -2521,6 +2523,7 @@ const AtlasWallet = (() => {
   async function mintAsset(role, issuerDomain, assetClass, quantity) {
     const owner = await identityOf(role);
     await assertWalletWritable(owner.publicKey);
+    const holdingsBefore = await holdingsSnapshot(owner.publicKey);
     const wallet = await getWallet(owner.publicKey);
     // Attached for every fungible mint (cheap, and the issuer decides whether
     // it needs it): the issuer counts holdings from its own records and uses
@@ -2534,7 +2537,7 @@ const AtlasWallet = (() => {
       ...(quantity !== undefined ? { quantity } : {}),
       ...(existingBalances && existingBalances.length ? { existingBalances } : {})
     };
-    let credential, verdict;
+    let credential, verdict, requestId = null;
     // A fungible mint repeats safely (the issuer returns the credential already issued for the same
     // requestId). A unique one does only on an issuer that lists 'issue-unique'; any other would make a
     // second item for a repeat, so it gets the single, unjournalled request it always had.
@@ -2547,6 +2550,7 @@ const AtlasWallet = (() => {
     if (journalled) {
       const done = await runIssuerOperation({ owner: owner.publicKey, kind: 'mint', label: 'Mint', domain: issuerDomain, path: '/atlas/asset/issue', body });
       credential = done.data;
+      requestId = done.requestId || null;
       verdict = done.changes[0].add[0].lastVerdict;
     } else {
       credential = await runPlainOperation({ label: 'Mint', domain: issuerDomain, path: '/atlas/asset/issue', body });
@@ -2563,8 +2567,11 @@ const AtlasWallet = (() => {
         throw err;
       }
     }
+    // Measured before merging, so a merge is never counted as something minted.
+    const holdingsAfter = await holdingsSnapshot(owner.publicKey);
     const consolidation = await autoConsolidateAssetWallet(owner.publicKey);
-    await logActivity('asset', 'Minted ' + (quantity !== undefined ? quantity + ' ' : '') + assetClass + ' from ' + issuerDomain, { assetId: credential.id, assetClass, domain: credential.issuer.domain });
+    const minted = measuredLeg('in', credential, credential.quantity, holdingsBefore, holdingsAfter);
+    await logMovement(owner.publicKey, { op: 'mint', text: 'Minted ' + legLabel(minted), legs: [minted], requestId, dedupKey: 'mint:' + credential.id });
     return { credential, verdict, consolidation };
   }
 
@@ -2581,6 +2588,7 @@ const AtlasWallet = (() => {
   // settlement, with no mail round-trip needed for either.
   async function convertAsset(role, credential, spendAmount, toClass) {
     const owner = await identityOf(role);
+    const holdingsBefore = await holdingsSnapshot(owner.publicKey);
     const done = await runIssuerOperation({
       owner: owner.publicKey, kind: 'convert', label: 'Convert', domain: credential.issuer.domain, path: '/atlas/convert',
       predecessors: [credential.id],
@@ -2590,8 +2598,14 @@ const AtlasWallet = (() => {
       }
     });
     const result = Object.assign({}, done.data);
+    const holdingsAfter = await holdingsSnapshot(owner.publicKey);
     result.consolidation = await autoConsolidateAssetWallet(owner.publicKey);
-    await logActivity('asset', 'Converted ' + spendAmount + ' ' + credential.asset.class + ' into ' + toClass + ' at ' + credential.issuer.domain);
+    const spent = measuredLeg('out', credential, spendAmount, holdingsBefore, holdingsAfter);
+    const received = measuredLeg('in', done.data.received, done.data.received.quantity, holdingsBefore, holdingsAfter);
+    await logMovement(owner.publicKey, {
+      op: 'convert', text: 'Converted ' + legLabel(spent) + ' into ' + legLabel(received), legs: [spent, received],
+      requestId: done.requestId, dedupKey: 'convert:' + done.data.received.id
+    });
     return result;
   }
 
@@ -2628,6 +2642,7 @@ const AtlasWallet = (() => {
       throw new Error('Not enough ' + info.purchase.priceClass + ' — need ' + totalPrice + ', have ' + (balanceCredential ? balanceCredential.quantity : 0) + '.');
     }
     await assertSettled(owner.publicKey, [balanceCredential.id]);
+    const holdingsBefore = await holdingsSnapshot(owner.publicKey);
     // The signed intent carries the request id, so the issuer's stored result can only be asked for by the
     // buyer's key. An issuer that does not list 'purchase' gets the single request it always had.
     const support = await issuerRepeatSupport(issuerDomain, 'purchase');
@@ -2641,8 +2656,9 @@ const AtlasWallet = (() => {
           return { credential: balanceCredential, purchasedClass, quantity: qty, intent: { payload: intentPayload, proof: await signAs(role, intentPayload) } };
         }
       });
+      const holdingsAfter = await holdingsSnapshot(owner.publicKey);
       await autoConsolidateAssetWallet(owner.publicKey);
-      await logActivity('asset', 'Purchased ' + qty + ' ' + purchasedClass + ' from ' + issuerDomain);
+      await logPurchase(owner.publicKey, balanceCredential, totalPrice, done.data.purchased, issuerDomain, holdingsBefore, holdingsAfter, done.requestId);
       return done.data;
     }
     const payload = { credentialId: balanceCredential.id, purchasedClass, quantity: qty, action: 'purchase' };
@@ -2657,9 +2673,19 @@ const AtlasWallet = (() => {
     const balanceEntry = result.balance ? { credential: result.balance, lastVerdict: await verifyCredential(result.balance) } : null;
     const purchasedEntry = { credential: result.purchased, lastVerdict: await verifyCredential(result.purchased) };
     await commitOperation(owner.publicKey, null, [{ owner: owner.publicKey, remove: [balanceCredential.id], add: [balanceEntry, purchasedEntry].filter(Boolean) }]);
+    const holdingsAfter = await holdingsSnapshot(owner.publicKey);
     await autoConsolidateAssetWallet(owner.publicKey);
-    await logActivity('asset', 'Purchased ' + qty + ' ' + purchasedClass + ' from ' + issuerDomain);
+    await logPurchase(owner.publicKey, balanceCredential, totalPrice, result.purchased, issuerDomain, holdingsBefore, holdingsAfter, null);
     return result;
+  }
+
+  async function logPurchase(ownerPublicKey, paidWith, price, purchased, issuerDomain, before, after, requestId) {
+    const paid = measuredLeg('out', paidWith, price, before, after);
+    const got = measuredLeg('in', purchased, purchased.quantity, before, after);
+    await logMovement(ownerPublicKey, {
+      op: 'purchase', text: 'Purchased ' + legLabel(got) + ' for ' + legLabel(paid), legs: [paid, got],
+      requestId, dedupKey: 'purchase:' + purchased.id
+    });
   }
 
   // Reward chests (issuer-php/atlas/asset/open-chest.php). A chest is opened by spending one Studio key
@@ -2703,6 +2729,7 @@ const AtlasWallet = (() => {
     await assertWalletWritable(owner.publicKey);
     if (!isChestKey(keyCredential, issuerDomain)) throw new Error('That item cannot open this chest.');
     await assertSettled(owner.publicKey, [keyCredential.id]);
+    const holdingsBefore = await holdingsSnapshot(owner.publicKey);
     const support = await issuerRepeatSupport(issuerDomain, 'open-chest');
     if (support === 'unreachable') throw repeatSupportError('Open chest', issuerDomain);
     if (support !== 'yes') throw new Error(issuerDomain + ' does not offer chests.');
@@ -2714,7 +2741,14 @@ const AtlasWallet = (() => {
         return { credential: keyCredential, chestId, intent: { payload: intentPayload, proof: await signAs(role, intentPayload) } };
       }
     });
-    await logActivity('asset', 'Opened ' + (done.data.chestName || 'a chest') + ' at ' + issuerDomain + ' with a key and received ' + done.data.reward.asset.name);
+    const holdingsAfter = await holdingsSnapshot(owner.publicKey);
+    const keyLeg = measuredLeg('out', keyCredential, 1, holdingsBefore, holdingsAfter);
+    const rewardLeg = measuredLeg('in', done.data.reward, 1, holdingsBefore, holdingsAfter);
+    await logMovement(owner.publicKey, {
+      op: 'open-chest', text: 'Opened ' + (done.data.chestName || 'a chest') + ' at ' + issuerDomain + ' with a key and received ' + legLabel(rewardLeg),
+      legs: [keyLeg, rewardLeg], requestId: done.requestId, dedupKey: 'open-chest:' + done.data.reward.id,
+      ids: { chestId }
+    });
     return { reward: done.data.reward, consumed: done.data.consumed, chestName: done.data.chestName || null };
   }
 
@@ -2947,10 +2981,12 @@ const AtlasWallet = (() => {
       const holder = await getIdentity();
       if (holder && holder.publicKey === ownerPublicKey) await leavePostOffice(deleted.credential.issuer.domain, credentialId);
     }
+    const holdingsBefore = await holdingsSnapshot(ownerPublicKey);
     await mutateWallet(ownerPublicKey, (list) => list.filter((e) => e.credential.id !== credentialId));
     await unloadItem(credentialId);
     if (deleted) {
-      await logActivity('asset', 'Deleted ' + deleted.credential.asset.class + ' from wallet');
+      const leg = measuredLeg('out', deleted.credential, deleted.credential.quantity, holdingsBefore, await holdingsSnapshot(ownerPublicKey));
+      await logMovement(ownerPublicKey, { op: 'delete', text: 'Deleted ' + legLabel(leg) + ' from wallet', legs: [leg], dedupKey: 'delete:' + credentialId });
     }
   }
 
@@ -2992,6 +3028,7 @@ const AtlasWallet = (() => {
   async function splitAsset(role, credential, sendAmount, toRole) {
     const fromOwner = await identityOf(role);
     const toOwner = await identityOf(toRole);
+    const holdingsBefore = await holdingsSnapshot(fromOwner.publicKey);
     const done = await runIssuerOperation({
       owner: fromOwner.publicKey, toOwner: toOwner.publicKey, kind: 'split', label: 'Split',
       domain: credential.issuer.domain, path: '/atlas/asset/split',
@@ -3002,11 +3039,18 @@ const AtlasWallet = (() => {
       }
     });
     const { sent, remainder } = done.data;
+    const holdingsAfter = await holdingsSnapshot(fromOwner.publicKey);
     if (remainder) await autoConsolidateAssetWallet(fromOwner.publicKey);
     await autoConsolidateAssetWallet(toOwner.publicKey);
 
-    const splitLogText = 'Split ' + sendAmount + ' ' + credential.asset.class + ' within your own wallet';
-    await logActivity('asset', splitLogText);
+    // Into this identity's own wallet a split changes how the amount is divided, not how much is held: no gain, no loss.
+    const within = fromOwner.publicKey === toOwner.publicKey;
+    const piece = measuredLeg(within ? 'same' : 'out', credential, sendAmount, holdingsBefore, holdingsAfter);
+    await logMovement(fromOwner.publicKey, {
+      op: 'split', text: (within ? 'Split ' : 'Sent ') + legLabel(piece) + (within ? ' within your own wallet' : ' to another identity'), legs: [piece],
+      requestId: done.requestId, dedupKey: 'split:' + sent.id,
+      ids: { split: { sent: sent.quantity, remainder: remainder ? remainder.quantity : 0 } }
+    });
     return { sent, remainder };
   }
 
@@ -3041,6 +3085,7 @@ const AtlasWallet = (() => {
     const credential = entry.credential;
     if (credential.asset.tradeScope === 'bound') throw new Error('This item is bound to this identity and cannot be moved.');
     if (credential.asset.fungible !== false) throw new Error('This is a balance. Use Move balance\u2026 to choose how much to move.');
+    const holdingsBefore = await holdingsSnapshot(sender.publicKey);
     const done = await runIssuerOperation({
       owner: sender.publicKey, toOwner: target.publicKey, kind: 'transfer', label: 'Move',
       domain: credential.issuer.domain, path: '/atlas/asset/transfer',
@@ -3051,7 +3096,11 @@ const AtlasWallet = (() => {
       }
     });
     await unloadItem(credential.id);
-    await logActivity('asset', 'Moved ' + credential.asset.class + ' to another identity in this wallet');
+    const moved = measuredLeg('out', credential, 1, holdingsBefore, await holdingsSnapshot(sender.publicKey));
+    await logMovement(sender.publicKey, {
+      op: 'move', text: 'Moved ' + legLabel(moved) + ' to ' + target.label, legs: [moved],
+      to: { label: target.label, publicKey: target.publicKey, quantity: 1 }, requestId: done.requestId, dedupKey: 'move:' + done.data.credential.id
+    });
     return { credential: done.data.credential, to: target };
   }
 
@@ -3102,9 +3151,21 @@ const AtlasWallet = (() => {
       left -= send;
     }
     let moved = 0;
+    const requestIds = [];
+    const holdingsBefore = await holdingsSnapshot(sender.publicKey);
+    // What actually moved is recorded even when a later step stops, so the log never says less than what happened.
+    const logMove = async (state) => {
+      if (moved < 1) return;
+      const leg = measuredLeg('out', stacks[0], moved, holdingsBefore, await holdingsSnapshot(sender.publicKey));
+      await logMovement(sender.publicKey, {
+        op: 'move', text: 'Moved ' + legLabel(leg) + ' to ' + target.label + (state === 'partial' ? ' (stopped before the full ' + formatQuantity(amount, leg.unit) + ')' : ''),
+        legs: [leg], to: { label: target.label, publicKey: target.publicKey, quantity: moved },
+        requestId: requestIds.join(', '), dedupKey: 'move:' + requestIds.join(',')
+      });
+    };
     try {
       for (const { stack, send } of plan) {
-        await runIssuerOperation({
+        const step = await runIssuerOperation({
           owner: sender.publicKey, toOwner: target.publicKey, kind: 'split', label: 'Move',
           domain, path: '/atlas/asset/split',
           predecessors: [stack.id],
@@ -3113,16 +3174,18 @@ const AtlasWallet = (() => {
             return { credential: stack, sendAmount: send, toPublicKey: target.publicKey, intent: { payload, proof: await signWithSelf(payload) } };
           }
         });
+        requestIds.push(step.requestId);
         moved += send;
       }
     } catch (err) {
       if (moved > 0 && err && typeof err.message === 'string') err.message += ' (' + moved + ' of ' + amount + ' was moved before this stopped.)';
+      await logMove('partial');
       throw err;
     }
     // Merging signs as the acting identity, so only its own leftovers are merged here; the receiving
-    // identity merges when it is next the acting identity.
+    // identity merges when it is next the acting identity. Measured before that.
+    await logMove('done');
     await autoConsolidateAssetWallet(sender.publicKey);
-    await logActivity('asset', 'Moved ' + asset.class + ' to another identity in this wallet');
     return { moved, to: target, steps: plan.length };
   }
 
@@ -3282,8 +3345,15 @@ const AtlasWallet = (() => {
       throw new Error('Pick at least two balances of the same class and issuer to consolidate.');
     }
     const owner = await identityOf(role);
+    const holdingsBefore = await holdingsSnapshot(owner.publicKey);
     const merged = await mergeInBatches(owner.publicKey, credentials);
-    await logActivity('asset', 'Consolidated ' + credentials.length + ' balances of ' + credentials[0].asset.class + ' into one');
+    const total = credentials.reduce((n, c) => n + c.quantity, 0);
+    // Combining balances changes how the amount is held, not how much: the total is the same before and after.
+    const leg = measuredLeg('same', credentials[0], total, holdingsBefore, await holdingsSnapshot(owner.publicKey));
+    await logMovement(owner.publicKey, {
+      op: 'consolidate', text: 'Consolidated ' + credentials.length + ' balances of ' + legName(leg) + ' into one', legs: [leg],
+      dedupKey: 'consolidate:' + merged.id, ids: { consolidated: { from: credentials.length, into: 1, quantity: merged.quantity } }
+    });
     return merged;
   }
 
@@ -4155,6 +4225,7 @@ const AtlasWallet = (() => {
     const dropper = (await identityOf('self')).publicKey;
     await assertWalletWritable(dropper);
     await assertSettled(dropper, [credential.id]);
+    const holdingsBefore = await holdingsSnapshot(dropper);
     // The signed intent names the hosting domain and the drop id, so the credential's issuer can later tell that its
     // owner authorized exactly this drop when the hosting domain relays a claim to it.
     const dropId = 'urn:atlas:worlddrop:' + crypto.randomUUID();
@@ -4173,7 +4244,12 @@ const AtlasWallet = (() => {
     // Visually it's no longer "carried" once it's sitting in the scene —
     // keep the loadout list honest, same as hiding an item already does.
     await unloadItem(credential.id);
-    await logActivity('asset', 'Dropped ' + credential.asset.class + ' in ' + worldDomain + '/' + world);
+    // Only reached once the hosting domain accepted the drop and the item left this wallet.
+    const dropped = measuredLeg('out', credential, credential.quantity, holdingsBefore, await holdingsSnapshot(identity.publicKey));
+    await logMovement(identity.publicKey, {
+      op: 'drop', text: 'Dropped ' + legLabel(dropped), legs: [dropped], world: { domain: worldDomain, id: world },
+      dedupKey: 'drop:' + dropId, ids: { dropId }
+    });
     return result;
   }
 
@@ -4194,7 +4270,7 @@ const AtlasWallet = (() => {
   // (and shouldn't) treat "reclaiming your own" as a special case, see
   // fulfillWorldDropClaim()'s own comment server-side. Always yields a
   // freshly-minted credential, added to this wallet like any other mint.
-  async function pickUpItem(worldDomain, dropId) {
+  async function pickUpItem(worldDomain, dropId, world) {
     const payload = { action: 'claim', dropId, domain: worldDomain, claimedAt: new Date().toISOString() };
     const proof = await signWithSelf(payload);
     const res = await fetch(baseUrl(worldDomain) + '/atlas/world/drops/claim', {
@@ -4207,9 +4283,17 @@ const AtlasWallet = (() => {
 
     const identity = await getIdentity();
     const lastVerdict = await verifyCredential(credential);
+    const holdingsBefore = await holdingsSnapshot(identity.publicKey);
     await commitOperation(identity.publicKey, null, [{ owner: identity.publicKey, add: [{ credential, lastVerdict }] }]);
+    // Measured before merging, so a merge is never counted as something picked up.
+    const holdingsAfter = await holdingsSnapshot(identity.publicKey);
     await autoConsolidateAssetWallet(identity.publicKey);
-    await logActivity('asset', 'Picked up ' + credential.asset.class + ' in ' + worldDomain, { assetId: credential.id, assetClass: credential.asset.class, domain: credential.issuer.domain });
+    // The hosting world and the issuer are separate facts: a world can hand out another domain's asset.
+    const gained = measuredLeg('in', credential, credential.quantity, holdingsBefore, holdingsAfter);
+    await logMovement(identity.publicKey, {
+      op: 'pickup', text: 'Picked up ' + legLabel(gained), legs: [gained], world: { domain: worldDomain, id: typeof world === 'string' ? world : null },
+      dedupKey: 'pickup:' + credential.id, ids: { dropId }
+    });
     return credential;
   }
 
@@ -4267,6 +4351,8 @@ const AtlasWallet = (() => {
       offerName: balance.asset && balance.asset.name || null,
       offerThumbnail: balance.asset && balance.asset.thumbnail || null,
       offerIssuer: balance.issuer && balance.issuer.domain || null,
+      offerFungible: balance.asset ? balance.asset.fungible === true : undefined,
+      offerSymbol: balance.asset && balance.asset.properties && balance.asset.properties['atlas.symbol'] || null,
       submittedAt: new Date().toISOString(),
       expiresAt: result.expiresAt,
       status: 'pending'
@@ -4387,6 +4473,7 @@ const AtlasWallet = (() => {
     const claimer = (await identityOf('self')).publicKey;
     await assertWalletWritable(claimer);
     if (balance && balance.id) await assertSettled(claimer, [balance.id]);
+    const holdingsBefore = await holdingsSnapshot(claimer);
     // The claimant signs the request id into the intent. The station then keeps the final outcome of a claim
     // it has run, so a lost answer can be asked for again; a station that does not list 'trade-claim' gets the
     // single request it always had.
@@ -4400,8 +4487,9 @@ const AtlasWallet = (() => {
           intent: await proposeIntent('self', listing.want, listing.offer, listing.posterPublicKey, expiresMinutes, { requestId })
         })
       });
+      const holdingsAfter = await holdingsSnapshot(claimer);
       await autoConsolidateAssetWallet(claimer);
-      await logActivity('trade', 'Claimed a trade at ' + issuerDomain + ': received ' + listing.offer.quantity + ' ' + listing.offer.class + ' for ' + listing.want.quantity + ' ' + listing.want.class);
+      await logTradeClaim(claimer, issuerDomain, listing, balance, done.data.received, holdingsBefore, holdingsAfter, done.requestId);
       return done.data;
     }
     const intent = await proposeIntent('self', listing.want, listing.offer, listing.posterPublicKey, expiresMinutes);
@@ -4435,9 +4523,20 @@ const AtlasWallet = (() => {
     if (result.remainder) adds.push({ credential: result.remainder, lastVerdict: await verifyCredential(result.remainder) });
     adds.push({ credential: result.received, lastVerdict: await verifyCredential(result.received) });
     await commitOperation(owner.publicKey, null, [{ owner: owner.publicKey, remove: [balance.id], add: adds }]);
+    const holdingsAfter = await holdingsSnapshot(owner.publicKey);
     await autoConsolidateAssetWallet(owner.publicKey);
-    await logActivity('trade', 'Claimed a trade at ' + issuerDomain + ': received ' + listing.offer.quantity + ' ' + listing.offer.class + ' for ' + listing.want.quantity + ' ' + listing.want.class);
+    await logTradeClaim(owner.publicKey, issuerDomain, listing, balance, result.received, holdingsBefore, holdingsAfter, null);
     return result;
+  }
+
+  // The claimant's own record of a settled trade: what was paid (from the balance spent) and what was received.
+  async function logTradeClaim(ownerPublicKey, stationDomain, listing, paidWith, received, before, after, requestId) {
+    const paid = measuredLeg('out', paidWith, listing.want.quantity, before, after);
+    const got = measuredLeg('in', received, received.quantity, before, after);
+    await logMovement(ownerPublicKey, {
+      op: 'trade', type: 'trade', text: 'Traded ' + legLabel(paid) + ' for ' + legLabel(got), legs: [paid, got], station: stationDomain,
+      requestId, dedupKey: 'trade:' + received.id, ids: { pendingId: listing.pendingId }
+    });
   }
 
   // v1.14 (SPEC.md §7) — withdraw one of this signer's own still-open
@@ -5908,7 +6007,13 @@ const AtlasWallet = (() => {
       await saveAssetFiles(ownerPublicKey, ledger);
     }
     await removeFromWalletList(ownerPublicKey, sourceId);
-    await logActivity('asset', 'Saved ' + (existing.name || (original && original.asset.name) || 'an item') + ' to a transfer file', { fileId: file.id, sourceId });
+    const savedName = existing.name || (original && original.asset.name) || 'an item';
+    if (original) {
+      const leg = makeLeg('out', original, original.quantity);
+      await logMovement(ownerPublicKey, { op: 'file-save', text: 'Saved ' + savedName + ' to a transfer file', legs: [leg], ids: { fileId: file.id, sourceId } });
+    } else {
+      await logActivity('asset', 'Saved ' + savedName + ' to a transfer file', { fileId: file.id, sourceId });
+    }
   }
 
   // Asks the issuer what became of an export this wallet recorded but never
@@ -6262,7 +6367,11 @@ const AtlasWallet = (() => {
         await addClaimedToWallet(identity, sent.credential, record.file);
         await dropClaimRecord(identity.publicKey, fileId);
         await updateAssetFileRecord(identity.publicKey, fileId, 'exported', (r) => { if (r.state === 'pending') { r.state = 'reclaimed'; delete r.file; } });
-        await logActivity('asset', 'Claimed ' + record.name + ' from a transfer file', { fileId, newId: sent.credential.id });
+        const leg = makeLeg('in', sent.credential, sent.credential.quantity);
+        await logMovement(identity.publicKey, {
+          op: 'file-claim', text: 'Claimed ' + record.name + ' from a transfer file', legs: [leg],
+          dedupKey: 'file-claim:' + sent.credential.id, ids: { fileId, newId: sent.credential.id }
+        });
         return { outcome: 'claimed', credential: sent.credential };
       }
       if (sent.kind === 'unsure') {
@@ -6350,7 +6459,8 @@ const AtlasWallet = (() => {
       return list;
     });
     if (alreadyHeld) throw new Error('This item is already in your wallet.');
-    await logActivity('asset', 'Restored ' + credential.asset.name + ' from a saved copy', { id: credential.id });
+    const restored = makeLeg('in', credential, credential.quantity);
+    await logMovement(identity.publicKey, { op: 'file-restore', text: 'Restored ' + credential.asset.name + ' from a saved copy', legs: [restored], ids: { id: credential.id } });
     return credential;
   }
 
@@ -8019,12 +8129,12 @@ const AtlasWallet = (() => {
     return decryptAtRestAndMigrate(identity, 'activityLog', stored, [], (v) => saveActivityLog(identity.publicKey, v));
   }
 
-  // `type` is a coarse tag ('identity', 'backup', 'asset', 'trade') for any
-  // future filtering/iconography — not surfaced anywhere yet, just kept
-  // alongside `text` so it doesn't have to be re-derived later. `meta` is
-  // an optional plain object with whatever structured detail the call site
-  // has handy (issuer domain, asset class, amounts) — again not rendered
-  // today, but cheap to keep for a future "show details" affordance.
+  // `type` is a coarse tag ('identity', 'backup', 'asset', 'trade') kept
+  // alongside `text` for filtering. `meta` is an optional plain object with
+  // the structured detail of the entry; movements of assets carry the shape
+  // written by logMovement() (legs, identity, world, request id), which the
+  // viewer renders as the card's detail lines and collapsed Details section.
+  // It never holds key material.
   async function logActivity(type, text, meta) {
     try {
       const identity = await getIdentity();
@@ -8169,9 +8279,9 @@ const AtlasWallet = (() => {
 
     // The balance is read from the wallet itself just before and just after the claim, and before automatic merging, so the
     // recorded change is what the claim added and a merge of balances is never counted as something received.
-    const balanceBefore = await heldFungibleBalance(ownerPublicKey, credential);
+    const balanceBefore = await holdingsSnapshot(ownerPublicKey);
     await commitOperation(ownerPublicKey, null, [{ owner: ownerPublicKey, add: [{ credential, lastVerdict: verdict }] }]);
-    const balanceAfter = await heldFungibleBalance(ownerPublicKey, credential);
+    const balanceAfter = await holdingsSnapshot(ownerPublicKey);
     await autoConsolidateAssetWallet(ownerPublicKey);
 
     await withMessageLock(async () => {
@@ -8186,56 +8296,149 @@ const AtlasWallet = (() => {
     return { credential, verdict };
   }
 
-  // The amount of a fungible class this identity holds from one issuer: every balance of that class and issuer that is
-  // not known to be spent. null for a unique item.
-  async function heldFungibleBalance(ownerPublicKey, credential) {
-    if (!credential.asset.fungible) return null;
-    const held = await getWallet(ownerPublicKey);
-    return held
-      .filter((e) => !isKnownSpent(e) && e.credential.asset.fungible && e.credential.asset.class === credential.asset.class && e.credential.issuer.domain === credential.issuer.domain)
-      .reduce((sum, e) => sum + e.credential.quantity, 0);
+  // ---------- activity for asset movements ----------
+  //
+  // Every operation that changes what this identity holds (mint, pick-up, drop, move, split, consolidate, convert,
+  // purchase, trade, claimed mail, transfer files) records one entry through logMovement(). The entry carries the
+  // figures the wallet itself held before and right after the operation, read from the stored wallet (not from what a
+  // screen was showing), so the log states what happened rather than an estimate. Where a figure was not measured, or
+  // the two measurements do not agree with the quantity that moved (another operation touched the same balance in the
+  // meantime), the balances are left out and only the quantity is recorded. Merging balances is housekeeping: it never
+  // changes a total and is never logged as something received.
+
+  // How the quantity of this asset is counted. An element class is counted in grams; a class that names its own unit
+  // with 'atlas.unit' keeps it; any other fungible class is a plain count. Unique items have no unit.
+  function quantityUnitOf(asset) {
+    if (!asset || asset.fungible !== true) return null;
+    const own = asset.properties && asset.properties['atlas.unit'];
+    if (typeof own === 'string' && own.trim() && own.length <= 12) return own.trim();
+    return typeof asset.class === 'string' && asset.class.startsWith('atlas.element.') ? 'g' : null;
+  }
+
+  function groupDigits(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   }
 
   // Whole grams with thousands separators, the larger unit only as a convenience: 4,993 g (4.993 kg).
   function formatExactGrams(grams) {
     if (!Number.isFinite(grams)) return String(grams);
-    const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-    const exact = grouped(grams) + ' g';
+    const exact = groupDigits(grams) + ' g';
     if (grams < 1000) return exact;
     const unit = grams < 1000000 ? { div: 1000, places: 3, name: 'kg' } : { div: 1000000, places: 6, name: 't' };
     const fraction = String(grams % unit.div).padStart(unit.places, '0').replace(/0+$/, '');
-    return exact + ' (' + grouped(Math.trunc(grams / unit.div)) + (fraction ? '.' + fraction : '') + ' ' + unit.name + ')';
+    return exact + ' (' + groupDigits(Math.trunc(grams / unit.div)) + (fraction ? '.' + fraction : '') + ' ' + unit.name + ')';
   }
 
-  // Records a claimed mail attachment in Activity, once per message. The entry carries the figures as measured by
-  // claimMailGift, so what the log shows is what the wallet held, not an estimate.
-  async function logMailClaim(ownerPublicKey, message, credential, balanceBefore, balanceAfter) {
+  function formatQuantity(quantity, unit) {
+    if (!Number.isFinite(quantity)) return String(quantity);
+    if (unit === 'g') return formatExactGrams(quantity);
+    return groupDigits(quantity) + (unit ? ' ' + unit : '');
+  }
+
+  // What this identity holds right now, by class and issuer: the sum of its balances (not spent, not revoked, not
+  // held back by unfinished work), or the number of items for a unique class. null when the wallet cannot be read.
+  async function holdingsSnapshot(ownerPublicKey) {
+    try {
+      const totals = new Map();
+      for (const e of await getWallet(ownerPublicKey)) {
+        if (isHeldBack(e)) continue;
+        const c = e.credential;
+        const key = c.asset.class + '\n' + c.issuer.domain;
+        totals.set(key, (totals.get(key) || 0) + (c.asset.fungible === true ? c.quantity : 1));
+      }
+      return totals;
+    } catch (err) {
+      return null;
+    }
+  }
+  const heldInSnapshot = (snapshot, assetClass, domain) => (snapshot ? snapshot.get(assetClass + '\n' + domain) || 0 : null);
+
+  // Who the wallet is acting as, for the entry: 'Main identity' or the sub-identity's own name.
+  async function identityLabelOf(publicKey) {
+    try {
+      const info = await getActiveIdentityInfo();
+      if (info && info.publicKey === publicKey) return info.kind === 'sub' ? info.label || 'Sub-identity' : 'Main identity';
+    } catch (err) { /* the label is only a convenience */ }
+    return null;
+  }
+
+  // One side of a movement. `direction` is 'in' (received), 'out' (gave up) or 'same' (the total did not change: a
+  // split or a merge). `credential` is any credential of the asset; `quantity` is what moved. The balances are kept
+  // only when the two measurements differ by exactly that quantity.
+  function makeLeg(direction, credential, quantity, before, after) {
+    const asset = credential.asset;
+    const fungible = asset.fungible === true;
+    const symbol = asset.properties && typeof asset.properties['atlas.symbol'] === 'string' ? asset.properties['atlas.symbol'] : null;
+    const leg = {
+      direction, assetClass: asset.class, assetName: asset.name || asset.class, symbol, domain: credential.issuer.domain,
+      fungible, unit: quantityUnitOf(asset), quantity: fungible ? quantity : 1, assetId: credential.id
+    };
+    if (fungible && Number.isFinite(before) && Number.isFinite(after)) {
+      const expected = direction === 'in' ? quantity : direction === 'out' ? -quantity : 0;
+      if (after - before === expected) { leg.previousBalance = before; leg.newBalance = after; }
+    }
+    return leg;
+  }
+
+  // A leg whose balances are read from the two snapshots taken around the operation.
+  const measuredLeg = (direction, credential, quantity, before, after) => makeLeg(direction, credential, quantity,
+    heldInSnapshot(before, credential.asset.class, credential.issuer.domain), heldInSnapshot(after, credential.asset.class, credential.issuer.domain));
+
+  // "Gold (Au)", with the symbol only when the name does not already carry it.
+  function legName(leg) {
+    return leg.symbol && !leg.assetName.includes('(' + leg.symbol + ')') ? leg.assetName + ' (' + leg.symbol + ')' : leg.assetName;
+  }
+
+  // "5 g Gold (Au)", or the item's name for a unique item.
+  function legLabel(leg) {
+    return (leg.fungible ? formatQuantity(leg.quantity, leg.unit) + ' ' : '') + legName(leg);
+  }
+
+  // Writes one entry. spec: { op, type?, text, legs, world?: { domain, id }, to?: { label, publicKey, quantity },
+  // source?, station?, requestId?, dedupKey?, ids? }. Skipped when the open identity is not the owner (the log
+  // belongs to the identity that is open) or when an entry with the same dedupKey is already there, so a retry or a
+  // replay never records a movement twice. A failure to log never fails the operation.
+  async function logMovement(ownerPublicKey, spec) {
     try {
       const identity = await getIdentity();
-      if (!identity || identity.publicKey !== ownerPublicKey) return; // the log belongs to the identity that is open
-      const existing = await getActivityLog();
-      if (existing.some((e) => e.meta && e.meta.kind === 'mail-claim' && e.meta.messageId === message.id)) return;
-      const asset = credential.asset;
-      const fungible = asset.fungible === true;
-      const symbol = asset.properties && typeof asset.properties['atlas.symbol'] === 'string' ? asset.properties['atlas.symbol'] : null;
-      const baseName = asset.name || asset.class;
-      // Some classes already carry the symbol in their name ("Gold (Au)"); it is not added twice.
-      const name = symbol && !baseName.includes('(' + symbol + ')') ? baseName + ' (' + symbol + ')' : baseName;
-      let source;
-      if (typeof message.subject === 'string' && message.subject.startsWith(LISTING_CLAIMED_SUBJECT_PREFIX)) source = 'Trading Station payment';
-      else if (message.from && message.from.publicKey) source = 'Gift from ' + (message.from.handle || 'another identity');
-      else source = 'Gift from ' + credential.issuer.domain;
-      // The change is only reported as a balance when the two measurements agree with what was claimed; if another
-      // operation touched the same balance meanwhile, the amount received is still logged but no balances are claimed.
-      const consistent = fungible && Number.isFinite(balanceBefore) && Number.isFinite(balanceAfter) && balanceAfter - balanceBefore === credential.quantity;
-      await logActivity('asset', 'Received ' + (fungible ? formatExactGrams(credential.quantity) + ' ' : '') + name, {
-        kind: 'mail-claim', messageId: message.id,
-        assetId: credential.id, assetClass: asset.class, domain: credential.issuer.domain,
-        assetName: asset.name || asset.class, symbol, fungible, quantity: fungible ? credential.quantity : 1,
-        source,
-        ...(consistent ? { previousBalance: balanceBefore, newBalance: balanceAfter } : {})
-      });
-    } catch (err) { /* logging never fails the claim */ }
+      if (!identity || identity.publicKey !== ownerPublicKey || !spec.legs || !spec.legs.length) return;
+      if (spec.dedupKey) {
+        const existing = await getActivityLog();
+        if (existing.some((e) => e.meta && (e.meta.dedupKey === spec.dedupKey || (spec.op === 'mail-claim' && e.meta.kind === 'mail-claim' && e.meta.messageId === spec.ids.messageId)))) return;
+      }
+      const primary = spec.legs.find((l) => l.direction === 'in') || spec.legs[0];
+      const meta = {
+        kind: spec.op, movement: true, dedupKey: spec.dedupKey || null,
+        // Flat copy of the main leg: what "Show in inventory" and the older entries use.
+        assetId: primary.assetId, assetClass: primary.assetClass, domain: primary.domain,
+        assetName: primary.assetName, symbol: primary.symbol, fungible: primary.fungible, unit: primary.unit, quantity: primary.quantity,
+        ...(primary.previousBalance !== undefined ? { previousBalance: primary.previousBalance, newBalance: primary.newBalance } : {}),
+        legs: spec.legs,
+        identity: { label: await identityLabelOf(ownerPublicKey), publicKey: ownerPublicKey },
+        ...(spec.world ? { world: spec.world } : {}),
+        ...(spec.to ? { to: spec.to } : {}),
+        ...(spec.source ? { source: spec.source } : {}),
+        ...(spec.station ? { station: spec.station } : {}),
+        ...(spec.requestId ? { requestId: spec.requestId } : {}),
+        ...(spec.ids || {})
+      };
+      // A movement that only gave something up has nothing to show in the inventory.
+      if (!spec.legs.some((l) => l.direction === 'in' || l.direction === 'same')) { delete meta.assetId; delete meta.assetClass; }
+      await logActivity(spec.type || 'asset', spec.text, meta);
+    } catch (err) { /* logging never fails the operation */ }
+  }
+
+  // Records a claimed mail attachment, once per message, with the balances measured by claimMailGift.
+  async function logMailClaim(ownerPublicKey, message, credential, before, after) {
+    let source;
+    if (typeof message.subject === 'string' && message.subject.startsWith(LISTING_CLAIMED_SUBJECT_PREFIX)) source = 'Trading Station payment';
+    else if (message.from && message.from.publicKey) source = 'Gift from ' + (message.from.handle || 'another identity');
+    else source = 'Gift from ' + credential.issuer.domain;
+    const leg = measuredLeg('in', credential, credential.quantity, before, after);
+    await logMovement(ownerPublicKey, {
+      op: 'mail-claim', text: 'Received ' + legLabel(leg), legs: [leg], source,
+      dedupKey: 'mail-claim:' + message.id, ids: { messageId: message.id }
+    });
   }
 
   // Post Office (task #75/#87/#94, SPEC.md §11.3): sends mail to another
@@ -10262,6 +10465,7 @@ const AtlasWallet = (() => {
     if (!messages || messages.length === 0) return 0;
     const records = await getSubmittedTrades(ownerPublicKey);
     let changed = 0;
+    const sold = [];
     for (const record of records) {
       if (record.status === 'settled' || record.status === 'canceled') continue;
       const evidence = messages.find((m) => m && m.credentialId === record.balanceId && m.subject === LISTING_CLAIMED_SUBJECT_PREFIX + record.domain);
@@ -10271,9 +10475,27 @@ const AtlasWallet = (() => {
       record.settledEvidence = { kind: 'settlement-mail', messageId: evidence.id };
       delete record.unconfirmedAt;
       changed++;
+      sold.push({ record, evidence });
     }
     if (changed) await saveSubmittedTrades(ownerPublicKey, records);
+    for (const { record, evidence } of sold) await logListingSold(ownerPublicKey, record, evidence);
     return changed;
+  }
+
+  // The seller's side of a settled listing: the staked item has gone to the buyer. Only listings recorded with the
+  // staked asset's details can say what left; older records are not guessed at. The payment is recorded when it is
+  // claimed from Mail, so no amount received is stated here.
+  async function logListingSold(ownerPublicKey, record, evidence) {
+    if (typeof record.offerFungible !== 'boolean' || !record.offer) return;
+    const staked = {
+      id: record.balanceId, issuer: { domain: record.offerIssuer || record.domain },
+      asset: { class: record.offer.class, name: record.offerName || record.offer.class, fungible: record.offerFungible, properties: record.offerSymbol ? { 'atlas.symbol': record.offerSymbol } : {} }
+    };
+    const gave = makeLeg('out', staked, record.offer.quantity);
+    await logMovement(ownerPublicKey, {
+      op: 'sold', type: 'trade', text: 'Sold ' + legLabel(gave) + ' at ' + record.domain, legs: [gave], station: record.domain,
+      dedupKey: 'sold:' + record.pendingId, ids: { pendingId: record.pendingId, messageId: evidence.id }
+    });
   }
 
   // Brings this identity's local listing records up to date and says, per open record, what could be established

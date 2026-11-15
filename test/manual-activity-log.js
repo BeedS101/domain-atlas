@@ -90,7 +90,7 @@ function assert(cond, message) {
     }, NODE_DOMAIN);
     const afterMint = await frame.evaluate(async () => AtlasWallet.getActivityLog());
     assert(afterMint.length === 2, 'expected two entries after a mint, got ' + afterMint.length);
-    assert(afterMint[0].type === 'asset' && afterMint[0].text.indexOf('Minted 20 atlas.element.iron from ' + NODE_DOMAIN) === 0, 'unexpected newest entry after mint: ' + JSON.stringify(afterMint[0]));
+    assert(afterMint[0].type === 'asset' && /^Minted 20 g Iron/.test(afterMint[0].text) && afterMint[0].meta && afterMint[0].meta.legs[0].domain === NODE_DOMAIN && afterMint[0].meta.legs[0].quantity === 20, 'unexpected newest entry after mint: ' + JSON.stringify(afterMint[0]));
     assert(afterMint[1].text === 'Identity created', 'expected the original entry to still be there, second from the top');
     console.log('PASS: newest-first ordering holds —', afterMint[0].text);
 
@@ -153,7 +153,7 @@ function assert(cond, message) {
     // travels inside the file itself.
     assert(restore.log.length === 3, 'expected the 2 pre-export entries plus a new "restored" entry, got ' + restore.log.length + ': ' + JSON.stringify(restore.log));
     assert(restore.log[0].text === 'Restored full wallet backup from a backup file', 'expected the restore entry on top, got: ' + JSON.stringify(restore.log[0]));
-    assert(restore.log[1].text === 'Minted 5 atlas.element.iron from ' + NODE_DOMAIN, 'expected the pre-export mint entry preserved second, got: ' + JSON.stringify(restore.log[1]));
+    assert(/^Minted 5 g Iron/.test(restore.log[1].text) && restore.log[1].meta.legs[0].domain === NODE_DOMAIN, 'expected the pre-export mint entry preserved second, got: ' + JSON.stringify(restore.log[1]));
     assert(restore.log[2].text === 'Identity created', 'expected the original creation entry preserved at the bottom, got: ' + JSON.stringify(restore.log[2]));
     console.log('PASS: restore preserved prior (pre-snapshot) history and appended its own entry on top, in the right order');
 
@@ -177,7 +177,7 @@ function assert(cond, message) {
       return list && list.querySelector('.info-card');
     }, null, { timeout: 5000 });
     const uiRowText = await frame.evaluate(() => document.querySelector('#activityLogList .info-card .name').textContent);
-    assert(uiRowText.indexOf('Minted 1 atlas.element.iron') === 0, 'expected the UI to render the freshly-minted entry, got: ' + uiRowText);
+    assert(/^Minted 1 g Iron/.test(uiRowText), 'expected the UI to render the freshly-minted entry, got: ' + uiRowText);
     console.log('PASS: UI renders the current activity log —', uiRowText);
 
     console.log('\nALL ACTIVITY LOG CHECKS PASSED');

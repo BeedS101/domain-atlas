@@ -197,8 +197,11 @@ async function scenarios(kind) {
     check('the seller\'s gold listing is Settled by the station\'s own settlement mail', rec.status === 'settled' && rec.settledEvidence.kind === 'settlement-mail', rec);
     const page = await openViewer(w);
     await page.evaluate(() => refreshActivityLogDisplay());
-    const act = await page.evaluate(() => document.getElementById('activityLogList').textContent.replace(/\s+/g, ' '));
-    check('Activity shows the issuer and source but no balance lines', /Issuer:\s*/.test(act) && /Source:\s*/.test(act) && !/Previous balance/.test(act), act.slice(0, 300));
+    const act = await page.evaluate(() => {
+      const card = Array.from(document.querySelectorAll('#activityLogList .info-card')).find((c) => c.querySelector('.name').textContent.startsWith('Received'));
+      return card ? card.textContent.replace(/\s+/g, ' ') : '';
+    });
+    check('the claim card shows the issuer and source but no balance lines', /Issuer:\s*/.test(act) && /Source:\s*/.test(act) && !/Previous balance/.test(act), act.slice(0, 300));
     await page.close();
   }, { workers: 4 });
 

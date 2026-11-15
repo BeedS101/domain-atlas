@@ -6984,7 +6984,7 @@ async function pickUpDroppedItem(worldDomain, dropId) {
   const identity = await AtlasWallet.getIdentity();
   if (!identity || !dropId) return;
   try {
-    await AtlasWallet.pickUpItem(worldDomain, dropId);
+    await AtlasWallet.pickUpItem(worldDomain, dropId, currentWorld ? currentWorld.id : undefined);
     await refreshInventoryDisplay();
     await refreshSceneItemMarkers();
     statusEl.textContent = 'Picked it up.';
@@ -7353,25 +7353,99 @@ recentWorldsListEl && recentWorldsListEl.addEventListener('click', async (e) => 
 // activity log" section for what is and isn't logged and why. A mint or
 // pick-up entry can be clicked to jump to that item in the Inventory.
 function activityAssetRef(entry) {
-  if (entry.type !== 'asset') return null;
   const meta = entry.meta || {};
+  if (entry.type !== 'asset' && !meta.movement) return null;
   if (meta.assetId || meta.assetClass) return { id: meta.assetId || null, assetClass: meta.assetClass || null, domain: meta.domain || null };
   // Entries written before the item was recorded: the class is in the text.
   const m = /^Minted (?:[\d.]+ )?(\S+) from \S+$/.exec(entry.text) || /^Picked up (\S+) in \S+$/.exec(entry.text);
   return m ? { id: null, assetClass: m[1], domain: null } : null;
 }
 
-// The detail lines under a claimed Mail attachment: where it came from and, for a fungible asset, the balance before,
-// the change and the balance after, each as recorded at the time of the claim.
-function mailClaimDetailsHtml(meta) {
-  const rows = [['Issuer', meta.domain], ['Source', meta.source]];
-  if (meta.fungible && Number.isFinite(meta.previousBalance) && Number.isFinite(meta.newBalance)) {
-    rows.push(['Previous balance', formatMass(meta.previousBalance)]);
-    rows.push(['Change', '+' + formatMass(meta.newBalance - meta.previousBalance)]);
-    rows.push(['New balance', formatMass(meta.newBalance)]);
-  }
-  return '<ul class="activity-details">' + rows.filter((r) => r[1]).map((r) =>
+// How an Activity entry counted an asset: grams for an element, the class's own unit, or a plain count. An older entry
+// has no unit and was always recorded in grams.
+function formatActivityQuantity(quantity, unit) {
+  if (!Number.isFinite(quantity)) return String(quantity);
+  if (unit === 'g') return formatMass(quantity);
+  return String(quantity).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (unit ? ' ' + unit : '');
+}
+
+function formatSignedQuantity(change, unit) {
+  if (change === 0) return 'no change';
+  return (change > 0 ? '+' : '−') + formatActivityQuantity(Math.abs(change), unit);
+}
+
+// The sides of a movement as recorded: one for a mint, a pick-up or a claimed attachment, two for a conversion,
+// a purchase or a trade. An entry written before movements were recorded in full has only the flat fields of a Mail
+// claim, which are read as one received side in grams.
+function activityLegsOf(meta) {
+  if (Array.isArray(meta.legs) && meta.legs.length) return meta.legs;
+  if (meta.kind !== 'mail-claim') return [];
+  return [{
+    direction: 'in', assetClass: meta.assetClass, assetName: meta.assetName, symbol: meta.symbol, domain: meta.domain, fungible: meta.fungible,
+    unit: meta.unit === undefined ? 'g' : meta.unit, quantity: meta.quantity, previousBalance: meta.previousBalance, newBalance: meta.newBalance
+  }];
+}
+
+function activityLegName(leg) {
+  const name = leg.assetName || leg.assetClass || 'item';
+  return leg.symbol && !name.includes('(' + leg.symbol + ')') ? name + ' (' + leg.symbol + ')' : name;
+}
+
+function activityRowsHtml(rows) {
+  return '<ul class="activity-details">' + rows.filter((r) => r[1] !== undefined && r[1] !== null && r[1] !== '').map((r) =>
     '<li><span class="k">' + escapeHtml(r[0]) + ':</span><span>' + escapeHtml(String(r[1])) + '</span></li>').join('') + '</ul>';
+}
+
+// The lines of one side: who issued it and, for a balance whose figures were measured, the balance before, the
+// signed change and the balance after. Nothing is shown for a figure that was not measured.
+function activityLegRows(leg) {
+  const rows = [['Issuer', leg.domain]];
+  if (leg.fungible && Number.isFinite(leg.previousBalance) && Number.isFinite(leg.newBalance)) {
+    rows.push(['Previous balance', formatActivityQuantity(leg.previousBalance, leg.unit)]);
+    rows.push(['Change', formatSignedQuantity(leg.newBalance - leg.previousBalance, leg.unit)]);
+    rows.push(['New balance', formatActivityQuantity(leg.newBalance, leg.unit)]);
+  }
+  return rows;
+}
+
+// The detail lines under a movement, then a collapsed "Details" with the technical identifiers.
+function movementDetailsHtml(meta) {
+  const legs = activityLegsOf(meta);
+  if (!legs.length) return '';
+  const world = meta.world ? meta.world.domain + (meta.world.id ? '/' + meta.world.id : '') : null;
+  const identityLabel = meta.identity && meta.identity.label;
+  const common = [];
+  if (world) common.push(['World', world]);
+  if (identityLabel) common.push(['Identity', identityLabel]);
+  if (meta.to && meta.to.label) {
+    const received = Number.isFinite(meta.to.quantity) && legs[0] ? ' (received ' + formatActivityQuantity(meta.to.quantity, legs[0].unit) + ')' : '';
+    common.push(['Moved to identity', meta.to.label + received]);
+  }
+  if (meta.station) common.push(['Trading Station', meta.station]);
+  if (meta.source) common.push(['Source', meta.source]);
+  if (meta.split) common.push(['Split into', formatActivityQuantity(meta.split.sent, legs[0].unit) + ' and ' + formatActivityQuantity(meta.split.remainder, legs[0].unit)]);
+  if (meta.consolidated) common.push(['Balances combined', meta.consolidated.from + ' into ' + meta.consolidated.into + ' (the total is unchanged)']);
+
+  let html;
+  if (legs.length === 1) {
+    const rows = activityLegRows(legs[0]);
+    // Issuer first, then where and who, then the balance lines.
+    html = activityRowsHtml(rows.slice(0, 1).concat(common, rows.slice(1)));
+  } else {
+    html = activityRowsHtml(common) + legs.map((leg) =>
+      '<div class="activity-leg">' + escapeHtml((leg.direction === 'in' ? 'Received ' : 'Gave ') + (leg.fungible ? formatActivityQuantity(leg.quantity, leg.unit) + ' ' : '') + activityLegName(leg)) + '</div>' +
+      activityRowsHtml(activityLegRows(leg))).join('');
+  }
+
+  const ids = [];
+  legs.forEach((leg) => { if (leg.assetId) ids.push([(leg.direction === 'in' ? 'Received credential' : leg.direction === 'out' ? 'Credential given' : 'Credential'), leg.assetId]); });
+  [['Request ID', meta.requestId], ['Drop ID', meta.dropId], ['Listing ID', meta.pendingId], ['Chest ID', meta.chestId], ['Mail message ID', meta.messageId],
+    ['Transfer file ID', meta.fileId], ['Identity key', meta.identity && meta.identity.publicKey], ['Operation', meta.kind]].forEach((r) => { if (r[1]) ids.push(r); });
+  const technical = ids.length
+    ? '<details class="activity-tech"><summary>Details</summary><ul class="activity-details">' + ids.map((r) =>
+      '<li><span class="k">' + escapeHtml(r[0]) + ':</span><code>' + escapeHtml(String(r[1])) + '</code></li>').join('') + '</ul></details>'
+    : '';
+  return html + technical;
 }
 
 function renderActivityLogEntry(entry, container) {
@@ -7379,7 +7453,7 @@ function renderActivityLogEntry(entry, container) {
   el.className = 'info-card';
   el.innerHTML =
     '<div class="name">' + escapeHtml(entry.text) + '</div>' +
-    (entry.meta && entry.meta.kind === 'mail-claim' ? mailClaimDetailsHtml(entry.meta) : '') +
+    (entry.meta && (entry.meta.movement || entry.meta.kind === 'mail-claim') ? movementDetailsHtml(entry.meta) : '') +
     '<div class="meta">' + new Date(entry.at).toLocaleString() + '</div>';
   const ref = activityAssetRef(entry);
   if (ref) {
@@ -7393,8 +7467,9 @@ function renderActivityLogEntry(entry, container) {
     go.dataset.hint = go.textContent;
     el.appendChild(go);
     const open = () => showAssetInInventory(ref, go);
-    el.addEventListener('click', open);
-    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+    // The Details section is read, not a jump to the inventory: clicks and keys inside it stay with it.
+    el.addEventListener('click', (e) => { if (!e.target.closest('details')) open(); });
+    el.addEventListener('keydown', (e) => { if (!e.target.closest('details') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); open(); } });
   }
   container.appendChild(el);
 }
