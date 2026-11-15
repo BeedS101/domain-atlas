@@ -4,6 +4,7 @@
 //   GET  ?op=status                       -> { mintEnabled, options: { giftable, expiryMinSeconds, expiryMaxSeconds, maxProperties } }
 //   POST ?op=challenge  design, recipient -> short-lived single-use mint challenge + the exact request to sign
 //   POST ?op=mint       design, nonce, proof -> one issuer-signed atlas.demo.studio.collectible credential
+//   POST ?op=quota      recipient, proof | token -> the wallet's own remaining mints (read-only; proof of the key required)
 // Minting is OFF unless the private studio-config.json enables it (see inc/studio-mint.php); challenge and
 // mint then answer 403. No operation here signs caller-supplied data, resets state or reads an admin token.
 header('Content-Type: application/json; charset=utf-8');
@@ -37,12 +38,13 @@ if ($method === 'POST' && $op === 'validate') {
   studio_reply($result['ok'] ? 200 : 400, $result);
 }
 
-if (!in_array($op, ['status', 'challenge', 'mint'], true)) studio_reply(404, ['ok'=>false,'error'=>'unknown-operation']);
+if (!in_array($op, ['status', 'challenge', 'mint', 'quota'], true)) studio_reply(404, ['ok'=>false,'error'=>'unknown-operation']);
 if ($op === 'status' ? $method !== 'GET' : $method !== 'POST') studio_reply(405, ['ok'=>false,'error'=>'method-not-allowed']);
 
 try {
   require_once __DIR__.'/../../lib/bootstrap.php';
   require_once __DIR__.'/inc/studio-mint.php';
+  require_once __DIR__.'/inc/quota-status.php';
   $cfg = ['enabled'=>false];
   $root = null;
   try {
@@ -58,7 +60,9 @@ try {
   if ($op === 'status') {
     $lim = atlas_studio_limits($cfg);
     studio_reply(200, ['ok'=>true,'mintEnabled'=>$cfg['enabled'] === true,
-      'options'=>['giftable'=>$lim['allowLocal'],'expiryMinSeconds'=>$lim['expiryMin'],'expiryMaxSeconds'=>$lim['expiryMax'],'maxProperties'=>ATLAS_STUDIO_MAX_PROPERTIES,'equipment'=>atlas_studio_equipment_options()]]);
+      'options'=>['giftable'=>$lim['allowLocal'],'expiryMinSeconds'=>$lim['expiryMin'],'expiryMaxSeconds'=>$lim['expiryMax'],'maxProperties'=>ATLAS_STUDIO_MAX_PROPERTIES,'equipment'=>atlas_studio_equipment_options()],
+      // Public configuration, no history: the per-wallet share and its rolling window, and the issuer's clock.
+      'quota'=>$cfg['enabled'] === true ? ['perWalletLimit'=>$cfg['maxMintsPerRecipientPerDay'],'windowSeconds'=>86400,'purpose'=>ATLAS_STUDIO_QUOTA_PURPOSE,'summary'=>ATLAS_STUDIO_QUOTA_SUMMARY] : null,'now'=>time()]);
   }
   if ($cfg['enabled'] !== true) studio_reply(403, ['ok'=>false,'error'=>'minting-not-enabled']);
 
@@ -68,6 +72,11 @@ try {
   $actor = atlas_studio_actor($_SERVER['REMOTE_ADDR'] ?? null);
   if (!atlas_studio_rate_check($root, 'call', $actor, 120, 60)) studio_reply(429, ['ok'=>false,'error'=>'rate-limited']);
 
+  if ($op === 'quota') {
+    if (!atlas_studio_rate_check($root, 'quota', $actor, ATLAS_STUDIO_QUOTA_ASK_LIMIT, 60)) studio_reply(429, ['ok'=>false,'error'=>'rate-limited']);
+    list($status, $reply) = atlas_studio_quota($root, $cfg, studio_read_json(8192), $actor, atlas_studio_wallet_verifier($cfg['webauthnRpIds']));
+    studio_reply($status, $reply);
+  }
   $body = studio_read_json($op === 'mint' ? 16384 : 4096);
   list($status, $reply) = $op === 'mint' ? atlas_studio_mint($root, $cfg, $body, $actor) : atlas_studio_issue_challenge($root, $cfg, $body, $actor);
   studio_reply($status, $reply);

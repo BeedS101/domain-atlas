@@ -51,7 +51,7 @@ atlas/studio/index.html, studio.css, studio.js, model-viewer.js, api.php
 atlas/studio/inc/.htaccess
 atlas/studio/inc/authorize-design.php  challenges.php  design-fingerprint.php  design-validator.php
 atlas/studio/inc/issuance-plan.php  keys.php  mint-attempts.php  mint-authorization.php
-atlas/studio/inc/model-catalog.php  storage.php  studio-mint.php  storage-root.php.example
+atlas/studio/inc/model-catalog.php  quota-status.php  storage.php  studio-mint.php  storage-root.php.example
 lib/bootstrap.php  crypto.php  delivery.php  demo-authority.php  elements-catalog.php  email-tickets.php
 lib/imap.php  ledger-issuance.php  ledger-receipts.php  mime-parse.php  replacement.php
 lib/sign-manifest.php  smtp.php  store.php  transfer-policy.php
@@ -83,7 +83,7 @@ The wallet only lets the Studio page sign and receive a collectible if the domai
   "policy": {
     "walletBridge": {
       "read": true,
-      "sign": ["atlas.studio.mint/1"],
+      "sign": ["atlas.studio.mint/1", "atlas.studio.quota/1"],
       "offer": ["atlas.demo.studio.collectible"]
     }
   }

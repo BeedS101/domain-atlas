@@ -51,6 +51,62 @@ function atlas_studio_read_attempt($root, $nonce) {
   return atlas_studio_read_attempt_file(atlas_studio_attempt_path($root, $nonce), $nonce);
 }
 
+// What the ledger holds inside the rolling window ($now - $windowSeconds, exclusive): all attempts, those for one
+// wallet key (either spelling), one actor and one network group, and the creation times of the wallet's attempts
+// (oldest first). Read-only; the quota claim runs it under the exclusive lock and the status read under a shared one.
+function atlas_studio_attempt_counts($dir, $keyId, $actorId, $groupId, $windowSeconds, $now) {
+  $c = ['global'=>0,'mine'=>0,'byActor'=>0,'byGroup'=>0,'mineTimes'=>[]];
+  foreach ((array) @scandir($dir) as $name) {
+    if (!preg_match('/^attempt-([a-f0-9]{64})\.json$/D', $name, $m)) continue;
+    $r = atlas_studio_read_attempt_file($dir.'/'.$name, $m[1]);
+    if ($r === null || $r['createdAt'] <= $now - $windowSeconds) continue;
+    $c['global']++;
+    $theirs = isset($r['recipientKey']) ? $r['recipientKey'] : atlas_studio_key_fingerprint($r['recipient']);
+    if ($theirs !== null && $keyId !== null && hash_equals($theirs, $keyId)) { $c['mine']++; $c['mineTimes'][] = $r['createdAt']; }
+    if (isset($r['actor']) && hash_equals($r['actor'], $actorId)) $c['byActor']++;
+    if ($groupId !== null && isset($r['group']) && hash_equals($r['group'], $groupId)) $c['byGroup']++;
+  }
+  sort($c['mineTimes']);
+  return $c;
+}
+
+// The first quota a NEW attempt would hit, in the order the claim checks them, or null. $withRecipient false
+// leaves the per-wallet share out, to ask what else could stop a wallet that still has attempts left.
+function atlas_studio_quota_refusal($c, $limits, $hasGroup, $withRecipient = true) {
+  if ($withRecipient && $c['mine'] >= $limits['perRecipient']) return 'quota-recipient';
+  if ($c['byActor'] >= $limits['perActor']) return 'quota-actor';
+  if ($hasGroup && isset($limits['perGroup']) && $c['byGroup'] >= $limits['perGroup']) return 'quota-group';
+  if ($c['global'] >= $limits['global']) return 'quota-global';
+  $reserve = isset($limits['reserve']) ? (int) $limits['reserve'] : 0;
+  $established = ($hasGroup ? $c['byGroup'] : $c['byActor']) > 0;
+  if ($established && $c['global'] >= $limits['global'] - $reserve) return 'quota-reserved';
+  return null;
+}
+
+// Read-only quota position of one wallet key: the per-wallet share (used, remaining, and when the oldest counted
+// attempt leaves the window) and whether an issuer-wide limit that applies to the caller would refuse it first.
+// Takes the same lock the claim does, shared, so it never sees a half-written claim; writes and prunes no attempt.
+function atlas_studio_quota_status($root, $recipient, $limits, $now, $actor, $group) {
+  $dir = atlas_studio_storage_bucket($root, 'mint-receipts');
+  $keyId = atlas_studio_key_fingerprint($recipient);
+  if ($keyId === null) throw new InvalidArgumentException('invalid-attempt-binding');
+  $lock = @fopen($dir.'/.quota.lock', 'c');
+  if (!$lock || !flock($lock, LOCK_SH)) { if ($lock) fclose($lock); throw new RuntimeException('attempt-lock-failed'); }
+  try {
+    $groupId = is_string($group) ? atlas_studio_actor_id($group) : null;
+    $c = atlas_studio_attempt_counts($dir, $keyId, atlas_studio_actor_id($actor), $groupId, $limits['windowSeconds'], $now);
+  } finally {
+    flock($lock, LOCK_UN);
+    fclose($lock);
+  }
+  $used = $c['mine'];
+  return [
+    'limit'=>$limits['perRecipient'], 'used'=>$used, 'remaining'=>max(0, $limits['perRecipient'] - $used), 'windowSeconds'=>$limits['windowSeconds'],
+    'nextSlotAt'=>$used > 0 ? $c['mineTimes'][0] + $limits['windowSeconds'] : null,
+    'otherLimit'=>atlas_studio_quota_refusal($c, $limits, $groupId !== null, false),
+  ];
+}
+
 // Claims (or finds) the attempt for a nonce, enforcing quotas for NEW attempts only.
 // $limits: perRecipient, perActor, global, windowSeconds, and optionally perGroup and reserve.
 // $actor / $group are the rate-limit actor key and network group (atlas_studio_actor()['key'] / ['group'];
@@ -82,27 +138,12 @@ function atlas_studio_claim_attempt($root, $nonce, $designDigest, $recipient, $l
     }
     atlas_studio_prune($root, 'mint-receipts', ATLAS_STUDIO_ATTEMPT_FILE_RE, ATLAS_STUDIO_ATTEMPT_RETAIN_SECONDS, $now);
     atlas_studio_prune($root, 'mint-receipts', '/^attempt-[a-f0-9]{64}\\.json\\.[0-9a-f]{12}\\.tmp$/D', 300, $now);
-    $global = 0; $mine = 0; $byActor = 0; $byGroup = 0;
     $keyId = atlas_studio_key_fingerprint($recipient);
     $actorId = atlas_studio_actor_id($actor);
     $groupId = is_string($group) ? atlas_studio_actor_id($group) : null;
-    foreach ((array) @scandir($dir) as $name) {
-      if (!preg_match('/^attempt-([a-f0-9]{64})\.json$/D', $name, $m)) continue;
-      $r = atlas_studio_read_attempt_file($dir.'/'.$name, $m[1]);
-      if ($r === null || $r['createdAt'] <= $now - $limits['windowSeconds']) continue;
-      $global++;
-      $theirs = isset($r['recipientKey']) ? $r['recipientKey'] : atlas_studio_key_fingerprint($r['recipient']);
-      if ($theirs !== null && hash_equals($theirs, $keyId)) $mine++;
-      if (isset($r['actor']) && hash_equals($r['actor'], $actorId)) $byActor++;
-      if ($groupId !== null && isset($r['group']) && hash_equals($r['group'], $groupId)) $byGroup++;
-    }
-    if ($mine >= $limits['perRecipient']) return ['ok'=>false,'error'=>'quota-recipient'];
-    if ($byActor >= $limits['perActor']) return ['ok'=>false,'error'=>'quota-actor'];
-    if ($groupId !== null && isset($limits['perGroup']) && $byGroup >= $limits['perGroup']) return ['ok'=>false,'error'=>'quota-group'];
-    if ($global >= $limits['global']) return ['ok'=>false,'error'=>'quota-global'];
-    $reserve = isset($limits['reserve']) ? (int) $limits['reserve'] : 0;
-    $established = ($groupId !== null ? $byGroup : $byActor) > 0;
-    if ($established && $global >= $limits['global'] - $reserve) return ['ok'=>false,'error'=>'quota-reserved'];
+    $counts = atlas_studio_attempt_counts($dir, $keyId, $actorId, $groupId, $limits['windowSeconds'], $now);
+    $refusal = atlas_studio_quota_refusal($counts, $limits, $groupId !== null);
+    if ($refusal !== null) return ['ok'=>false,'error'=>$refusal];
     $fh = @fopen($path, 'x');
     if (!$fh) return ['ok'=>false,'error'=>'attempt-create-failed'];
     try {

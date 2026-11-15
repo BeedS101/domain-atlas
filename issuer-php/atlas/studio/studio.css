@@ -60,6 +60,10 @@ input:disabled{background:#f1f5f8;color:#8294a1;cursor:not-allowed}
 .prop-remove:hover{background:#fdf0f0;border-color:#e0a4a4;color:#a83232}
 .link{margin-top:8px;padding:4px 2px;border:0;background:none;color:var(--accent-hover);font-size:.88rem}
 .link:hover:not(:disabled){text-decoration:underline}
+.allowance{margin-top:14px;font-size:.88rem}
+.allowance p{margin:0}
+#allowance{font-weight:600}
+.allowance .link{margin:2px 0 0;padding:2px}
 .link:disabled{background:none!important;color:#8294a1!important}
 .form-problem{margin:16px 0 0;padding:9px 12px;border:1px solid #e6b3b3;border-radius:9px;background:#fdf2f2;color:#8a2a2a;font-size:.86rem}
 .facts{display:flex;flex-wrap:wrap;justify-content:center;gap:7px;margin:0 0 12px;padding:0;list-style:none}

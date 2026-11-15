@@ -86,10 +86,18 @@ The domain manifest must let the Studio page use the bridge. The page links `/.w
 
 ```json
 { "id": "studio", "name": "Asset Studio",
-  "policy": { "walletBridge": { "read": true, "sign": ["atlas.studio.mint/1"], "offer": ["atlas.demo.studio.collectible"] } } }
+  "policy": { "walletBridge": { "read": true, "sign": ["atlas.studio.mint/1", "atlas.studio.quota/1"], "offer": ["atlas.demo.studio.collectible"] } } }
 ```
 
 Studio's approved models are their own collection, `assets/studio/{trophy,badge,key,necklace,gloves,shoulders,trinket,sword-<finish>,ring-<finish>,shield-<finish>}.{glb,png}` in the docroot, separate from the site's other item models in `assets/` (a site's own `assets/badge.*` and `assets/trophy.*` are never read, written or referenced by Studio). `tools/make-demo-item-models.js studio` regenerates them. The model catalogue accepts only those thirty-two paths, each with its own extension, and the file check refuses anything that resolves outside `assets/studio/` (including a linked folder). If one is missing or is not a glTF/PNG, challenge and mint answer 503 and issue nothing.
+
+## Wallet mint allowance
+
+The page shows how many Studio mints the connected wallet identity has left (`Wallet mint allowance: 2 of 3 remaining`). The figure is the issuer's own: it counts the mint-attempt records that `maxMintsPerRecipientPerDay` is enforced from, over the same rolling 86,400-second window, and the limit shown is the configured one. A refused mint is not counted, a safe retry of one already made is not counted twice, and an attempt stops counting exactly a day after it was made. When no mints are left the line says when the oldest one leaves the window. The per-wallet allowance is separate from the issuer's other limits (per network, per network range, the all-visitors daily total and the places kept for new visitors); when one of those is currently reached the page says so, because it can refuse a mint while the wallet still has some left.
+
+`POST api.php?op=quota` answers it, read-only. A wallet's history is not public, so the caller must prove it controls the key: either a wallet signature over the fixed request `{ purpose: "atlas.studio.quota/1", recipient, issuedAt, summary }` (verified like a mint proof: the bridge wrapper, an origin the issuer lists, the key asked about, a timestamp within ten minutes), or a one-hour token that an earlier signed answer returned (an HMAC over the key and its expiry, derived from the rate-limit salt; the page keeps it for the tab only). The answer holds only the five figures and the name of any other limit that applies, never a nonce, credential or design. Lookups are limited to 30 a minute per address. The first check in a tab needs one wallet approval, because the signature purpose must be listed in the Studio world's `walletBridge.sign` (see the manifest above); a page whose manifest does not list it shows `Allowance unavailable` and mints exactly as before.
+
+The description starts as a copy of the asset name. Choosing another template resets both to that template's title; typing a name keeps the description in step until the visitor writes a description of their own.
 
 ## Controlled real-wallet test (local, isolated)
 

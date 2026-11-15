@@ -266,7 +266,7 @@ function doctor_env($root) {
 
   // Asset Studio private storage
   $setup = ['host' => $host, 'suggestedRoot' => $parent . '/atlas-studio-data', 'buckets' => ['drafts', 'uploads-quarantine', 'mint-receipts', 'tmp', 'rate'], 'studioHere' => $studioHere, 'spatialWorld' => [
-    'id' => 'studio', 'name' => 'Asset Studio', 'policy' => ['walletBridge' => ['read' => true, 'sign' => ['atlas.studio.mint/1'], 'offer' => ['atlas.demo.studio.collectible']]]]];
+    'id' => 'studio', 'name' => 'Asset Studio', 'policy' => ['walletBridge' => ['read' => true, 'sign' => ['atlas.studio.mint/1', 'atlas.studio.quota/1'], 'offer' => ['atlas.demo.studio.collectible']]]]];
   if ($studioHere) {
     list($how, $configured) = atlas_sf_studio_root($root);
     $fixRoot = 'Create the folder ' . $setup['suggestedRoot'] . ' (outside the web root) with the five sub-folders listed under "Setup values", then point Studio at it.';

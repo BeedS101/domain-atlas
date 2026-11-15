@@ -15,6 +15,7 @@ $unit = [
   'asset-studio-hardening.php',
   'asset-studio-exhaustion.php',
   'asset-studio-equipment.php',
+  'asset-studio-quota-status.php',
 ];
 $failed = [];
 $passed = 0;
@@ -25,9 +26,11 @@ foreach ($unit as $name) {
   passthru(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($file), $status);
   if ($status === 0) $passed++; else $failed[] = $name;
 }
-echo "\n== asset-studio-integration.js ==\n";
-passthru('node ' . escapeshellarg(__DIR__ . DIRECTORY_SEPARATOR . 'asset-studio-integration.js'), $status);
-if ($status === 0) $passed++; else $failed[] = 'asset-studio-integration.js';
-$total = count($unit) + 1;
+foreach (['asset-studio-integration.js', 'asset-studio-quota-http.js'] as $js) {
+  echo "\n== $js ==\n";
+  passthru('node ' . escapeshellarg(__DIR__ . DIRECTORY_SEPARATOR . $js), $status);
+  if ($status === 0) $passed++; else $failed[] = $js;
+}
+$total = count($unit) + 2;
 echo "\nAsset Studio: $passed/$total test files passed; " . count($failed) . " failed\n";
 if ($failed) { fwrite(STDERR, 'Failed: ' . implode(', ', $failed) . "\n"); exit(1); }

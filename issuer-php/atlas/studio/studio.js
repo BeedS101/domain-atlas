@@ -212,8 +212,14 @@ function addProp(k='',v=''){
  row.querySelector('.prop-remove').addEventListener('click',()=>{row.remove();paint()});
  $('props').append(row);paint();return pk;
 }
-['assetName','description','finish'].forEach(id=>$(id).addEventListener('input',paint));
-$('template').addEventListener('change',()=>{$('assetName').value=titles[$('template').value];statPoints={};renderStats();paint();loadModel()});
+// The description starts as a copy of the name and follows it while it still equals the name; typing anything
+// else into it makes it the visitor's own, and only choosing another template starts over.
+let descAuto=true;
+const syncDescription=()=>{if(descAuto)$('description').value=$('assetName').value};
+$('assetName').addEventListener('input',()=>{syncDescription();paint()});
+$('description').addEventListener('input',()=>{descAuto=$('description').value===$('assetName').value;paint()});
+$('finish').addEventListener('input',paint);
+$('template').addEventListener('change',()=>{$('assetName').value=titles[$('template').value];descAuto=true;syncDescription();statPoints={};renderStats();paint();loadModel()});
 $('finish').addEventListener('input',()=>{if(perFinish($('template').value))loadModel()});
 $('colorInput').addEventListener('input',paint);
 // The tile and swatch groups drive the underlying selects, which stay the source of the design values.
@@ -253,22 +259,84 @@ async function postJson(op,body){
   return {status:response.status,json};
 }
 // The bridge can answer 'not allowed' simply because the extension had not attached yet when the page
-// loaded, so a missing identity is re-checked a few times and again whenever the tab regains focus.
+// loaded, so a missing identity is re-checked a few times and again whenever the tab regains focus. Once an
+// identity is known, regaining focus asks again so a change of identity in the wallet is picked up.
 let checking=false;
 async function checkWallet(){
- if(checking||walletKey)return;checking=true;
+ if(checking||minting)return;checking=true;
+ const before=walletKey;
  try{
   if(!window.atlasWallet?.getIdentity){$('walletStatus').textContent='Domain Atlas wallet bridge not detected.';return}
-  for(let attempt=0;attempt<4&&!walletKey;attempt++){
+  for(let attempt=0;attempt<(before?1:4);attempt++){
    try{const r=await window.atlasWallet.getIdentity();walletKey=r?.allowed&&r?.publicKey?r.publicKey:null;$('walletStatus').textContent=walletKey?'Wallet identity available.':r?.allowed?'No active wallet identity.':'Wallet access not enabled for this page.';if(r?.allowed)break}
-   catch{$('walletStatus').textContent='Wallet connection unavailable.'}
-   if(!walletKey)await new Promise(ok=>setTimeout(ok,1200));
+   catch{if(!before)$('walletStatus').textContent='Wallet connection unavailable.'}
+   if(!walletKey&&!before)await new Promise(ok=>setTimeout(ok,1200));
   }
- }finally{checking=false;refreshMintButton()}
+ }finally{checking=false;refreshMintButton();if(walletKey!==before||!walletKey)refreshAllowance(false)}
 }
+
+// ---- this wallet's remaining mints (read-only) ----
+// The count is the issuer's own: the mint-attempt records the per-wallet quota is enforced from, over a rolling
+// window. The issuer only answers for a key that proves itself, by a wallet signature (one approval) or by the
+// short-lived token that answer returns, kept for this tab only. Anything unavailable is shown as unavailable.
+const quota={limit:null,windowSeconds:86400,purpose:null,summary:null,skew:0};
+let allowance={state:'idle'},allowanceSeq=0;
+const tokenSlot=k=>'atlas.studio.quota:'+k;
+function savedToken(k){try{const t=JSON.parse(sessionStorage.getItem(tokenSlot(k))||'null');return t&&typeof t.token==='string'&&t.expiresAt*1000>Date.now()?t.token:null}catch{return null}}
+function saveToken(k,token,expiresAt){try{if(token)sessionStorage.setItem(tokenSlot(k),JSON.stringify({token,expiresAt}));else sessionStorage.removeItem(tokenSlot(k))}catch{}}
+const windowText=()=>{const h=Math.round(quota.windowSeconds/3600);return h%24===0?(h===24?'24 hours':h/24+' days'):h+' hours'};
+function renderAllowance(){
+ const a=allowance,box=$('allowance'),check=$('allowanceCheck'),note=$('allowanceNote');
+ check.hidden=true;note.hidden=true;note.textContent='';
+ const label='Wallet mint allowance: ';
+ if(a.state==='nowallet')box.textContent=label+'connect a wallet to see it';
+ else if(a.state==='loading')box.textContent=label+'checking…';
+ else if(a.state==='unchecked'){box.textContent=label+'up to '+quota.limit+' per '+windowText()+'. ';check.hidden=false}
+ else if(a.state==='ok'){
+  const w=a.wallet;
+  box.textContent=label+w.remaining+' of '+w.limit+' remaining'+(w.remaining===0&&w.nextSlotAt?'. Available again '+fmtWhen(new Date(w.nextSlotAt*1000)):'');
+  note.hidden=false;
+  note.textContent=a.otherLimit?'Separate from this wallet’s allowance, an issuer-wide limit ('+({'quota-actor':'your network','quota-group':'your network range','quota-global':'all visitors today','quota-reserved':'the places kept for new visitors'}[a.otherLimit]||'issuer')+') is currently reached, so a mint can be refused even while this wallet has some left.':'This is the per-wallet allowance over a rolling '+windowText()+'. Network and issuer-wide limits are separate and can stop a mint earlier.';
+  if(w.remaining>0&&w.used>0&&w.nextSlotAt)box.title='Your oldest counted mint leaves the window '+fmtWhen(new Date(w.nextSlotAt*1000));else box.removeAttribute('title');
+ }
+ else box.textContent=label+'Allowance unavailable';
+}
+async function refreshAllowance(interactive){
+ const seq=++allowanceSeq,key=walletKey;
+ const set=v=>{if(seq===allowanceSeq&&key===walletKey){allowance=v;renderAllowance()}};
+ if(!key)return set({state:'nowallet'});
+ if(!mintEnabled||quota.limit===null)return set({state:'unavailable'});
+ set({state:'loading'});
+ try{
+  let body=null;
+  const token=savedToken(key);
+  if(token){
+   const r=await postJson('quota',{recipient:key,token});
+   if(r.status===200&&r.json?.ok)body=r.json;
+   else if(r.status===403)saveToken(key,null);
+   else return set({state:'unavailable'});
+  }
+  if(!body){
+   if(!interactive)return set({state:'unchecked'});
+   if(!quota.purpose||!window.atlasWallet?.requestSignature)return set({state:'unavailable'});
+   const issuedAt=Math.floor(Date.now()/1000)+quota.skew;
+   const sig=await window.atlasWallet.requestSignature({purpose:quota.purpose,recipient:key,issuedAt,summary:quota.summary});
+   if(!sig||sig.allowed!==true)return set({state:'unavailable'});
+   if(!sig.result)return set({state:'unchecked'});
+   const r=await postJson('quota',{recipient:key,proof:sig.result});
+   if(r.status!==200||!r.json?.ok)return set({state:'unavailable'});
+   body=r.json;saveToken(key,body.token,body.tokenExpiresAt);
+  }
+  if(!body.wallet||!Number.isInteger(body.wallet.remaining)||!Number.isInteger(body.wallet.limit))return set({state:'unavailable'});
+  set({state:'ok',wallet:body.wallet,otherLimit:typeof body.otherLimit==='string'?body.otherLimit:null});
+ }catch{set({state:'unavailable'})}
+}
+$('allowanceCheck').addEventListener('click',()=>refreshAllowance(true));
 async function checkIssuer(){
- try{if(location.protocol!=='file:'){const s=await (await fetch('api.php?op=status',{cache:'no-store'})).json();mintEnabled=s.mintEnabled===true;const o=s.options;if(o){opts.giftable=o.giftable!==false;if(Number.isInteger(o.expiryMinSeconds))opts.expiryMin=o.expiryMinSeconds;if(Number.isInteger(o.expiryMaxSeconds))opts.expiryMax=o.expiryMaxSeconds;if(Number.isInteger(o.maxProperties))opts.maxProps=o.maxProperties;if(o.equipment&&typeof o.equipment==='object')equipment=o.equipment;$('statRows').dataset.t=''}}}catch{}
- applyOptions();paint();
+ try{if(location.protocol!=='file:'){const s=await (await fetch('api.php?op=status',{cache:'no-store'})).json();mintEnabled=s.mintEnabled===true;const o=s.options;if(o){opts.giftable=o.giftable!==false;if(Number.isInteger(o.expiryMinSeconds))opts.expiryMin=o.expiryMinSeconds;if(Number.isInteger(o.expiryMaxSeconds))opts.expiryMax=o.expiryMaxSeconds;if(Number.isInteger(o.maxProperties))opts.maxProps=o.maxProperties;if(o.equipment&&typeof o.equipment==='object')equipment=o.equipment;$('statRows').dataset.t=''}
+  const q=s.quota;if(q&&Number.isInteger(q.perWalletLimit)&&q.perWalletLimit>0){quota.limit=q.perWalletLimit;if(Number.isInteger(q.windowSeconds)&&q.windowSeconds>0)quota.windowSeconds=q.windowSeconds;if(typeof q.purpose==='string')quota.purpose=q.purpose;if(typeof q.summary==='string')quota.summary=q.summary}
+  if(Number.isInteger(s.now))quota.skew=s.now-Math.floor(Date.now()/1000)}}catch{}
+ applyOptions();paint();refreshAllowance(false);
 }
 window.addEventListener('focus',checkWallet);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkWallet()});
@@ -310,7 +378,7 @@ async function mintToWallet(){
     if(!offer.result)return say('Minted, but the wallet offer was declined or timed out. Press Mint again to retrieve it.');
     say(offer.result.claimed?'Added to your wallet. The wallet verified the issuer signature.':'Offered to your wallet. Open its pending offers and Claim it: the wallet checks the issuer signature itself before adding it.');
   }catch(error){say('Mint failed: '+String(error?.message||'network error'))}
-  finally{minting=false;refreshMintButton()}
+  finally{minting=false;refreshMintButton();refreshAllowance(false)}
 }
 $('mint').addEventListener('click',mintToWallet);
 applyOptions();paint();

@@ -98,6 +98,7 @@ const json = (r) => { try { return JSON.parse(r.body.toString('utf8')); } catch 
     check('studio world allows read, the mint signature purpose and the collectible offer',
       !!wb && wb.read === true && Array.isArray(wb.sign) && wb.sign.includes('atlas.studio.mint/1') && Array.isArray(wb.offer) && wb.offer.includes('atlas.demo.studio.collectible'));
     check('studio world has no entry (policy-only, never an enterable space)', !!world && !world.entry);
+    if (!(wb && Array.isArray(wb.sign) && wb.sign.includes('atlas.studio.quota/1'))) note('studio world does not list the signature purpose atlas.studio.quota/1: the page will show "Allowance unavailable" instead of the wallet\'s remaining mints');
     note('manifest domain: ' + m.domain);
   }
 
