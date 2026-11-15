@@ -8112,7 +8112,7 @@ const AtlasWallet = (() => {
   async function saveActivityLog(ownerPublicKey, list) {
     const { atlasActivityLog } = await chrome.storage.local.get('atlasActivityLog');
     const all = (atlasActivityLog && typeof atlasActivityLog === 'object' && !Array.isArray(atlasActivityLog)) ? atlasActivityLog : {};
-    const identity = await getIdentity();
+    const identity = await holderFor(ownerPublicKey);
     all[ownerPublicKey] = await encryptAtRestFor(identity, ownerPublicKey, 'activityLog', list);
     await chrome.storage.local.set({ atlasActivityLog: all });
   }
@@ -8124,9 +8124,14 @@ const AtlasWallet = (() => {
   async function getActivityLog() {
     const identity = await getIdentity();
     if (!identity) return [];
+    return readActivityLogOf(identity);
+  }
+
+  // The log of `holder`, an identity this wallet can open: the acting one, or another identity of the same account.
+  async function readActivityLogOf(holder) {
     const { atlasActivityLog } = await chrome.storage.local.get('atlasActivityLog');
-    const stored = (atlasActivityLog || {})[identity.publicKey];
-    return decryptAtRestAndMigrate(identity, 'activityLog', stored, [], (v) => saveActivityLog(identity.publicKey, v));
+    const stored = (atlasActivityLog || {})[holder.publicKey];
+    return decryptAtRestAndMigrate(holder, 'activityLog', stored, [], (v) => saveActivityLog(holder.publicKey, v));
   }
 
   // `type` is a coarse tag ('identity', 'backup', 'asset', 'trade') kept
@@ -8136,10 +8141,18 @@ const AtlasWallet = (() => {
   // viewer renders as the card's detail lines and collapsed Details section.
   // It never holds key material.
   async function logActivity(type, text, meta) {
+    const identity = await getIdentity();
+    if (!identity) return; // nothing to attribute this to — silently skip
+    await logActivityFor(identity.publicKey, type, text, meta);
+  }
+
+  // The same, for the log of `ownerPublicKey`: written only when this wallet can open that identity (the acting one,
+  // or another identity of the account), so an entry is never put into a log it cannot be read back from.
+  async function logActivityFor(ownerPublicKey, type, text, meta) {
     try {
-      const identity = await getIdentity();
-      if (!identity) return; // nothing to attribute this to — silently skip
-      let list = await getActivityLog();
+      const identity = await holderFor(ownerPublicKey);
+      if (!identity || identity.publicKey !== ownerPublicKey) return;
+      let list = await readActivityLogOf(identity);
       list.unshift({
         id: 'act-' + Date.now().toString(36) + '-' + b64urlEncode(crypto.getRandomValues(new Uint8Array(6)).buffer),
         type, text,
@@ -8358,6 +8371,9 @@ const AtlasWallet = (() => {
     try {
       const info = await getActiveIdentityInfo();
       if (info && info.publicKey === publicKey) return info.kind === 'sub' ? info.label || 'Sub-identity' : 'Main identity';
+      // Another identity of the same account, such as the one a site is bound to.
+      const other = (await listMoveTargets()).find((t) => t.publicKey === publicKey);
+      if (other) return other.label || 'Sub-identity';
     } catch (err) { /* the label is only a convenience */ }
     return null;
   }
@@ -8395,15 +8411,16 @@ const AtlasWallet = (() => {
   }
 
   // Writes one entry. spec: { op, type?, text, legs, world?: { domain, id }, to?: { label, publicKey, quantity },
-  // source?, station?, requestId?, dedupKey?, ids? }. Skipped when the open identity is not the owner (the log
-  // belongs to the identity that is open) or when an entry with the same dedupKey is already there, so a retry or a
-  // replay never records a movement twice. A failure to log never fails the operation.
+  // source?, station?, requestId?, dedupKey?, ids? }. Skipped when this wallet cannot open the owner's log, or when an
+  // entry with the same dedupKey is already there, so a retry or a replay never records a movement twice. A failure
+  // to log never fails the operation.
   async function logMovement(ownerPublicKey, spec) {
     try {
-      const identity = await getIdentity();
+      // The identity whose log this is, when this wallet can open it (the acting one or another of the same account).
+      const identity = await holderFor(ownerPublicKey);
       if (!identity || identity.publicKey !== ownerPublicKey || !spec.legs || !spec.legs.length) return;
       if (spec.dedupKey) {
-        const existing = await getActivityLog();
+        const existing = await readActivityLogOf(identity);
         if (existing.some((e) => e.meta && (e.meta.dedupKey === spec.dedupKey || (spec.op === 'mail-claim' && e.meta.kind === 'mail-claim' && e.meta.messageId === spec.ids.messageId)))) return;
       }
       const primary = spec.legs.find((l) => l.direction === 'in') || spec.legs[0];
@@ -8424,7 +8441,7 @@ const AtlasWallet = (() => {
       };
       // A movement that only gave something up has nothing to show in the inventory.
       if (!spec.legs.some((l) => l.direction === 'in' || l.direction === 'same')) { delete meta.assetId; delete meta.assetClass; }
-      await logActivity(spec.type || 'asset', spec.text, meta);
+      await logActivityFor(ownerPublicKey, spec.type || 'asset', spec.text, meta);
     } catch (err) { /* logging never fails the operation */ }
   }
 
@@ -9936,7 +9953,10 @@ const AtlasWallet = (() => {
     const verdict = await verifyCredential(credential);
     if (!verdict.valid) throw new Error(verdictBlockMessage(verdict, 'this offer') || ('offer credential does not check out: ' + verdict.reason));
 
+    const holdingsBefore = await holdingsSnapshot(ownerPublicKey);
     await commitOperation(ownerPublicKey, null, [{ owner: ownerPublicKey, add: [{ credential, lastVerdict: verdict }] }]);
+    // Measured before any merging, so a merge is never counted as something received.
+    const holdingsAfter = await holdingsSnapshot(ownerPublicKey);
     // Merging signs as the acting identity, so it only runs for that one; another identity's stacks are merged
     // when it is next the acting identity.
     const acting = await getIdentity();
@@ -9944,7 +9964,25 @@ const AtlasWallet = (() => {
 
     entry.claimed = true;
     await saveBridgeOffers(ownerPublicKey, entries);
+    // Only a claim that verified and was added to the wallet is recorded: an offer that is queued, refused,
+    // invalid or dismissed never reaches this line.
+    const received = measuredLeg('in', credential, credential.quantity, holdingsBefore, holdingsAfter);
+    await logMovement(ownerPublicKey, {
+      op: 'bridge-claim', text: 'Received ' + legLabel(received), legs: [received], source: bridgeOfferSource(entry.origin, credential),
+      dedupKey: 'bridge-claim:' + credential.id, ids: { offerId: entry.id, offeredBy: entry.origin }
+    });
     return { credential, verdict };
+  }
+
+  // Where an offer came from, for Activity. The offering page's origin is the one Chrome reported for the sender, and
+  // the credential has just verified as signed by its issuer, so "Asset Studio" is said only for an Asset Studio
+  // credential offered by the page of the very domain that issued it. Any other offer is a website's offer.
+  const STUDIO_COLLECTIBLE_CLASS = 'atlas.demo.studio.collectible';
+  function bridgeOfferSource(origin, credential) {
+    let host = null;
+    try { host = new URL(origin).host; } catch (err) { /* not a URL: no provenance */ }
+    const issuedHere = !!host && !!credential.issuer && credential.issuer.domain === host;
+    return credential.asset.class === STUDIO_COLLECTIBLE_CLASS && issuedHere ? 'Asset Studio' : 'Website asset offer';
   }
 
   // The visitor's explicit "no thanks" — distinct from both "not

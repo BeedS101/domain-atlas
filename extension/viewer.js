@@ -7423,6 +7423,7 @@ function movementDetailsHtml(meta) {
   }
   if (meta.station) common.push(['Trading Station', meta.station]);
   if (meta.source) common.push(['Source', meta.source]);
+  if (meta.offeredBy) common.push(['Offered by', meta.offeredBy]);
   if (meta.split) common.push(['Split into', formatActivityQuantity(meta.split.sent, legs[0].unit) + ' and ' + formatActivityQuantity(meta.split.remainder, legs[0].unit)]);
   if (meta.consolidated) common.push(['Balances combined', meta.consolidated.from + ' into ' + meta.consolidated.into + ' (the total is unchanged)']);
 
@@ -7439,7 +7440,7 @@ function movementDetailsHtml(meta) {
 
   const ids = [];
   legs.forEach((leg) => { if (leg.assetId) ids.push([(leg.direction === 'in' ? 'Received credential' : leg.direction === 'out' ? 'Credential given' : 'Credential'), leg.assetId]); });
-  [['Request ID', meta.requestId], ['Drop ID', meta.dropId], ['Listing ID', meta.pendingId], ['Chest ID', meta.chestId], ['Mail message ID', meta.messageId],
+  [['Request ID', meta.requestId], ['Offer ID', meta.offerId], ['Drop ID', meta.dropId], ['Listing ID', meta.pendingId], ['Chest ID', meta.chestId], ['Mail message ID', meta.messageId],
     ['Transfer file ID', meta.fileId], ['Identity key', meta.identity && meta.identity.publicKey], ['Operation', meta.kind]].forEach((r) => { if (r[1]) ids.push(r); });
   const technical = ids.length
     ? '<details class="activity-tech"><summary>Details</summary><ul class="activity-details">' + ids.map((r) =>
@@ -8895,13 +8896,18 @@ mailSenderFilterInput && mailSenderFilterInput.addEventListener('change', async 
 // gift style guard needed here (see wallet.js's dismissBridgeOffer's own
 // comment on why) — Claim and Dismiss are simply the two live actions
 // until one of them fires, after which only "(claimed)" remains.
+// The offer the person should look at first, until they act on it or another one arrives.
+let highlightedBridgeOfferId = null;
+// Per identity, the offers already seen as pending, so an arrival is told apart from what was already waiting.
+const seenBridgeOfferIds = new Map();
+
 function renderBridgeOfferCard(entry, container) {
   const el = document.createElement('div');
   // Reuses .mail-card's existing styling (same as renderSentMailCard
   // above) purely for the free subject/meta/claimed-span layout it
   // already defines — this card is not mail and carries none of mail's
   // own data, just the same visual shape.
-  el.className = 'wallet-item mail-card';
+  el.className = 'wallet-item mail-card' + (entry.id === highlightedBridgeOfferId ? ' bridge-offer-new' : '');
   el.dataset.id = entry.id;
   const asset = entry.credential.asset || {};
   const quantity = typeof entry.credential.quantity === 'number' ? entry.credential.quantity : 1;
@@ -8927,6 +8933,8 @@ async function refreshBridgeOffersDisplay(identity) {
   if (identity === undefined) identity = await AtlasWallet.getIdentity();
   const entries = identity ? await AtlasWallet.getBridgeOffers(identity.publicKey) : [];
   const pending = entries.filter((e) => !e.claimed);
+  // The first look at an identity's offers fixes what counts as already known; only later arrivals are new.
+  if (identity && !seenBridgeOfferIds.has(identity.publicKey)) seenBridgeOfferIds.set(identity.publicKey, new Set(pending.map((e) => e.id)));
   if (!bridgeOffersSectionEl || !bridgeOffersListEl) return;
   bridgeOffersSectionEl.style.display = pending.length > 0 ? 'block' : 'none';
   bridgeOffersListEl.innerHTML = '';
@@ -8936,6 +8944,7 @@ async function refreshBridgeOffersDisplay(identity) {
 bridgeOffersListEl && bridgeOffersListEl.addEventListener('click', async (e) => {
   const card = e.target.closest('.wallet-item');
   if (!card) return;
+  if (card.dataset.id === highlightedBridgeOfferId) { highlightedBridgeOfferId = null; card.classList.remove('bridge-offer-new'); }
   const identity = await AtlasWallet.getIdentity();
   if (!identity) return;
 
@@ -8971,6 +8980,69 @@ bridgeOffersListEl && bridgeOffersListEl.addEventListener('click', async (e) => 
     }
     return;
   }
+});
+
+// ---------- a newly queued offer is brought to the person's attention ----------
+//
+// An offer a page has just queued (the page's request was approved and the offer stored, which is the only moment
+// atlasBridgeOffers gains an unclaimed entry) is shown where it can be claimed: the Social tab, Mail inbox, Pending
+// offers, with that offer highlighted. Nothing is claimed and no identity or permission check is touched. The wallet
+// is not opened and no window or tab is focused: when it is closed, busy or in the middle of something, the offer
+// only waits in Pending offers and counts in the Social badge.
+
+// Why the wallet should be left where it is, or null when it is free to move to Social.
+function bridgeOfferRevealBlocked() {
+  if (!walletPanel.classList.contains('open')) return 'closed';
+  const screen = document.querySelector('.wallet-screen.active');
+  if (!screen || (screen.id !== 'mainWalletScreen' && screen.id !== 'socialScreen')) return 'busy';
+  if (document.querySelector('#presenceApprovalModal.active, #chessModal.active, #chestModal.active, #keyAnchorModal.active, #bridgeOfferPreviewModal.active, dialog[open]')) return 'busy';
+  if (typeof AtlasActionBar !== 'undefined' && AtlasActionBar.isTypingTarget(document.activeElement)) return 'busy';
+  return null;
+}
+
+async function revealBridgeOffer(offerId) {
+  highlightedBridgeOfferId = offerId;
+  showWalletScreen('socialScreen');
+  showSocialSubtab('mailSubscreen');
+  showMailBoxSubtab('mailBoxInboxSubscreen');
+  mailEverOpened = true;
+  await refreshBridgeOffersDisplay();
+  const card = bridgeOffersListEl && Array.from(bridgeOffersListEl.querySelectorAll('.wallet-item')).find((c) => c.dataset.id === offerId);
+  if (card) {
+    card.classList.remove('jump-flash');
+    void card.offsetWidth;
+    card.classList.add('jump-flash');
+    card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+}
+
+// Called whenever the stored offers change. Most changes (a claim, a dismissal) bring nothing new.
+async function noticeBridgeOffers() {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  const pending = (await AtlasWallet.getBridgeOffers(identity.publicKey)).filter((e) => !e.claimed);
+  const known = seenBridgeOfferIds.get(identity.publicKey);
+  if (!known) { seenBridgeOfferIds.set(identity.publicKey, new Set(pending.map((e) => e.id))); return; }
+  const fresh = pending.filter((e) => !known.has(e.id));
+  pending.forEach((e) => known.add(e.id));
+  await updateSocialBadge();
+  if (!fresh.length) { await refreshBridgeOffersDisplay(identity); return; }
+  // The newest arrival is the one to look at, not an older offer that was already waiting.
+  const newest = fresh.reduce((a, b) => (Date.parse(b.queuedAt) >= Date.parse(a.queuedAt) ? b : a));
+  const asset = newest.credential.asset || {};
+  const name = asset.name || asset.class || 'an asset';
+  if (bridgeOfferRevealBlocked() === null) {
+    await revealBridgeOffer(newest.id);
+    statusEl.textContent = newest.origin + ' offered you ' + name + '. Review it under Social \u2192 Pending offers; nothing is added until you press Claim.';
+  } else {
+    highlightedBridgeOfferId = newest.id;
+    await refreshBridgeOffersDisplay(identity);
+  }
+}
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes.atlasBridgeOffers) return;
+  noticeBridgeOffers().catch(() => { /* locked or no identity: nothing to show */ });
 });
 
 // ---------- SPEC.md §3.8.2's own gap, closed here: preview-before-claim ----------
@@ -9747,7 +9819,8 @@ async function updateSocialBadge() {
     calendarBadge.classList.toggle('show', calendarDueSoon > 0);
   }
   if (socialBadge) {
-    const total = unreadMail + pendingRequestCount + calendarDueSoon;
+    const pendingOffers = identity ? (await AtlasWallet.getBridgeOffers(identity.publicKey)).filter((e) => !e.claimed).length : 0;
+    const total = unreadMail + pendingRequestCount + calendarDueSoon + pendingOffers;
     socialBadge.textContent = String(total);
     socialBadge.classList.toggle('show', total > 0);
   }

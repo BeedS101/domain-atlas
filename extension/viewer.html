@@ -479,6 +479,8 @@
   @media (max-width: 420px) { .trade-sides { grid-template-columns: 1fr; } .trade-arrow { transform: rotate(90deg); justify-self: center; } }
 
   .wallet-item.jump-flash { animation: jump-flash 1.8s ease-out; }
+  .wallet-item.bridge-offer-new { border-color: #8fbfe8; box-shadow: 0 0 0 1px #8fbfe8; }
+  .wallet-item.bridge-offer-new .mail-subject::before { content: 'New offer \00b7 '; color: #8fbfe8; font-size: 11px; font-weight: 600; }
   @keyframes jump-flash { 0%, 40% { box-shadow: 0 0 0 2px #8fbfe8; background: #1d2f38; } 100% { box-shadow: 0 0 0 0 transparent; } }
   @media (prefers-reduced-motion: reduce) { .wallet-item.jump-flash { animation: none; box-shadow: 0 0 0 2px #8fbfe8; } }
   .info-card.activity-link { cursor: pointer; }
