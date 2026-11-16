@@ -659,6 +659,65 @@
      "url": null
     }
    ]
+  },
+  {
+   "note": "domainMembership is a service like the others",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "domainMembership": true
+   },
+   "expect": [
+    {
+     "service": "domainMembership",
+     "url": null
+    }
+   ]
+  },
+  {
+   "note": "a credential descriptor on an object-style service changes nothing a directory shows",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "postOffice": {
+     "enabled": true,
+     "url": "https://example.com/mail/",
+     "requiresCredential": true,
+     "credentialClass": "atlas.postoffice.membership"
+    },
+    "assetStudio": {
+     "enabled": true,
+     "requiresCredential": true,
+     "credentialClass": "atlas.studio.membership"
+    }
+   },
+   "expect": [
+    {
+     "service": "postOffice",
+     "url": "https://example.com/mail/"
+    },
+    {
+     "service": "assetStudio",
+     "url": null
+    }
+   ]
+  },
+  {
+   "note": "requiresCredential does not switch a service on",
+   "anchorType": "domain",
+   "anchorKey": "example.com",
+   "manifest": {
+    "scanner": {
+     "requiresCredential": true,
+     "credentialClass": "atlas.scanner.membership"
+    },
+    "domainMembership": {
+     "enabled": false,
+     "requiresCredential": true,
+     "credentialClass": "atlas.membership"
+    }
+   },
+   "expect": []
   }
  ]
 }

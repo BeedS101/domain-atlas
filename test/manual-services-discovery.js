@@ -1,7 +1,9 @@
 // Discovering and adding domains in the wallet's Services tab, with no issuer running: the site the person is visiting is offered,
-// never added by itself; a manifest that names another domain, or whose service addresses point elsewhere, is not trusted; a
-// service the wallet does not operate says so; the Ledger service points at the Ledger tab; two domains are kept and one can be
-// removed. Every request the wallet makes is recorded, and only the public manifest of a domain may be read.
+// never added by itself; only services that need a membership card or another credential held in the wallet are listed (the rest of
+// what a domain advertises is only counted); a manifest that names another domain, or whose service addresses point elsewhere, is
+// not trusted; a manifest cannot change which card the wallet uses for a service it runs; a service the wallet does not run says
+// so; a domain with nothing that needs a card offers nothing to add; two domains are kept and one can be removed. Every request
+// the wallet makes is recorded, and only the public manifest of a domain may be read.
 //
 // The domains are reached through the browser's request routing. Needs no demo domain.
 // Run: xvfb-run -a node test/manual-services-discovery.js
@@ -12,12 +14,19 @@ const { check, until } = L;
 const FULL = 'full.example';
 const LEAN = 'lean.example';
 const EVIL = 'evil.example';
+const PLAIN = 'plain.example';
 
-// A manifest as served, with a repeated key and a relative service address, as a live one may have.
-const fullManifest = '{"spec":"domain-atlas/1.0","domain":"' + FULL + '","postOffice":{"enabled":true,"url":"/mail/"},'
-  + '"tradingStation":{"enabled":true,"url":"https://' + EVIL + '/trade/"},"chainLabs":true,"calendar":true,'
+// A manifest as served, with a repeated key, a relative service address, a card descriptor on Calendar, and a Global Mail entry that
+// names a card the wallet does not use for it.
+const fullManifest = '{"spec":"domain-atlas/1.0","domain":"' + FULL + '",'
+  + '"postOffice":{"enabled":true,"url":"/mail/","requiresCredential":true,"credentialClass":"atlas.tradingstation.membership"},'
+  + '"tradingStation":{"enabled":true,"url":"https://' + EVIL + '/trade/"},'
+  + '"domainMembership":{"enabled":true,"requiresCredential":true,"credentialClass":"atlas.membership"},'
+  + '"calendar":{"enabled":true,"requiresCredential":true,"credentialClass":"example.calendar.pass"},'
+  + '"chainLabs":true,"scanner":true,"assetStudio":true,'
   + '"walletBridge":{"read":true},"walletBridge":{"read":true,"sign":["x"]}}';
 const leanManifest = JSON.stringify({ spec: 'domain-atlas/1.0', domain: LEAN, postOffice: true, trading: { enabled: true, url: 'https://' + LEAN + '/trade/' }, directory: true });
+const plainManifest = JSON.stringify({ spec: 'domain-atlas/1.0', domain: PLAIN, chat: true, calendar: true, directory: true, scanner: true });
 const evilManifest = JSON.stringify({ spec: 'domain-atlas/1.0', domain: FULL, postOffice: true });
 
 (async () => {
@@ -29,7 +38,7 @@ const evilManifest = JSON.stringify({ spec: 'domain-atlas/1.0', domain: FULL, po
     await w.context.route(/^https:\/\/[a-z-]+\.example\//, async (route) => {
       const u = new URL(route.request().url());
       requests.push(route.request().method() + ' ' + u.hostname + u.pathname);
-      const manifests = { [FULL]: fullManifest, [LEAN]: leanManifest, [EVIL]: evilManifest };
+      const manifests = { [FULL]: fullManifest, [LEAN]: leanManifest, [PLAIN]: plainManifest, [EVIL]: evilManifest };
       if (u.pathname === '/.well-known/spatial.json' && manifests[u.hostname]) {
         await route.fulfill({ status: 200, contentType: 'application/json', body: manifests[u.hostname] });
       } else if (u.pathname === '/') {
@@ -62,7 +71,8 @@ const evilManifest = JSON.stringify({ spec: 'domain-atlas/1.0', domain: FULL, po
     await open();
     await viewer.waitForSelector('#svcDiscover', { timeout: 15000 });
     const found = await text('#svcDiscover');
-    check('the visited site is offered with what it advertises', /Currently visiting: full\.example/.test(found) && /Global Mail/.test(found) && /Chain Labs/.test(found) && /Calendar/.test(found), found);
+    check('the visited site is offered with the services that need a card', /Currently visiting: full\.example/.test(found) && /Global Mail/.test(found) && /Trading Station/.test(found) && /Domain Membership/.test(found) && /Calendar/.test(found), found);
+    check('what needs no card is only counted, never listed', !/Chain Labs|Scanner|Asset Studio/.test(found) && /3 more services that do not need a card, so they are not listed here/.test(found), found);
     check('the page text naming another domain is not trusted: only the browser\'s own address was used', !/lean\.example/.test(found));
     check('it says nothing has been added, switched on or sent', /Nothing has been added, switched on or sent/.test(found));
     check('discovery added nothing and enabled nothing', (await state()).domains.length === 0 && Object.keys((await state()).enabled).length === 0);
@@ -72,6 +82,7 @@ const evilManifest = JSON.stringify({ spec: 'domain-atlas/1.0', domain: FULL, po
     await waitText(/Add full\.example to Services\?/);
     const ask = await section();
     check('the confirmation warns about the repeated key and the address that is not on the domain', /"walletBridge" more than once/.test(ask) && /Trading Station is not on this domain/.test(ask), ask);
+    check('and that the domain names a card for Global Mail other than the wallet\'s', /different card for Global Mail than the one the wallet uses/.test(ask), ask);
     check('the confirmation repeats that nothing is switched on or shared', /Nothing is switched on/.test(ask) && /nothing about your identity or credentials is sent/.test(ask));
     const reqsBefore = requests.length;
     await viewer.click('#svcAddConfirm');
@@ -84,35 +95,46 @@ const evilManifest = JSON.stringify({ spec: 'domain-atlas/1.0', domain: FULL, po
 
     console.log('--- the services of the domain ---');
     const card = await text('.svc-domain[data-domain="' + FULL + '"]');
-    check('the card lists the advertised services, none of them green', /Global Mail/.test(card) && /Chain Labs/.test(card) && /Calendar/.test(card) && (await viewer.$$eval('.svc-domain .svc-status', (e) => e.every((x) => x.dataset.state !== 'active'))), card);
+    check('the card lists the services that need a card, none of them green', /Global Mail/.test(card) && /Trading Station/.test(card) && /Domain Membership/.test(card) && /Calendar/.test(card) && (await viewer.$$eval('.svc-domain .svc-status', (e) => e.every((x) => x.dataset.state !== 'active'))), card);
+    check('services that need no card are not on the card', !/Chain Labs|Scanner|Asset Studio/.test(card) && (await viewer.$$('.svc-domain[data-domain="' + FULL + '"] .svc-service')).length === 4, card);
     check('Trading Station is listed even though its address was refused, and the address is not offered', /Trading Station/.test(card) && !(await viewer.$eval('body', (b) => b.innerHTML.includes('https://evil.example/trade'))));
+    const rows = await viewer.evaluate(() => AtlasWallet.getServices().rows());
+    const svc = (k) => rows.domains[0].services.find((x) => x.key === k);
+    check('the manifest could not change which card the wallet uses for Global Mail', svc('postOffice').credentialClass === 'atlas.postoffice.membership' && svc('membership').credentialClass === 'atlas.membership' && svc('calendar').credentialClass === 'example.calendar.pass', rows.domains[0].services.map((x) => x.key + ':' + x.credentialClass));
     await viewer.click('.svc-service[data-service="postOffice"] .svc-open');
     await viewer.waitForSelector('#svcSettings');
     const link = await viewer.$eval('#svcServiceLink', (a) => ({ href: a.href, rel: a.rel, target: a.target }));
     check('the relative address resolves on the domain and opens safely', link.href === 'https://full.example/mail/' && /noopener/.test(link.rel) && link.target === '_blank', link);
     check('the page says what is needed before anything can be done', /have not joined/.test(await text('#svcSettings')));
     await viewer.click('#svcBack');
+    await viewer.click('.svc-service[data-service="membership"] .svc-open');
+    await viewer.waitForSelector('#svcSettings');
+    check('Domain Membership has its own page and can be joined', /Domain Membership — full\.example/.test(await text('#svcTitle')) && (await viewer.$('#svcJoin')) !== null && (await viewer.$('#svcEnabled')) !== null);
+    await viewer.click('#svcBack');
     await viewer.click('.svc-service[data-service="calendar"] .svc-open');
     await viewer.waitForSelector('#svcSettings');
     const cal = await text('#svcSettings');
-    check('a service the wallet does not operate says so, with no toggle and no invented settings', /does not use Calendar from here yet/.test(cal) && /has nothing to set up for it/.test(cal) && (await viewer.$('#svcEnabled')) === null && (await viewer.$('#svcLoadSettings')) === null, cal);
-    await viewer.click('#svcBack');
-    await viewer.click('.svc-service[data-service="chainLabs"] .svc-open');
-    await viewer.waitForSelector('#svcOpenLedger');
-    await viewer.click('#svcOpenLedger');
-    await viewer.waitForSelector('#ledgerSubscreen.active');
-    check('Chain Labs points at the Ledger tab', true);
-    await viewer.click('#servicesSubtabBtn');
+    check('a service the wallet does not run says which card it needs and that nothing is sent, with no toggle and no invented settings', /Calendar needs a membership card \(example\.calendar\.pass\)/.test(cal) && /sends nothing to the domain for this service/.test(cal) && /You do not hold the card Calendar needs/.test(cal) && (await viewer.$('#svcEnabled')) === null && (await viewer.$('#svcLoadSettings')) === null && (await viewer.$('#svcJoin')) === null, cal);
+    check('and it is not green', (await viewer.$eval('#svcStatusBlock .svc-status', (e) => e.dataset.state)) !== 'active');
     await viewer.click('#svcBack');
 
     console.log('--- a second domain, typed in ---');
     await viewer.fill('#servicesAddInput', LEAN);
     await viewer.click('#servicesAddBtn');
     await waitText(/Add lean\.example to Services\?/);
-    check('the preview names what it advertises, including the alias spelling', /Trading Station/.test(await section()) && /Global Mail/.test(await section()) && /Directory/.test(await section()));
+    check('the preview names the services that need a card, including the alias spelling, and counts the rest', /Trading Station/.test(await section()) && /Global Mail/.test(await section()) && !/Directory/.test(await section()) && /one more service that does not need a card/.test(await section()), await section());
     await viewer.click('#svcAddConfirm');
     await viewer.waitForSelector('.svc-domain[data-domain="' + LEAN + '"]');
     check('both domains are kept', (await state()).domains.map((d) => d.domain).sort().join() === [LEAN, FULL].sort().join());
+
+    console.log('--- a domain with nothing that needs a card ---');
+    await viewer.fill('#servicesAddInput', PLAIN);
+    await viewer.click('#servicesAddBtn');
+    await waitText(/plain\.example has nothing to add/);
+    check('it says so, offers nothing to add, and counts what it does advertise', /advertises none/.test(await section()) && /4 more services that do not need a card/.test(await section()) && (await viewer.$('#svcAddConfirm')) === null, await section());
+    check('nothing was added', (await state()).domains.length === 2);
+    await viewer.click('#svcAddClose');
+    await until(async () => !/has nothing to add/.test(await section()), 5000, 200);
 
     console.log('--- a domain that names a different domain ---');
     await viewer.fill('#servicesAddInput', EVIL);

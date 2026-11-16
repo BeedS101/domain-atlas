@@ -8351,7 +8351,9 @@ const AtlasWallet = (() => {
   // credential and there's nothing left to ask about, which is the
   // unsubscribe.
 
-  const DEFAULT_MAIL_INTERVAL_MINUTES = 30;
+  // The normal interval for the automatic check, in minutes. It is a target, not a promise that mail arrives within it: a check
+  // is skipped while another is running, while a domain asked the wallet to wait, and while the wallet is locked.
+  const DEFAULT_MAIL_INTERVAL_MINUTES = 1;
 
   // In-memory only (not persisted, not encrypted-at-rest — there's nothing
   // sensitive in "have I already told this domain about this credential's
@@ -8362,17 +8364,28 @@ const AtlasWallet = (() => {
   // avoids the redundant network round trip.
   const registeredMailEncryptionKeys = new Set();
 
+  // `intervalIsDefault` is true when the person never chose an interval. A value saved earlier is kept as it is: builds before this
+  // one wrote the default back with every check, so such a value is usually the old default, and `resetMailCheckInterval` is how
+  // a person moves to the current one.
   async function getMailSettings() {
     const { atlasMailSettings } = await chrome.storage.local.get('atlasMailSettings');
-    return { intervalMinutes: DEFAULT_MAIL_INTERVAL_MINUTES, lastCheckedAt: null, ...(atlasMailSettings || {}) };
+    const stored = atlasMailSettings || {};
+    const own = Number.isFinite(Number(stored.intervalMinutes)) && Number(stored.intervalMinutes) >= 1;
+    return { lastCheckedAt: null, ...stored, intervalMinutes: own ? Math.round(Number(stored.intervalMinutes)) : DEFAULT_MAIL_INTERVAL_MINUTES, intervalIsDefault: !own };
+  }
+
+  async function resetMailCheckInterval() {
+    const { atlasMailSettings } = await chrome.storage.local.get('atlasMailSettings');
+    const next = { ...(atlasMailSettings || {}) };
+    delete next.intervalMinutes;
+    await chrome.storage.local.set({ atlasMailSettings: next });
   }
 
   async function setMailCheckInterval(minutes) {
     const n = Number(minutes);
     if (!Number.isFinite(n) || n < 1) throw new Error('Interval must be at least 1 minute.');
-    const settings = await getMailSettings();
-    settings.intervalMinutes = Math.round(n);
-    await chrome.storage.local.set({ atlasMailSettings: settings });
+    const { atlasMailSettings } = await chrome.storage.local.get('atlasMailSettings');
+    await chrome.storage.local.set({ atlasMailSettings: { ...(atlasMailSettings || {}), intervalMinutes: Math.round(n) } });
   }
 
   // Every change to the stored mail or chat lists is read-modify-write over
@@ -10915,6 +10928,67 @@ const AtlasWallet = (() => {
   // One signed request to a domain's /atlas/mail/check for these credentials.
   // Returns {messages, updates}, or null when the domain could not or would
   // not answer (unreachable, too old to verify, passkey session not open).
+  // ---- keeping the automatic check polite ----
+  //
+  // A domain that answers 429 or 503, or does not answer at all, is left alone for a while: the time it names in Retry-After when it
+  // names one, otherwise a wait that doubles with each failure (30 s up to 15 min). The record is kept in session storage, so every
+  // wallet page in the browser sees it, and it is gone when the browser closes. A check the person starts by hand is not held back
+  // by a wait the wallet chose itself, but is by one the domain asked for.
+  const MAIL_BACKOFF_BASE_MS = 30000;
+  const MAIL_BACKOFF_MAX_MS = 15 * 60 * 1000;
+  const MAIL_RETRY_AFTER_MIN_MS = 5000;
+  const MAIL_RETRY_AFTER_MAX_MS = 60 * 60 * 1000;
+  let lastMailCheckChanged = false;
+  const memoryCooldowns = new Map();
+
+  async function readMailCooldowns() {
+    try { const got = await chrome.storage.session.get('atlasMailCooldowns'); return got.atlasMailCooldowns || {}; } catch (err) { return Object.fromEntries(memoryCooldowns); }
+  }
+  async function writeMailCooldowns(map) {
+    try { await chrome.storage.session.set({ atlasMailCooldowns: map }); } catch (err) { memoryCooldowns.clear(); Object.keys(map).forEach((k) => memoryCooldowns.set(k, map[k])); }
+  }
+
+  // Retry-After is a number of seconds or an HTTP date.
+  function parseRetryAfter(value, nowMs) {
+    if (typeof value !== 'string' || !value.trim()) return null;
+    const v = value.trim();
+    let ms = null;
+    if (/^\d{1,7}$/.test(v)) ms = Number(v) * 1000;
+    else { const at = Date.parse(v); if (Number.isFinite(at)) ms = at - nowMs; }
+    if (ms === null) return null;
+    return Math.min(MAIL_RETRY_AFTER_MAX_MS, Math.max(MAIL_RETRY_AFTER_MIN_MS, ms));
+  }
+
+  async function noteMailFailure(domain, res) {
+    const origin = netOrigin(baseUrl(domain));
+    if (!origin) return;
+    const map = await readMailCooldowns();
+    const prev = map[origin];
+    const fails = Math.min((prev ? prev.fails : 0) + 1, 10);
+    const limited = !!res && (res.status === 429 || res.status === 503);
+    const asked = limited && res.headers && typeof res.headers.get === 'function' ? parseRetryAfter(res.headers.get('Retry-After'), Date.now()) : null;
+    const wait = asked !== null ? asked : Math.min(MAIL_BACKOFF_MAX_MS, MAIL_BACKOFF_BASE_MS * Math.pow(2, fails - 1));
+    map[origin] = { fails, until: Date.now() + wait, asked: asked !== null, limited };
+    await writeMailCooldowns(map);
+  }
+
+  async function clearMailFailure(domain) {
+    const origin = netOrigin(baseUrl(domain));
+    if (!origin) return;
+    const map = await readMailCooldowns();
+    if (map[origin]) { delete map[origin]; await writeMailCooldowns(map); }
+  }
+
+  // The wait in force for a domain, or null.
+  async function mailCooldownFor(domain, interactive) {
+    let origin;
+    try { origin = netOrigin(baseUrl(domain)); } catch (err) { return null; }
+    const entry = origin ? (await readMailCooldowns())[origin] : null;
+    if (!entry || Date.now() >= entry.until) return null;
+    if (interactive && !entry.asked) return null;
+    return entry;
+  }
+
   async function signedMailCheck(identity, domain, credentials, opts, retried) {
     const webauthn = !identity.privateKeyJwk;
     const session = webauthn ? await getMailSession(identity, domain, !!opts.interactive) : null;
@@ -10941,9 +11015,10 @@ const AtlasWallet = (() => {
         ...(webauthn ? { delegation: session.delegation } : {})
       })
     });
-    if (res.ok) return res.json();
+    if (res.ok) { await clearMailFailure(domain); return res.json(); }
     const err = await res.json().catch(() => null);
     const code = err && err.code;
+    if (res.status === 429 || res.status >= 500) await noteMailFailure(domain, res);
     if (!retried && code === 'stale-request' && err.serverTime && Number.isFinite(Date.parse(err.serverTime))) {
       mailClockOffsets.set(domain, Date.parse(err.serverTime) - Date.now());
       if (webauthn) await putMailSession(domain + '|' + identity.publicKey, null);
@@ -10951,6 +11026,31 @@ const AtlasWallet = (() => {
     }
     if (webauthn && (code === 'session-expired' || code === 'bad-delegation')) await putMailSession(domain + '|' + identity.publicKey, null);
     return null;
+  }
+
+  // The automatic check, as the wallet pages run it on their timers. At most one runs at a time for an identity across every wallet
+  // page in the browser, and a run is skipped when another page began one less than 80% of an interval ago, so having several
+  // Domain Atlas tabs open does not multiply the requests. Resolves to { ran, count, changed } (or { ran: false, reason }).
+  const memoryLoopStarts = new Map();
+  async function runScheduledMailCheck() {
+    const identity = await getIdentity();
+    if (!identity) return { ran: false, reason: 'locked' };
+    const intervalMs = (await getMailSettings()).intervalMinutes * 60 * 1000;
+    const key = identity.publicKey;
+    const body = async () => {
+      let startedAt = memoryLoopStarts.get(key) || 0;
+      try { const got = await chrome.storage.session.get('atlasMailLoop'); startedAt = Math.max(startedAt, ((got.atlasMailLoop || {})[key]) || 0); } catch (err) { /* the in-memory record stands */ }
+      if (Date.now() - startedAt < intervalMs * 0.8) return { ran: false, reason: 'recent' };
+      memoryLoopStarts.set(key, Date.now());
+      try { const got = await chrome.storage.session.get('atlasMailLoop'); await chrome.storage.session.set({ atlasMailLoop: { ...(got.atlasMailLoop || {}), [key]: Date.now() } }); } catch (err) { /* not shared */ }
+      lastMailCheckChanged = false;
+      const count = await checkAllMail({ scheduled: true });
+      return { ran: true, count, changed: lastMailCheckChanged };
+    };
+    if (typeof navigator !== 'undefined' && navigator.locks && typeof navigator.locks.request === 'function') {
+      return navigator.locks.request('atlas-mail-loop:' + key, { ifAvailable: true }, (lock) => (lock ? body() : { ran: false, reason: 'running' }));
+    }
+    return body();
   }
 
   // The actual periodic check: gathers every domain the current self
@@ -11021,6 +11121,7 @@ const AtlasWallet = (() => {
     // New arrivals are collected here and merged into the stored lists at
     // the end, under the lock, against a fresh read; `existing` and
     // `existingChat` above are only used to recognise what is already known.
+    let changedByUpdates = false;
     const incomingMail = [];
     const incomingChat = [];
     const incomingFriend = [];
@@ -11031,6 +11132,8 @@ const AtlasWallet = (() => {
       try {
         const base = baseUrl(domain);
         if (originIsDown(base)) continue; // failed moments ago; tried again on a later cycle
+        // A domain that asked the wallet to wait, or that has been failing, is left alone until its time is up.
+        if (await mailCooldownFor(domain, !!opts.interactive)) continue;
         // Best-effort: give this domain this identity's encryption key for
         // every credential it might address mail to (see
         // registerMailEncryptionKey's own comment for why domain-to-
@@ -11075,6 +11178,9 @@ const AtlasWallet = (() => {
         outcomeKnown = true;
         // A passkey identity that has no open session is not asked for a prompt in the background: nothing was tried.
         if (!answered) {
+          // A domain that is only busy or asked for time is not a problem with the service, so it is not recorded as one.
+          const waiting = await mailCooldownFor(domain, false);
+          if (waiting && waiting.limited) continue;
           if (identity.privateKeyJwk || opts.interactive) await recordServiceOutcome(identity, domain, 'mail', false, 'the domain did not answer, or refused the signed request');
           continue;
         }
@@ -11165,12 +11271,16 @@ const AtlasWallet = (() => {
             incomingMail.push({ message: { ...message, subject: resolved.subject, body: resolved.body, domain }, read: false, receivedAt: new Date().toISOString() });
           }
         }
+        if (updates.length) changedByUpdates = true;
         await processAssetUpdates(identity.publicKey, domain, updates);
         await reconcileSubmittedTradesFromMail(identity.publicKey, verifiedHere);
         if (staleOnServer.length) await deleteMessagesOnServer(identity, domain, staleOnServer, assets);
       } catch (err) {
         // unreachable domain — move on, don't let it block the others
-        if (!outcomeKnown) await recordServiceOutcome(identity, domain, 'mail', false, 'the domain could not be reached');
+        if (!outcomeKnown) {
+          try { await noteMailFailure(domain, null); } catch (e) { /* the in-memory rest in fetch() still applies */ }
+          await recordServiceOutcome(identity, domain, 'mail', false, 'the domain could not be reached');
+        }
       }
     }
 
@@ -11214,9 +11324,10 @@ const AtlasWallet = (() => {
     try { await processCallMessages(identity, incomingCall); } catch (err) { /* retried on the next check */ }
     try { await flushFriendNotices(); } catch (err) { /* retried on the next check */ }
     try { await syncFriendsToPostOffices(); } catch (err) { /* retried on the next check */ }
-    const settings = await getMailSettings();
-    settings.lastCheckedAt = new Date().toISOString();
-    await chrome.storage.local.set({ atlasMailSettings: settings });
+    // Only what changed is written, so an interval the person never chose is not turned into a saved one.
+    const { atlasMailSettings: storedSettings } = await chrome.storage.local.get('atlasMailSettings');
+    await chrome.storage.local.set({ atlasMailSettings: { ...(storedSettings || {}), lastCheckedAt: new Date().toISOString() } });
+    lastMailCheckChanged = newCount > 0 || changedByUpdates || incomingChat.length > 0 || incomingFriend.length > 0 || incomingCall.length > 0;
     return newCount;
   }
 
@@ -11888,7 +11999,7 @@ const AtlasWallet = (() => {
   // Joins a service the domain advertises, as the identity the wallet is acting as. The domain issues a membership credential to
   // that identity's public key (the same request the Join buttons in a world make); switching the service on is part of joining.
   async function joinService(domainInput, key) {
-    const spec = key === 'postOffice' || key === 'tradingStation' ? AtlasServices.OPERATES[key] : null;
+    const spec = key === 'postOffice' || key === 'tradingStation' || key === 'membership' ? AtlasServices.OPERATES[key] : null;
     if (!spec) throw new Error('This wallet cannot join that service from here.');
     const services = getServices();
     const view = await services.service(domainInput, key);
@@ -11979,7 +12090,7 @@ const AtlasWallet = (() => {
     getInventoryFilterSettings, setInventoryFilterSettings,
     getAutoLockMinutes, setAutoLockMinutes,
     setAlias, clearAlias, getAlias,
-    getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,
+    getMailSettings, setMailCheckInterval, resetMailCheckInterval, runScheduledMailCheck, DEFAULT_MAIL_INTERVAL_MINUTES, getMail, markMailRead, checkAllMail,
     markAllMailRead, deleteMailMessage, clearAllMail, claimMailGift, sendUserMail, getPostOfficeMemberships,
     // SPEC.md §3.8.2 — pending wallet-bridge asset offers. queueBridgeOffer
     // is called by confirm-bridge.js itself on approval (same unrestricted-

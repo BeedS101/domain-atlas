@@ -1,6 +1,7 @@
 // The wallet's Services tab, driven the way a person would, in the real extension against a throw-away demo issuer that
-// advertises a Post Office: add a domain, read what it advertises, open Global Mail, join, see the membership card on the
-// service's page, check mail, set the handle and mail mode, switch the service off and on, and remove the domain.
+// advertises a Post Office, site chat and a calendar: add a domain, see that only the service that needs a membership card is
+// listed, open Global Mail, join, see the membership card on the service's page, read what switching it off stops, check mail, set
+// the handle and mail mode, switch the service off and on, move the check rate and back to the default, and remove the domain.
 // It also covers what must not happen: adding switches nothing on, nothing is sent while a service is off, the other identity
 // has its own list, removing keeps the card, and a backup brings the choices back.
 //
@@ -64,6 +65,7 @@ const HANDLE = 'svc' + Date.now().toString(36);
     await waitText(/Add localhost:8002 to Services\?/);
     const preview = await section();
     check('adding asks first, lists what the domain advertises, and says nothing is switched on', /Global Mail/.test(preview) && /Nothing is switched on/.test(preview) && /nothing about your identity or credentials is sent/.test(preview), preview);
+    check('only the service that needs a membership card is listed; the others are only counted', !/Site chat|Calendar/.test(preview) && /2 more services that do not need a card/.test(preview), preview);
     check('nothing is added until the person confirms', (await state()).domains.length === 0);
     await page.click('#servicesSection button:has-text("Cancel")');
     await waitText(/No domains added yet/);
@@ -78,6 +80,7 @@ const HANDLE = 'svc' + Date.now().toString(36);
     check('adding sent no mail request and presented no identity', (await sent()).slice(before).every((s) => /\.well-known\/spatial\.json GET/.test(s)), (await sent()).slice(before));
     const card = await text('.svc-domain[data-domain="' + D + '"]');
     check('the card lists Global Mail with a status that is not green', /Global Mail/.test(card) && (await page.$eval('.svc-service[data-service="postOffice"] .svc-status', (e) => e.dataset.state)) !== 'active', card);
+    check('services that need no card are not listed at all', !/Site chat|Calendar|Scanner|Directory|Asset Studio|Chain Labs/.test(card) && (await page.$$('.svc-domain[data-domain="' + D + '"] .svc-service')).length === 1, card);
 
     console.log('--- Global Mail settings: joining ---');
     await openSettings('postOffice');
@@ -85,6 +88,8 @@ const HANDLE = 'svc' + Date.now().toString(36);
     let b = await badge();
     check('before joining it is grey and says it is not set up', b && b.state === 'unknown' && /not set up|Not set up|joined/i.test(await text('#svcStatusBlock')), b);
     check('the page shows the identity it is for', /Main identity/.test(await text('#svcSettings')));
+    const enabledText = await text('#svcSettings');
+    check('what switching it off stops is written out, not hidden', /private mail, friend requests, chat, call invitations/.test(enabledText) && /When off, the card is not presented/.test(enabledText) && /nothing else you hold is affected/.test(enabledText), enabledText);
     check('no invented controls: nothing to load or configure until joined', (await page.$('#svcLoadSettings')) === null && (await page.$('#svcHandleInput')) === null);
     await page.click('#svcJoin');
     await page.waitForSelector('#svcJoinConfirm');
@@ -109,6 +114,17 @@ const HANDLE = 'svc' + Date.now().toString(36);
     check('after a successful check it is green with an icon and words', b && b.state === 'active' && /Active/i.test(b.text), b);
     check('the status says how fresh it is', /ago|moment/.test(await text('#svcStatusBlock')), await text('#svcStatusBlock'));
     if (process.env.SERVICES_SHOT) await page.screenshot({ path: process.env.SERVICES_SHOT + '-settings.png' });
+
+    console.log('--- how often it checks ---');
+    check('the page says the usual rate is every minute and that it is a target', /every minute \(the usual rate\)/.test(await text('#svcInterval')) && /target, not a promise/.test(await text('#svcInterval')), await text('#svcInterval'));
+    check('at the usual rate there is nothing to reset', (await page.$('#svcResetInterval')) === null);
+    await w.wallet(() => AtlasWallet.setMailCheckInterval(5));
+    await page.evaluate(() => AtlasServicesTab.render());
+    await page.waitForSelector('#svcResetInterval');
+    check('a rate the person set is kept and shown as theirs', /every 5 minutes \(a rate you set\)/.test(await text('#svcInterval')), await text('#svcInterval'));
+    await page.click('#svcResetInterval');
+    await page.waitForFunction(() => !document.getElementById('svcResetInterval'), null, { timeout: 10000 });
+    check('one click returns to the 1-minute default', (await w.wallet(() => AtlasWallet.getMailSettings())).intervalMinutes === 1 && /every minute \(the usual rate\)/.test(await text('#svcInterval')));
 
     console.log('--- Global Mail settings: handle and mail mode ---');
     await page.click('#svcLoadSettings');

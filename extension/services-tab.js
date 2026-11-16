@@ -1,4 +1,5 @@
-// The Services tab of the wallet: the domains the person added, what each advertises, and one settings page per service. The rules
+// The Services tab of the wallet: the domains the person added, the services of each that need a membership card or another
+// credential held in this wallet, and one settings page per service. The rules
 // live in services-core.js and the operations in wallet.js (the Post Office calls, joining, checking); this file only draws them and
 // asks the person before anything is added or joined. Every piece of text that comes from a domain is set with textContent, so a
 // domain can name a service and give an address but cannot put markup or script into the wallet.
@@ -54,6 +55,14 @@
     await render();
   }
 
+  // A switch the person flips while another step is still finishing waits for it instead of being dropped, so the box never shows
+  // a choice that was not saved. If the other step does not finish, the page is drawn again from what is saved.
+  async function whenIdle() {
+    const end = Date.now() + 10000;
+    while (busy && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 50));
+    return !busy;
+  }
+
   function button(label, onClick, extra, id) {
     const b = el('button', { type: 'button', textContent: label });
     if (extra) b.className = extra;
@@ -94,6 +103,8 @@
   const WARNING_TEXT = (w, labels) => {
     if (w.startsWith('duplicate-key:')) return 'This domain\'s manifest names "' + w.slice(14) + '" more than once. The wallet used the last one; the domain should fix it.';
     if (w.startsWith('url-ignored:')) return 'The page address given for ' + (labels[w.slice(12)] || 'a service') + ' is not on this domain, so it is not shown.';
+    if (w.startsWith('credential-descriptor-ignored:')) return 'This domain\'s description of the card ' + (labels[w.slice(30)] || 'a service') + ' needs is not valid, so the wallet ignored it.';
+    if (w.startsWith('credential-class-ignored:')) return 'This domain names a different card for ' + (labels[w.slice(25)] || 'a service') + ' than the one the wallet uses for it. The wallet kept its own.';
     return '';
   };
 
@@ -108,6 +119,7 @@
     const bits = [];
     if (!s.advertised) bits.push('from the membership card you hold');
     if (s.operates) bits.push(s.enabled ? 'switched on' : 'switched off');
+    else bits.push('card shown, service not used from here');
     if (bits.length) row.appendChild(el('div', { className: 'meta', textContent: bits.join(' · ') }));
     if (s.status.state === 'problem') row.appendChild(el('div', { className: 'svc-issue', role: 'status', textContent: s.status.text }));
     const actions = el('div', { className: 'item-actions' });
@@ -124,7 +136,7 @@
     d.services.forEach((s) => { labels[s.key] = s.label; });
     (d.warnings || []).map((w) => WARNING_TEXT(w, labels)).filter(Boolean).forEach((t) => card.appendChild(el('div', { className: 'svc-issue', role: 'status', textContent: t })));
     if (d.problem) card.appendChild(el('div', { className: 'svc-issue', role: 'status', textContent: d.problem + ' Showing what it advertised before.' }));
-    if (!d.services.length) card.appendChild(el('div', { className: 'meta', textContent: 'This domain advertises no services.' }));
+    if (!d.services.length) card.appendChild(el('div', { className: 'meta', textContent: 'This domain advertises no services that need a membership card.' }));
     d.services.forEach((s) => card.appendChild(serviceRow(d, s)));
     const actions = el('div', { className: 'item-actions' });
     actions.appendChild(button('Refresh', () => act(() => services().refresh(d.domain).then(() => null), 'Read again.'), '', null));
@@ -133,26 +145,30 @@
     return card;
   }
 
+  // What the domain advertises that needs a card. Services that do not need one are not part of Services; they are only counted.
   function advertisedList(found) {
     const box = el('div', { className: 'svc-advertised' });
-    if (!found.services.length) box.appendChild(el('div', { className: 'meta', textContent: 'It advertises no services.' }));
+    if (!found.services.length) box.appendChild(el('div', { className: 'meta', textContent: 'It advertises no services that need a membership card.' }));
     found.services.forEach((s) => box.appendChild(el('div', { className: 'svc-advertised-item', textContent: s.label })));
+    if (found.others > 0) box.appendChild(el('div', { className: 'meta', textContent: (found.others === 1 ? 'It advertises one more service that does not' : 'It advertises ' + found.others + ' more services that do not') + ' need a card, so ' + (found.others === 1 ? 'it is' : 'they are') + ' not listed here.' }));
     return box;
   }
 
   function discoverSection(found) {
     const box = el('div', { className: 'info-card svc-discover', id: 'svcDiscover', role: 'group', 'aria-labelledby': 'svcDiscoverHeading' });
-    box.appendChild(el('div', { className: 'name', id: 'svcDiscoverHeading', textContent: 'Discover services on this domain' }));
+    box.appendChild(el('div', { className: 'name', id: 'svcDiscoverHeading', textContent: 'Services on this domain that need a membership card' }));
     box.appendChild(el('div', { className: 'meta', textContent: 'Currently visiting: ' + found.domain }));
     box.appendChild(advertisedList(found));
     box.appendChild(el('div', { className: 'meta', textContent: 'Nothing has been added, switched on or sent. Adding only lists the domain here.' }));
-    const actions = el('div', { className: 'item-actions' });
-    actions.appendChild(button('Add domain to Services…', () => { panel = { kind: 'add', domain: found.domain, preview: found }; render(); }, '', 'svcDiscoverAdd'));
-    box.appendChild(actions);
+    if (found.services.length) {
+      const actions = el('div', { className: 'item-actions' });
+      actions.appendChild(button('Add domain to Services…', () => { panel = { kind: 'add', domain: found.domain, preview: found }; render(); }, '', 'svcDiscoverAdd'));
+      box.appendChild(actions);
+    }
     return box;
   }
 
-  async function startAdd(input) {
+  async function startAdd(input, holdsCard) {
     if (busy) return;
     busy = true;
     notice = '';
@@ -160,7 +176,7 @@
       const found = await services().discover(input);
       const listed = (await services().load()).domains.some((x) => x.domain === found.domain);
       if (listed) throw new Error(found.domain + ' is already in Services.');
-      panel = { kind: 'add', domain: found.domain, preview: found };
+      panel = { kind: 'add', domain: found.domain, preview: found, holdsCard: !!holdsCard };
     } catch (err) { notice = err && err.message ? err.message : 'That did not work.'; }
     busy = false;
     await render();
@@ -168,10 +184,16 @@
 
   function addPanel() {
     const p = panel;
-    const lines = ['The wallet will remember this domain and the services it advertises. Nothing is switched on, you are not registered, and nothing about your identity or credentials is sent to it.'];
     const labels = {};
     p.preview.services.forEach((s) => { labels[s.key] = s.label; });
     const warnings = p.preview.warnings.map((w) => WARNING_TEXT(w, labels)).filter(Boolean);
+    // A domain with nothing that needs a card has nothing to list, unless the person already holds one of its cards.
+    if (!p.preview.services.length && !p.holdsCard) {
+      const none = stepBox(p.domain + ' has nothing to add', ['Services lists what needs a membership card or another credential held in this wallet, and this domain advertises none. Nothing was added or sent.'].concat(warnings), [button('Close', () => { panel = null; render(); }, '', 'svcAddClose')]);
+      none.insertBefore(advertisedList(p.preview), none.children[1]);
+      return none;
+    }
+    const lines = ['The wallet will remember this domain and the services it advertises that need a membership card. Nothing is switched on, you are not registered, and nothing about your identity or credentials is sent to it.'];
     const box = stepBox('Add ' + p.domain + ' to Services?', lines.concat(warnings), [
       button('Add domain to Services', () => act(async () => { const d = p.domain; const preview = p.preview; panel = null; await services().addDomain(d, preview); discovery = null; }, 'Added.'), '', 'svcAddConfirm'),
       cancel()
@@ -181,7 +203,7 @@
   }
 
   async function listPage(host, data) {
-    host.appendChild(el('p', { className: 'meta', textContent: 'Services are what a domain offers, such as Global Mail or a Trading Station. Add a domain to see what it advertises, open a service to set it up, and switch each one on or off. This list is kept separately for each identity.' }));
+    host.appendChild(el('p', { className: 'meta', textContent: 'Services are what a domain offers that needs a membership card or another credential held in this wallet, such as Global Mail, a Trading Station or Domain Membership. Add a domain to see them, join one, set it up, and switch each on or off. Other documents you hold are under Other documents. This list is kept separately for each identity.' }));
     host.appendChild(el('div', { id: 'servicesStatus', className: 'empty-note', role: 'status', 'aria-live': 'polite', textContent: notice }));
     if (panel && panel.kind === 'remove') {
       const lines = ['It comes off this list, with your on and off choices for it. Your membership cards and any registration at the domain are not touched, and nothing is sent to the domain.'];
@@ -194,13 +216,13 @@
     data.domains.forEach((d) => host.appendChild(domainCard(d)));
     if (data.found.length) {
       host.appendChild(el('div', { className: 'subhead', textContent: 'Found in your wallet' }));
-      host.appendChild(el('p', { className: 'meta', textContent: 'You hold service credentials from these domains but have not added them. Adding one shows its services and the cards that belong to them.' }));
+      host.appendChild(el('p', { className: 'meta', textContent: 'You hold membership cards from these domains but have not added them. Adding one shows its services and the cards that belong to them.' }));
       data.found.forEach((f) => {
         const card = el('div', { className: 'info-card svc-found', role: 'group', 'aria-label': f.domain, 'data-domain': f.domain });
         card.appendChild(el('div', { className: 'svc-domain-name', textContent: f.domain }));
         card.appendChild(el('div', { className: 'meta', textContent: 'You hold: ' + f.services.map((s) => s.label).join(', ') }));
         const actions = el('div', { className: 'item-actions' });
-        actions.appendChild(button('Add to Services…', () => startAdd(f.domain), '', null));
+        actions.appendChild(button('Add to Services…', () => startAdd(f.domain, true), '', null));
         card.appendChild(actions);
         host.appendChild(card);
       });
@@ -223,10 +245,12 @@
   }
 
   async function credentialsSection(host, d, s) {
-    host.appendChild(el('div', { className: 'subhead', textContent: s.key === 'membership' ? 'Membership card' : 'Membership card' }));
+    host.appendChild(el('div', { className: 'subhead', textContent: 'Membership card' }));
     if (!s.credentials.length) {
-      host.appendChild(el('div', { className: 'empty-note', textContent: 'You have not joined ' + s.label + ' at ' + d.domain + ' with this identity.' }));
-      if ((s.key === 'postOffice' || s.key === 'tradingStation') && s.advertised) {
+      host.appendChild(el('div', { className: 'empty-note', textContent: s.operates
+        ? 'You have not joined ' + s.label + ' at ' + d.domain + ' with this identity.'
+        : 'You do not hold the card ' + s.label + ' needs (' + s.credentialClass + ') from ' + d.domain + ' with this identity.' }));
+      if (s.operates && s.advertised) {
         host.appendChild(el('div', { className: 'item-actions' }, [button('Join…', () => { panel = { kind: 'join', domain: d.domain, key: s.key, label: s.label }; render(); }, '', 'svcJoin')]));
       }
       return;
@@ -258,6 +282,36 @@
     if (cfg.openMail) host.appendChild(el('div', { className: 'item-actions' }, [button('Open Mail settings', () => cfg.openMail(), '', 'svcOpenMail')]));
   }
 
+  // What switching a service on or off does, in words that match what the wallet really sends. One signed mail check per domain
+  // carries everything addressed to a card, so Global Mail cannot be switched off for mail alone.
+  function enabledNotes(d, s) {
+    if (s.key === 'tradingStation') return ['Switching this off only changes what this page shows; the wallet does not contact a Trading Station in the background.'];
+    if (s.key === 'membership') {
+      return [
+        'When on, the wallet presents your Domain Membership card to ' + d.domain + ' with its regular check, so that anything addressed to the card and any notice about it (revoked, replaced, suspended) reaches you.',
+        'When off, the card is not presented and none of that arrives.'
+      ];
+    }
+    return [
+      'When on, the wallet presents this card to ' + d.domain + ' with a signed check about once a minute while a wallet page is open and unlocked. That one check is also how private mail, friend requests, chat, call invitations and notices about the card (revoked, replaced, suspended) reach you.',
+      'When off, the card is not presented, so none of those arrive for it and the wallet will not hear if the domain revokes it. Nothing is sent for it in the background, and nothing else you hold is affected.'
+    ];
+  }
+
+  // The interval of the automatic check, which is one setting for the whole wallet. One minute is the usual rate; it is a target.
+  async function intervalSection(host, d, s) {
+    let settings = null;
+    try { settings = await AtlasWallet.getMailSettings(); } catch (err) { settings = null; }
+    if (!settings) return;
+    const minutes = settings.intervalMinutes;
+    const line = 'Automatic check: every ' + (minutes === 1 ? 'minute' : minutes + ' minutes') + (settings.intervalIsDefault ? ' (the usual rate)' : ' (a rate you set)') + '. This is a target, not a promise: a check waits while another is running or while the domain asks the wallet to slow down, so mail can arrive a little later.';
+    const kids = [el('div', { className: 'meta', id: 'svcInterval', textContent: line }), 'The status above comes from the checks the wallet already makes; it adds no requests of its own.'];
+    if (!settings.intervalIsDefault && minutes !== 1) {
+      kids.push(el('div', { className: 'item-actions' }, [button('Use the 1-minute default', () => act(async () => { await AtlasWallet.resetMailCheckInterval(); if (cfg.intervalChanged) await cfg.intervalChanged(); }, 'Now checking about once a minute.'), '', 'svcResetInterval')]));
+    }
+    host.appendChild(row('Checking rate', ...kids));
+  }
+
   async function settingsPage(host, data, current) {
     const d = data.domains.find((x) => x.domain === view.domain);
     const s = d && d.services.find((x) => x.key === view.key);
@@ -282,29 +336,28 @@
     if (s.operates) {
       const box = el('input', { type: 'checkbox', id: 'svcEnabled', checked: !!s.enabled });
       const label = el('label', { className: 'check-row', for: 'svcEnabled' }, [box, el('span', { textContent: 'Service enabled' })]);
-      box.addEventListener('change', () => act(() => services().setEnabled(d.domain, s.key, box.checked).then(() => null)));
-      page.appendChild(row('Enabled', label, s.key === 'tradingStation'
-        ? 'Switching this off only changes what this page shows; the wallet does not contact a Trading Station in the background.'
-        : 'When on, the wallet checks ' + d.domain + ' for mail in the background. When off, it does not present this membership card to the domain.'));
+      box.addEventListener('change', async () => {
+        const want = box.checked;
+        if (!(await whenIdle())) { await render(); return; }
+        await act(() => services().setEnabled(d.domain, s.key, want).then(() => null));
+      });
+      page.appendChild(row('Enabled', label, ...enabledNotes(d, s)));
     } else {
-      page.appendChild(row('Enabled', 'Not applicable: this wallet does not use ' + s.label + ' from here yet.'));
+      page.appendChild(row('Enabled', 'Not applicable: this wallet shows the card for ' + s.label + ' but does not use the service from here yet.'));
     }
     page.appendChild(row('Identity', identity ? identity.label + ' · ' + shortKey(identity.publicKey) : 'Not available',
       'Services are kept separately for each identity. To use another one, switch identity in the wallet.'));
 
-    if (s.operates) await credentialsSection(page, d, s);
+    await credentialsSection(page, d, s);
+    if (s.operates && (s.key === 'postOffice' || s.key === 'membership')) await intervalSection(page, d, s);
 
     if (s.operates && s.credentials.length && s.explicit !== false) {
       page.appendChild(el('div', { className: 'item-actions' }, [button('Check now', () => act(async () => { await AtlasWallet.checkService(d.domain, s.key); }, 'Checked.'), '', 'svcCheckNow')]));
     }
     if (s.key === 'postOffice' && s.credentials.some((c) => c.state === 'valid')) await mailSection(page, d, s);
     if (s.key === 'tradingStation' && s.credentials.length && cfg.openTrade) page.appendChild(el('div', { className: 'item-actions' }, [button('Open Trade', () => cfg.openTrade(d.domain), '', 'svcOpenTrade')]));
-    if (s.key === 'chainLabs') {
-      page.appendChild(el('div', { className: 'meta', textContent: 'Chain Labs coins are kept in the Ledger tab, which has its own list of domains.' }));
-      if (cfg.openLedger) page.appendChild(el('div', { className: 'item-actions' }, [button('Open Ledger', () => cfg.openLedger(), '', 'svcOpenLedger')]));
-    }
-    if (!s.operates && s.key !== 'chainLabs') {
-      page.appendChild(el('div', { className: 'meta', textContent: 'This domain advertises ' + s.label + '. The wallet shows it so you can see what the domain offers, and has nothing to set up for it.' }));
+    if (!s.operates) {
+      page.appendChild(el('div', { className: 'meta', id: 'svcDeclared', textContent: 'This domain says ' + s.label + ' needs a membership card (' + s.credentialClass + '). The wallet shows the card you hold and whether it verifies, and sends nothing to the domain for this service.' }));
     }
     if (s.url) {
       const a = el('a', { href: s.url, target: '_blank', rel: 'noopener noreferrer', id: 'svcServiceLink' });
@@ -374,12 +427,12 @@
 
   // Shows the service a credential belongs to, from the inventory or an activity entry.
   async function revealCredential(ref) {
-    const classKey = AtlasServices.CREDENTIAL_CLASSES[ref.assetClass];
     const domain = ref.domain && AtlasWallet.servicesDomain(ref.domain);
-    if (classKey && domain) {
+    if (domain && ref.assetClass) {
       const data = await services().rows();
-      if (data.domains.some((d) => d.domain === domain)) view = { domain, key: classKey[0] };
-      else view = null;
+      const d = data.domains.find((x) => x.domain === domain);
+      const s = d && d.services.find((x) => x.credentialClass === ref.assetClass);
+      view = s ? { domain, key: s.key } : null;
     }
     await render();
   }

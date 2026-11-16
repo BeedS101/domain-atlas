@@ -377,6 +377,15 @@ function doctor_manifest($root, $host) {
   $top[] = 'size: ' . round($res['size'] / 1024, 1) . ' KB';
   foreach (['chat' => 'chat (domain-wide)', 'tradingStation' => 'trading station', 'calendar' => 'calendar (domain-wide)'] as $k => $label) if (array_key_exists($k, $m)) $top[] = $label . ': ' . doctor_val($m[$k]);
   foreach (['acceptedItemClasses' => 'accepted item classes (default for every world)', 'walletBridge' => 'wallet bridge (default)', 'trustedIssuers' => 'trusted issuers (default)'] as $k => $label) if (array_key_exists($k, $m)) $top[] = $label . ': ' . ($k === 'walletBridge' && is_array($m[$k]) ? 'read ' . doctor_val(isset($m[$k]['read']) ? $m[$k]['read'] : null) : doctor_val($m[$k]));
+  // Service declarations that say a membership credential is needed (SPEC.md section 3.9).
+  foreach (['postOffice', 'mailRelay', 'chat', 'inWorldChat', 'voiceCalling', 'assetStudio', 'chainLabs', 'scanner', 'tradingStation', 'directory', 'calendar', 'domainMembership'] as $svc) {
+    if (!isset($m[$svc]) || !is_array($m[$svc]) || !array_key_exists('requiresCredential', $m[$svc])) continue;
+    $d = $m[$svc];
+    if ($d['requiresCredential'] !== true) { $P('warn', '"' . $svc . '.requiresCredential" is not exactly true, so it says nothing. Use true, or remove it.'); continue; }
+    $cls = isset($d['credentialClass']) ? $d['credentialClass'] : null;
+    if (!is_string($cls) || strlen($cls) > 128 || !preg_match('/^[a-z][a-z0-9]*(\.[a-z0-9][a-z0-9-]*){1,6}$/', $cls)) $P('warn', '"' . $svc . '" says it requires a credential but "credentialClass" is missing or is not a class name such as atlas.postoffice.membership, so wallets ignore it.');
+    if (empty($d['enabled']) || $d['enabled'] !== true) $P('warn', '"' . $svc . '" has requiresCredential but "enabled" is not true, so the service is not advertised at all.');
+  }
   if (isset($m['worldDropPolicy'])) $top[] = 'world drop policy: set';
   if (isset($m['emailTickets']) && is_array($m['emailTickets'])) $top[] = 'email tickets: intake address ' . (!empty($m['emailTickets']['intakeAddress']) ? 'set' : 'not set');
   if (array_key_exists('fileTransfer', $m)) $top[] = 'file transfer: ' . (is_array($m['fileTransfer']) && isset($m['fileTransfer']['classes']) && is_array($m['fileTransfer']['classes']) ? 'classes ' . doctor_val($m['fileTransfer']['classes']) : 'every eligible class');

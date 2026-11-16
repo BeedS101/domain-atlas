@@ -113,6 +113,7 @@ function dir_service_types() {
     ['key' => 'tradingStation', 'label' => 'Trading station', 'category' => 'trading', 'aliases' => ['trading']],
     ['key' => 'directory', 'label' => 'Directory', 'category' => 'directory', 'aliases' => []],
     ['key' => 'calendar', 'label' => 'Calendar', 'category' => 'other', 'aliases' => []],
+    ['key' => 'domainMembership', 'label' => 'Domain membership', 'category' => 'communication', 'aliases' => []],
   ];
 }
 

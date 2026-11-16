@@ -6775,16 +6775,17 @@ async function runWalletRecovery() {
 // the acting one when its reads finish, is dropped instead of painting the previous identity's holdings over the new ones.
 let inventoryRefreshSeq = 0;
 
-// The domains in the acting identity's Services list; empty when Services cannot be read (every document then stays in the list).
+// The "domain|class" pairs whose credentials belong to a service of a domain in the acting identity's Services list; empty when
+// Services cannot be read (every document then stays in the list).
 async function listedServiceDomains() {
-  try { return new Set((await AtlasWallet.getServices().load()).domains.map((d) => d.domain)); } catch (err) { return new Set(); }
+  try { return await AtlasWallet.getServices().associations(); } catch (err) { return new Set(); }
 }
 
-// A credential of a service the person added, at that service's domain: it is shown on the service's page, not in the document list.
+// A credential of a service the person added, issued by that service's domain: it is shown on the service's page, not under Other
+// documents. Any other document, including one issued by a listed domain for something that is not a service, stays in the list.
 function belongsToListedService(entry, listed) {
-  const cls = entry.credential.asset.class;
   const domain = AtlasWallet.servicesDomain(entry.credential.issuer.domain);
-  return !!domain && !!AtlasServices.CREDENTIAL_CLASSES[cls] && listed.has(domain);
+  return !!domain && listed.has(domain + '|' + entry.credential.asset.class);
 }
 
 async function refreshInventoryDisplay() {
@@ -10263,6 +10264,7 @@ if (window.AtlasServicesTab) {
       renderAssetList(entries, container, { loadable: false, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, fileExportEnabled: true, moveEnabled });
     },
     afterJoin: () => refreshInventoryDisplay(),
+    intervalChanged: () => { restartMailCheckLoop(); return refreshMailDisplay(); },
     openMail: () => { socialTabBtn.click(); const b = document.getElementById('mailSettingsSubtabBtn'); if (b) b.click(); },
     openTrade: () => { if (tradeTabBtn) tradeTabBtn.click(); },
     openLedger: () => { const b = document.getElementById('ledgerSubtabBtn'); if (b) b.click(); }
@@ -14505,24 +14507,39 @@ bindEnterToClick(aliasInput, setAliasBtn);
 // existing content-script-only architecture). setMailCheckInterval calls
 // restartMailCheckLoop() so a changed setting takes effect immediately
 // instead of waiting for the next natural fire.
+// The next check is set when the previous one has finished, so two never overlap on this page, and AtlasWallet.runScheduledMailCheck
+// keeps them from overlapping across pages. The wait is the interval plus or minus a tenth, so wallets that were opened together
+// do not all ask at the same moment.
 let mailCheckTimer = null;
+let mailLoopGeneration = 0;
 async function restartMailCheckLoop() {
-  if (mailCheckTimer) clearInterval(mailCheckTimer);
+  if (mailCheckTimer) clearTimeout(mailCheckTimer);
+  const generation = ++mailLoopGeneration;
   const settings = await AtlasWallet.getMailSettings();
   const ms = Math.max(1, settings.intervalMinutes) * 60 * 1000;
-  mailCheckTimer = setInterval(async () => {
-    await AtlasWallet.checkAllMail();
-    // Cheap either way — this also keeps the tab's unread badge current
-    // even when the Mail tab itself isn't the one currently open. Also
-    // picks up any item reissue (SPEC.md §5.1.1) checkAllMail just
-    // adopted, across every domain this wallet holds something from —
-    // this is the "even when you're not standing in that domain's world"
-    // half of that feature; entering a world (see checkItemUpdatesForDomain
-    // below, called from enterWorld) is the immediate, single-domain half.
-    await refreshMailDisplay();
-    await refreshInventoryDisplay();
-    await refreshMessagingDisplay(); // task #111 — same "keep it current in the background" reasoning
-  }, ms);
+  const schedule = () => {
+    if (generation !== mailLoopGeneration) return;
+    mailCheckTimer = setTimeout(tick, Math.round(ms * (0.9 + Math.random() * 0.2)));
+  };
+  const tick = async () => {
+    try {
+      const result = await AtlasWallet.runScheduledMailCheck();
+      if (generation !== mailLoopGeneration) return;
+      if (result.ran) {
+        // Cheap: keeps the unread badge current even when the Mail tab isn't open.
+        await refreshMailDisplay();
+        // Only when the check brought something in: this also picks up any item reissue (SPEC.md §5.1.1) it adopted, across
+        // every domain this wallet holds something from; entering a world (checkItemUpdatesForDomain below) is the immediate,
+        // single-domain half of that feature.
+        if (result.changed) {
+          await refreshInventoryDisplay();
+          await refreshMessagingDisplay();
+        }
+      }
+    } catch (err) { /* the next tick tries again */ }
+    schedule();
+  };
+  schedule();
 }
 
 // The single-domain, fire-immediately counterpart to the periodic loop

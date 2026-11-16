@@ -49,9 +49,10 @@
     { key: 'calendar', label: 'Calendar', category: 'other' }
   ];
 
-  // A service the wallet shows for a domain because of a credential the person holds, not because a manifest names it:
-  // holding the domain's membership card is the subscription (SPEC.md §11.1), and no manifest field announces it.
-  const MEMBERSHIP = { key: 'membership', label: 'Domain Membership', category: 'communication', implicit: true };
+  // General domain membership. A manifest can announce it as `domainMembership` (SPEC.md §3.9); domains that have not, and
+  // every domain for a person who already holds the card, still get it from the card alone: holding the domain's membership
+  // card is the subscription (SPEC.md §11.1).
+  const MEMBERSHIP = { key: 'membership', label: 'Domain Membership', category: 'communication', manifestName: 'domainMembership', implicit: true };
 
   // What the wallet can do for a service itself. A service that is not listed here is shown honestly as not used from here.
   //   credentialClass  the credential that proves the person joined
@@ -133,6 +134,29 @@
     return u.href;
   }
 
+  // A credential class as a manifest names it: dotted lower-case words, no longer than any real class.
+  const CLASS_RE = /^[a-z][a-z0-9]*(?:\.[a-z0-9][a-z0-9-]*){1,6}$/;
+  function validClass(v) { return typeof v === 'string' && v.length <= 128 && CLASS_RE.test(v); }
+
+  // Which credential a service needs, if any. A manifest names it (`requiresCredential: true` with a `credentialClass`) but only
+  // describes what the domain asks for: it never says a credential is valid, and it cannot change which credential the wallet
+  // withholds for a service the wallet runs itself. For those three the wallet's own class stands, which is also what a domain
+  // that has not added the descriptor gets. A declared class on any other service only says what card it needs.
+  //   returns { class, source: 'known' | 'manifest' } or null (a service that needs no card is not listed in Services)
+  function credentialNeed(key, declared, warnings) {
+    const known = OPERATES[key] ? OPERATES[key].credentialClass : null;
+    let named = null;
+    if (isObject(declared) && declared.requiresCredential === true) {
+      if (validClass(declared.credentialClass)) named = declared.credentialClass;
+      else warnings.push('credential-descriptor-ignored:' + key);
+    }
+    if (known) {
+      if (named && named !== known) warnings.push('credential-class-ignored:' + key);
+      return { class: known, source: named === known ? 'manifest' : 'known' };
+    }
+    return named ? { class: named, source: 'manifest' } : null;
+  }
+
   // What a domain's manifest advertises, as the wallet will show it. `manifest` is whatever the domain served: it is only read,
   // never trusted for which domain it describes (that is the domain it was fetched from).
   function readServices(domain, manifest, baseOrigin, normalize) {
@@ -142,8 +166,8 @@
     const claimed = normalize(manifest.domain);
     if (claimed !== domain) return { problem: 'domain-mismatch', text: 'That manifest was served by ' + domain + ' but says it belongs to a different domain, so it was not used.', warnings };
     const services = [];
-    for (const type of SERVICE_TYPES) {
-      const name = [type.key].concat(type.aliases || []).find((n) => Object.prototype.hasOwnProperty.call(manifest, n));
+    for (const type of SERVICE_TYPES.concat([MEMBERSHIP])) {
+      const name = [type.manifestName || type.key].concat(type.aliases || []).find((n) => Object.prototype.hasOwnProperty.call(manifest, n));
       if (name === undefined) continue;
       const declared = manifest[name];
       let url = null;
@@ -154,7 +178,7 @@
           if (!url) warnings.push('url-ignored:' + type.key);
         }
       } else continue;
-      services.push({ key: type.key, label: type.label, category: type.category, url });
+      services.push({ key: type.key, label: type.label, category: type.category, url, credential: credentialNeed(type.key, declared, warnings) });
     }
     return { problem: null, services, warnings };
   }
@@ -212,8 +236,18 @@
       for (const domain of Object.keys(raw.manifests)) {
         const m = raw.manifests[domain];
         if (!listed.has(domain) || !isObject(m) || !Array.isArray(m.services)) continue;
-        const services = m.services.filter((x) => isObject(x) && TYPE_BY_KEY.has(x.key) && !TYPE_BY_KEY.get(x.key).implicit)
-          .map((x) => ({ key: x.key, label: TYPE_BY_KEY.get(x.key).label, category: TYPE_BY_KEY.get(x.key).category, url: typeof x.url === 'string' && x.url.length <= MAX_URL_CHARS ? x.url : null }));
+        // A service is kept only when it needs a membership card: one the wallet knows, or one whose class was read from a manifest.
+        // Whatever an earlier build saved for services without one is dropped here, so it never comes back into the tab.
+        const services = [];
+        m.services.forEach((x) => {
+          if (!isObject(x) || !TYPE_BY_KEY.has(x.key) || services.some((y) => y.key === x.key)) return;
+          const type = TYPE_BY_KEY.get(x.key);
+          const own = OPERATES[x.key] ? { class: OPERATES[x.key].credentialClass, source: 'known' } : null;
+          const declared = !own && isObject(x.credential) && validClass(x.credential.class) ? { class: x.credential.class, source: 'manifest' } : null;
+          const credential = own || declared;
+          if (!credential) return;
+          services.push({ key: x.key, label: type.label, category: type.category, url: typeof x.url === 'string' && x.url.length <= MAX_URL_CHARS ? x.url : null, credential });
+        });
         s.manifests[domain] = {
           fetchedAt: Number.isFinite(m.fetchedAt) ? m.fetchedAt : null,
           services,
@@ -261,12 +295,18 @@
   }
 
   // The held credentials that belong to `key` at `domain`, each with the state the wallet last saw.
-  function credentialsFor(entries, domain, key, normalize, nowMs) {
-    const spec = OPERATES[key];
-    if (!spec) return [];
-    return (entries || []).filter((e) => e && e.credential && e.credential.asset && e.credential.asset.class === spec.credentialClass
+  // `credentialClass` is given for a service whose card the manifest named; the wallet's own services use their own class.
+  // Only a card this domain issued counts, and one that names another owner than `ownerKey` does not verify as the person's.
+  function credentialsFor(entries, domain, key, normalize, nowMs, credentialClass, ownerKey) {
+    const cls = OPERATES[key] ? OPERATES[key].credentialClass : credentialClass;
+    if (!cls) return [];
+    return (entries || []).filter((e) => e && e.credential && e.credential.asset && e.credential.asset.class === cls
       && e.credential.issuer && normalize(e.credential.issuer.domain) === domain)
-      .map((e) => ({ id: e.credential.id, state: credentialState(e, nowMs), entry: e }));
+      .map((e) => {
+        const owner = e.credential.owner && e.credential.owner.publicKey;
+        const wrongOwner = !!ownerKey && typeof owner === 'string' && owner !== ownerKey;
+        return { id: e.credential.id, state: wrongOwner ? 'invalid' : credentialState(e, nowMs), entry: e };
+      });
   }
 
   const CREDENTIAL_PROBLEM = {
@@ -291,8 +331,15 @@
     const { key, advertised, explicit, enabled, credentials, outcome, nowMs } = input;
     const out = (state, code, label, text, extra) => Object.assign({ state, code, label, text, checkedAt: null, stale: false }, extra || {});
     if (!OPERATES[key]) {
-      return out('unknown', 'unsupported', 'Not used from here',
-        advertised ? 'This domain advertises it, but this wallet has no way to use it from here yet.' : 'This wallet has no way to use this service from here yet.');
+      if (!input.credentialClass) {
+        return out('unknown', 'unsupported', 'Not used from here',
+          advertised ? 'This domain advertises it, but this wallet has no way to use it from here yet.' : 'This wallet has no way to use this service from here yet.');
+      }
+      // A service the manifest says needs a card, which this wallet does not run: the card's own state is shown, never a green.
+      if (!credentials.length) return out('unknown', 'needs-credential', 'Not set up', 'This domain says it needs a membership card. You do not hold one, and this wallet cannot join it from here yet.');
+      const badCard = credentials.find((c) => CREDENTIAL_PROBLEM[c.state]);
+      if (badCard && !credentials.some((c) => c.state === 'valid')) return out('problem', 'credential-' + badCard.state, 'Problem', CREDENTIAL_PROBLEM[badCard.state]);
+      return out('unknown', 'unsupported', 'Not used from here', 'You hold the card for it, but this wallet has no way to use this service from here yet.');
     }
     if (explicit === false) return out('disabled', 'disabled', 'Disabled', 'You turned this off. The wallet does not contact this domain for it in the background.');
     const usable = credentials.filter((c) => c.state === 'valid');
@@ -377,7 +424,12 @@
       const { base, json, duplicates } = await fetchManifest(domain);
       const read = readServices(domain, json, base, normalize);
       if (read.problem) throw fail(read.problem, read.text);
-      const found = { domain, services: read.services, warnings: read.warnings.concat(duplicates.map((k) => 'duplicate-key:' + k)), fetchedAt: nowMs() };
+      // Only services that need a membership card are kept; the rest of what a domain advertises is the directory's to show.
+      const gated = read.services.filter((x) => x.credential);
+      const keys = new Set(gated.map((x) => x.key));
+      const warnings = read.warnings.filter((w) => { const at = w.indexOf(':'); return at < 0 || !TYPE_BY_KEY.has(w.slice(at + 1)) || keys.has(w.slice(at + 1)); })
+        .concat(duplicates.map((k) => 'duplicate-key:' + k));
+      const found = { domain, services: gated, others: read.services.length - gated.length, warnings, fetchedAt: nowMs() };
       issued.set(domain, found);
       if (issued.size > MAX_ISSUED) issued.delete(issued.keys().next().value);
       return found;
@@ -460,18 +512,20 @@
       }, ownerKey);
     }
 
-    function serviceRow(s, domain, advertised, entries, now) {
+    function serviceRow(s, domain, advertised, entries, now, ownerKey) {
       const type = TYPE_BY_KEY.get(advertised.key);
-      const credentials = credentialsFor(entries, domain, advertised.key, normalize, now);
+      const declaredClass = !OPERATES[advertised.key] && advertised.credential ? advertised.credential.class : null;
+      const credentials = credentialsFor(entries, domain, advertised.key, normalize, now, declaredClass, ownerKey);
       const explicit = s.enabled[settingKey(domain, advertised.key)];
       const enabled = resolveEnabled(s, domain, advertised.key, credentials.length > 0);
       const spec = OPERATES[advertised.key];
       const outcome = spec ? s.outcomes[settingKey(domain, spec.check)] || null : null;
       return {
-        key: advertised.key, label: type.label, category: type.category, url: advertised.url || null, advertised: !type.implicit && !advertised.held,
+        key: advertised.key, label: type.label, category: type.category, url: advertised.url || null, advertised: !advertised.held,
         operates: !!spec, enabled, explicit: typeof explicit === 'boolean' ? explicit : null,
+        credentialClass: spec ? spec.credentialClass : declaredClass,
         credentials: credentials.map((c) => ({ id: c.id, state: c.state, entry: c.entry })),
-        status: computeStatus({ key: advertised.key, advertised: !type.implicit && !advertised.held, explicit, enabled, credentials, outcome, nowMs: now })
+        status: computeStatus({ key: advertised.key, advertised: !advertised.held, explicit, enabled, credentials, outcome, nowMs: now, credentialClass: spec ? spec.credentialClass : declaredClass })
       };
     }
 
@@ -479,15 +533,16 @@
     async function rows() {
       const s = await load();
       const entries = await env.entries();
+      const ownerKey = await env.ownerKey();
       const now = nowMs();
       const domains = s.domains.map((d) => {
         const m = s.manifests[d.domain] || { fetchedAt: null, services: [], warnings: [], problem: null };
-        const services = m.services.map((x) => serviceRow(s, d.domain, x, entries, now));
+        const services = m.services.map((x) => serviceRow(s, d.domain, x, entries, now, ownerKey));
         // A service the person holds a credential for is shown with its domain whether or not the manifest says anything now, so a
-        // card is never left without a page. Domain Membership has no manifest flag at all.
+        // card is never left without a page. This also covers Domain Membership for a domain that has no `domainMembership` entry.
         for (const key of ['membership', ...Object.keys(OPERATES)]) {
           if (services.some((x) => x.key === key)) continue;
-          if (credentialsFor(entries, d.domain, key, normalize, now).length) services.push(serviceRow(s, d.domain, { key, url: null, held: true }, entries, now));
+          if (credentialsFor(entries, d.domain, key, normalize, now, null, ownerKey).length) services.push(serviceRow(s, d.domain, { key, url: null, held: true }, entries, now, ownerKey));
         }
         return { domain: d.domain, addedAt: d.addedAt, fetchedAt: m.fetchedAt, warnings: m.warnings, problem: m.problem, services };
       });
@@ -518,11 +573,23 @@
       return d ? Object.assign({ domain }, d.services.find((x) => x.key === key) || null) : null;
     }
 
-    return { discover, addDomain, removeDomain, refresh, setEnabled, recordOutcome, rows, service, load };
+    // The pairs "domain|class" whose cards belong to a service of a listed domain: the three the wallet runs (even when the manifest
+    // no longer says so, so a card is never without a page) and any class a manifest named for a service it advertises.
+    async function associations() {
+      const s = await load();
+      const pairs = new Set();
+      s.domains.forEach((d) => {
+        Object.keys(CREDENTIAL_CLASSES).forEach((cls) => pairs.add(d.domain + KEY_SEP + cls));
+        ((s.manifests[d.domain] || {}).services || []).forEach((x) => { if (x.credential) pairs.add(d.domain + KEY_SEP + x.credential.class); });
+      });
+      return pairs;
+    }
+
+    return { discover, addDomain, removeDomain, refresh, setEnabled, recordOutcome, rows, service, load, associations };
   }
 
   return {
-    create, readServices, safeServiceUrl, topLevelDuplicateKeys, normalizeState, resolveEnabled, computeStatus, credentialState, credentialsFor,
+    create, readServices, credentialNeed, safeServiceUrl, topLevelDuplicateKeys, normalizeState, resolveEnabled, computeStatus, credentialState, credentialsFor,
     normalizeDomain: defaultNormalizeDomain, emptyState, settingKey,
     SERVICE_TYPES, MEMBERSHIP, OPERATES, CREDENTIAL_CLASSES,
     LIMITS: { MAX_DOMAINS, MAX_BODY_CHARS, TIMEOUT_MS, FRESH_FOR_MS }

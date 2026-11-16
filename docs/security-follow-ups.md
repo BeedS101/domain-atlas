@@ -112,15 +112,19 @@ Described in `docs/services.md`. Open items:
   and issues only to the identity the wallet is acting as), but anyone can ask an issuer to issue a membership card to
   any public key. A fix is an issuer protocol change: require a signed challenge from the owner key on
   `/atlas/asset/issue` for membership classes.
-- **A manifest that names a key twice.** `walletBridge` appears twice at the top level of at least one live manifest (as
-  reported when the manifests were read; not verified from here). JSON parsers keep different ones. The wallet reads the
-  last one and shows a warning when it adds the domain; the domain should remove the duplicate.
-- **Relative service addresses.** Some manifests give a service address as a path (`/mail/`). The Services tab resolves a
-  path against the domain it was fetched from and refuses anything on another host, scheme or port. `SPEC.md` §3.9 does
-  not say a path is allowed; it should.
+- **A manifest that names a key twice.** Confirmed on one of the two live domains that were read (through a summarising
+  fetch, so not byte exact): `walletBridge` appears twice at the top level. The first copy has `read`, `sign` with one
+  purpose and an `offer` list; the second has two sign purposes and no `offer`. Most JSON parsers (and the wallet) keep the
+  last, so the offer is dropped. The other domain has no repeated key. The wallet shows a warning when such a domain is
+  added; the domain should remove the duplicate. The service addresses on both are absolute and on their own domain; the
+  relative paths in the manifests are world scene addresses.
+- **Relative service addresses.** Some manifests could give a service address as a path (`/mail/`). The Services tab resolves a
+  path against the domain it was fetched from and refuses anything on another host, scheme or port. `SPEC.md` §3.9 does not
+  say a path is allowed; it should.
 - **Switching Global Mail off pauses more than mail.** The background check presents one request per issuer domain, and
-  update notices, chat and friend mail ride the same request. With the Global Mail credential left out, those wait for that
-  domain until the service is switched on again. Other credentials held at the domain are still presented.
+  update notices, chat, friend mail and call cards ride the same request. With the Global Mail credential left out, those wait
+  for that domain until the service is switched on again. Other credentials held at the domain are still presented. The
+  settings page now says so; the API cannot separate them.
 - **Unreadable saved state fails open for the mail check.** If the Services state cannot be read, the check behaves as it
   did before the tab existed, so a storage fault does not silence mail. Removing a domain from the list also removes its
   switched-off choice, so checks resume; the confirmation says so.

@@ -92,6 +92,8 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
     console.log('STEP 4: checking Documents\' checkbox now too, reloading again, both must come back checked');
     await frame.locator('#servicesSubtabBtn').click();
+    // The Services list is drawn a moment after the sub-tab opens and pushes the documents below it down; wait for it to settle.
+    await frame.waitForFunction(() => !!document.getElementById('servicesHeading') && !document.getElementById('servicesSection').hasAttribute('aria-busy'), null, { timeout: 5000 });
     await frame.locator('#documentsCompatOnlyCheckbox').check();
     await frame.page().waitForTimeout(200);
     const afterBothChecked = await frame.evaluate(() => AtlasWallet.getInventoryFilterSettings());

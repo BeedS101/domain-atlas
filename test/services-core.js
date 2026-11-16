@@ -99,7 +99,7 @@ function credential(cls, domain, id, opts) {
   let env = makeEnv({ pages: { [URL_OF('full.example')]: { body: manifestFor('full.example', FULL) } } });
   let svc = S.create(env);
   let found = await svc.discover('FULL.example');
-  line(found.domain === 'full.example' && found.services.length === 8, 'discovery reads the advertised services', found);
+  line(found.domain === 'full.example' && same(found.services.map((x) => x.key), ['postOffice', 'tradingStation']) && found.others === 6, 'discovery keeps the services that need a membership card and counts the rest', found);
   const call = env.calls[0];
   line(call.url === URL_OF('full.example') && call.init.method === 'GET' && call.init.credentials === 'omit' && call.init.redirect === 'error' && call.init.body === undefined, 'it is one plain GET: no cookies, no redirects, no body', call.init);
   line(!JSON.stringify(call.init.headers).match(/authorization|cookie|owner|key/i), 'and it carries nothing about the person', call.init.headers);
@@ -135,10 +135,10 @@ function credential(cls, domain, id, opts) {
   console.log('--- the same names as the reference directory ---');
   const dir = require('../directory-server/server.js');
   const vectors = require('./support/directory-service-vectors.json');
-  line(same(dir.SERVICE_TYPES.map((t) => [t.key, t.category, t.aliases || []]), S.SERVICE_TYPES.map((t) => [t.key, t.category, t.aliases || []])), 'the wallet recognizes exactly the service names the directory does, in the same order');
+  line(same(dir.SERVICE_TYPES.map((t) => [t.key, t.category, t.aliases || []]), S.SERVICE_TYPES.concat([{ key: S.MEMBERSHIP.manifestName, category: S.MEMBERSHIP.category }]).map((t) => [t.key, t.category, t.aliases || []])), 'the wallet recognizes exactly the service names the directory does, in the same order');
   vectors.declarationCases.filter((c) => c.anchorType === 'domain' && c.manifest && !c.manifest.worlds).forEach((c) => {
     const got = S.readServices(c.anchorKey, Object.assign({ domain: c.anchorKey }, c.manifest), 'https://' + c.anchorKey, norm).services;
-    line(same(got.map((x) => x.key), c.expect.map((x) => x.service)), 'declaration case: ' + c.note, { got: got.map((x) => x.key), want: c.expect.map((x) => x.service) });
+    line(same(got.map((x) => (x.key === 'membership' ? 'domainMembership' : x.key)), c.expect.map((x) => x.service)), 'declaration case: ' + c.note, { got: got.map((x) => x.key), want: c.expect.map((x) => x.service) });
   });
 
   console.log('--- the list, per identity ---');
@@ -176,7 +176,7 @@ function credential(cls, domain, id, opts) {
   line(await svc.recordOutcome('full.example', 'mail', true) === true, 'an outcome is recorded for a listed domain');
   line(await svc.recordOutcome('unlisted.example', 'mail', true) === false && env.stores['owner-A'].outcomes['unlisted.example|mail'] === undefined, 'but not for a domain that was never added');
   try { await svc.setEnabled('unlisted.example', 'postOffice', true); line(false, 'a setting for an unlisted domain is refused'); } catch (err) { line(err.code === 'not-listed', 'a setting for an unlisted domain is refused', err.code); }
-  for (const bad of [['full.example', 'chat', true], ['full.example', 'postOffice', 'yes'], ['full.example', '__proto__', true]]) {
+  for (const bad of [['full.example', 'assetStudio', true], ['full.example', 'postOffice', 'yes'], ['full.example', '__proto__', true]]) {
     try { await svc.setEnabled(...bad); line(false, 'setting ' + JSON.stringify(bad) + ' is refused'); } catch (err) { line(err.code === 'bad-request', 'setting ' + JSON.stringify(bad) + ' is refused', err.code); }
   }
   const held = [credential('atlas.postoffice.membership', 'full.example', 'cred-pm')];
@@ -201,7 +201,7 @@ function credential(cls, domain, id, opts) {
   line(row(fullRow, 'membership') && row(fullRow, 'membership').credentials.length === 1 && row(fullRow, 'membership').advertised === false, 'Domain Membership appears because the card is held, and is not presented as advertised');
   line(row(fullRow, 'postOffice').credentials[0].id !== 'pm-evil' && !fullRow.services.some((s) => s.credentials.some((c) => c.id === 'pm-evil' || c.id === 'pm-atlas')), 'a card from another domain is never attached to this domain');
   line(!fullRow.services.some((s) => s.credentials.some((c) => c.entry.credential.asset.class === 'atlas.demo.ticket')), 'a document that belongs to no service stays out of every service');
-  line(row(fullRow, 'chat').credentials.length === 0 && row(fullRow, 'chat').operates === false, 'a service the wallet does not operate has no credential and says so');
+  line(!row(fullRow, 'chat') && !row(fullRow, 'calendar') && !row(fullRow, 'chainLabs'), 'services that need no membership card are not in the list at all');
   line(row(fullRow, 'postOffice').enabled === true && row(fullRow, 'postOffice').explicit === null, 'a service already used through its credential stays on without any saved setting');
   line(same(view.found.map((f) => f.domain), ['evil.example']) || same(view.found.map((f) => f.domain).sort(), ['evil.example']), 'domains with credentials that are not listed are offered, not added', view.found.map((f) => f.domain));
   line(S.CREDENTIAL_CLASSES['atlas.postoffice.membership'][0] === 'postOffice' && S.CREDENTIAL_CLASSES['atlas.tradingstation.membership'][0] === 'tradingStation' && S.CREDENTIAL_CLASSES['atlas.membership'][0] === 'membership', 'the three classes map to Global Mail, Trading Station and Domain Membership');
@@ -215,7 +215,7 @@ function credential(cls, domain, id, opts) {
   line(S.resolveEnabled(st, 'a.example', 'postOffice', false) === false, 'with no credential nothing starts by itself');
   st.enabled['a.example|postOffice'] = false;
   line(S.resolveEnabled(st, 'a.example', 'postOffice', true) === false, 'a choice to turn it off always wins');
-  line(S.resolveEnabled(st, 'a.example', 'chat', true) === false, 'a service the wallet does not operate is never on');
+  line(S.resolveEnabled(st, 'a.example', 'assetStudio', true) === false, 'a service the wallet does not operate is never on');
 
   console.log('--- the four statuses ---');
   const status = (o) => S.computeStatus(Object.assign({ key: 'postOffice', advertised: true, explicit: undefined, enabled: true, credentials: [{ id: 'c', state: 'valid' }], outcome: null, nowMs: NOW }, o));
@@ -262,6 +262,65 @@ function credential(cls, domain, id, opts) {
   await svc.setEnabled('full.example', 'postOffice', false);
   line(row((await svc.rows()).domains.find((d) => d.domain === 'full.example'), 'postOffice').status.state === 'disabled', 'turning it off shows amber');
 
+  console.log('--- a manifest can say which card a service needs ---');
+  const need = (key, declared) => { const w = []; return { got: S.credentialNeed(key, declared, w), w }; };
+  let n = need('postOffice', true);
+  line(n.got && n.got.class === 'atlas.postoffice.membership' && n.got.source === 'known' && n.w.length === 0, 'a service declared as plain true keeps the wallet\'s own association');
+  n = need('postOffice', { enabled: true, requiresCredential: true, credentialClass: 'atlas.postoffice.membership' });
+  line(n.got && n.got.source === 'manifest' && n.w.length === 0, 'the descriptor that agrees with the wallet is accepted');
+  n = need('postOffice', { enabled: true, requiresCredential: true, credentialClass: 'atlas.demo.ticket' });
+  line(n.got.class === 'atlas.postoffice.membership' && n.got.source === 'known' && same(n.w, ['credential-class-ignored:postOffice']), 'a different class cannot change which card the wallet ties to a service it runs', n);
+  n = need('assetStudio', { enabled: true, requiresCredential: true, credentialClass: 'atlas.studio.membership' });
+  line(n.got && n.got.class === 'atlas.studio.membership' && n.got.source === 'manifest', 'a service the wallet does not run can name the card it needs');
+  line(need('assetStudio', { enabled: true }).got === null && need('assetStudio', true).got === null && need('assetStudio', { enabled: true, requiresCredential: false, credentialClass: 'atlas.studio.membership' }).got === null, 'without requiresCredential: true there is no card, however the class is spelled');
+  for (const bad of ['', 'Atlas.Studio', 'atlas', 'atlas..x', '../x', 'a.b c', 'atlas.' + 'x'.repeat(130), 42, null, ['atlas.x'], { a: 1 }]) {
+    n = need('calendar', { enabled: true, requiresCredential: true, credentialClass: bad });
+    line(n.got === null && same(n.w, ['credential-descriptor-ignored:calendar']), 'a class that is not a class name is ignored with a note: ' + JSON.stringify(bad).slice(0, 30), n);
+  }
+  n = need('tradingStation', { enabled: true, requiresCredential: true, credentialClass: '__proto__.x' });
+  line(n.got.class === 'atlas.tradingstation.membership', 'a class that spells a built-in name is just text');
+
+  let rr = S.readServices('d.example', { domain: 'd.example', domainMembership: { enabled: true, requiresCredential: true, credentialClass: 'atlas.membership' }, assetStudio: { enabled: true, requiresCredential: true, credentialClass: 'atlas.studio.membership', url: 'https://evil.example/x' }, calendar: true }, 'https://d.example', norm);
+  line(same(rr.services.map((x) => x.key), ['assetStudio', 'calendar', 'membership']) && rr.services.find((x) => x.key === 'membership').credential.class === 'atlas.membership', 'domainMembership is read as Domain Membership', rr.services.map((x) => x.key));
+  line(rr.services.find((x) => x.key === 'calendar').credential === null, 'a service with no descriptor and no known card needs none');
+  env = makeEnv({ pages: { [URL_OF('d.example')]: { body: manifestFor('d.example', { domainMembership: true, assetStudio: { enabled: true, requiresCredential: true, credentialClass: 'atlas.studio.membership', url: 'https://evil.example/x' }, calendar: true, scanner: { enabled: true, url: 'https://evil.example/y' } }) } } });
+  svc = S.create(env);
+  found = await svc.discover('d.example');
+  line(same(found.services.map((x) => x.key), ['assetStudio', 'membership']) && found.others === 2, 'discovery lists only the services that need a card', found);
+  line(found.warnings.includes('url-ignored:assetStudio') && !found.warnings.includes('url-ignored:scanner'), 'and warns only about the ones it lists');
+  await svc.addDomain('d.example', found);
+  const rawSaved = env.stores['owner-A'].manifests['d.example'].services;
+  line(same(rawSaved.map((x) => x.key), ['assetStudio', 'membership']) && rawSaved[0].credential.class === 'atlas.studio.membership', 'what is saved is the card-based list with the named class');
+  const reread = S.normalizeState({ version: 1, domains: [{ domain: 'd.example' }], manifests: { 'd.example': { services: [{ key: 'chat' }, { key: 'scanner', url: null }, { key: 'postOffice' }, { key: 'assetStudio', credential: { class: 'atlas.studio.membership' } }, { key: 'calendar', credential: { class: 'Bad Class' } }, { key: 'membership' }] } } }, norm);
+  line(same(reread.manifests['d.example'].services.map((x) => x.key), ['postOffice', 'assetStudio', 'membership']), 'state saved by an earlier build loses services that need no card, and keeps the rest', reread.manifests['d.example'].services.map((x) => x.key));
+
+  env.held = [credential('atlas.studio.membership', 'd.example', 'st1'), credential('atlas.studio.membership', 'other.example', 'st-other'), credential('atlas.membership', 'd.example', 'mem1', { verdict: { valid: false, status: 'revoked' } })];
+  view = await svc.rows();
+  const dRow = view.domains[0];
+  const studio = dRow.services.find((x) => x.key === 'assetStudio');
+  line(studio.operates === false && studio.credentials.length === 1 && studio.credentials[0].id === 'st1' && studio.credentialClass === 'atlas.studio.membership', 'a named class finds the card this domain issued, and only that one', studio);
+  line(studio.status.state === 'unknown' && studio.status.code === 'unsupported' && studio.explicit === null, 'a service the wallet does not run is never green and has no switch', studio.status);
+  line((await svc.associations()).has('d.example|atlas.studio.membership') && !(await svc.associations()).has('other.example|atlas.studio.membership'), 'the card moves under its service only for a domain on the list');
+  const mem = dRow.services.find((x) => x.key === 'membership');
+  line(mem.advertised === true && mem.credentials.length === 1, 'Domain Membership is advertised by the manifest and holds the card');
+  env.held = [credential('atlas.studio.membership', 'd.example', 'st2', { expiresAt: '2020-01-01T00:00:00Z' })];
+  const studio2 = (await svc.rows()).domains[0].services.find((x) => x.key === 'assetStudio');
+  line(studio2.credentials[0].state === 'expired' && studio2.status.state === 'problem', 'an expired card shows as a problem whatever the manifest says');
+  env.held = [];
+  const studio3 = (await svc.rows()).domains[0].services.find((x) => x.key === 'assetStudio');
+  line(studio3.status.code === 'needs-credential' && studio3.status.state === 'unknown', 'with no card it says the domain needs one');
+  env.held = [Object.assign(credential('atlas.studio.membership', 'd.example', 'st3'), {})];
+  env.held[0].credential.owner.publicKey = 'someone-else';
+  line((await svc.rows()).domains[0].services.find((x) => x.key === 'assetStudio').credentials[0].state === 'invalid', 'a card that names another owner is not the person\'s');
+
+  const hostile = S.create(makeEnv({ pages: { [URL_OF('h.example')]: { body: manifestFor('h.example', { calendar: { enabled: true, requiresCredential: true, credentialClass: 'atlas.postoffice.membership' } }) } }, held: [credential('atlas.postoffice.membership', 'h.example', 'pm-h')] }));
+  await hostile.addDomain('h.example');
+  const hv = (await hostile.rows()).domains[0];
+  const hcal = hv.services.find((x) => x.key === 'calendar');
+  line(hcal.operates === false && hcal.enabled === false && hcal.explicit === null, 'a manifest cannot give another service a switch by naming the Global Mail card');
+  line(hv.services.find((x) => x.key === 'postOffice').operates === true && hv.services.find((x) => x.key === 'postOffice').credentials.length === 1, 'Global Mail keeps its own card');
+  try { await hostile.setEnabled('h.example', 'calendar', false); line(false, 'and no setting can be saved for it'); } catch (err) { line(err.code === 'bad-request', 'and no setting can be saved for it', err.code); }
+
   console.log('--- reusing what the person was just shown ---');
   env = makeEnv({ pages: { [URL_OF('full.example')]: { body: manifestFor('full.example', FULL) } } });
   svc = S.create(env);
@@ -299,7 +358,7 @@ function credential(cls, domain, id, opts) {
   }, norm);
   line(same(junk.domains.map((d) => d.domain), ['a.example']), 'only valid, unique domains are kept', junk.domains);
   line(same(Object.keys(junk.enabled), ['a.example|postOffice']), 'only settings for a listed domain and a known, operated service are kept', junk.enabled);
-  line(same(junk.manifests['a.example'].services.map((s) => s.key), ['chat', 'postOffice']) && junk.manifests['a.example'].services[1].url === null && !junk.manifests['b.example'], 'cached services are limited to the known table and sane addresses', junk.manifests);
+  line(same(junk.manifests['a.example'].services.map((s) => s.key), ['membership', 'postOffice']) && junk.manifests['a.example'].services[1].url === null && !junk.manifests['b.example'], 'cached services are limited to the known table, to those that need a card, and to sane addresses', junk.manifests);
   line(same(Object.keys(junk.outcomes), ['a.example|mail']), 'only well-formed outcomes for a listed domain are kept', junk.outcomes);
   line(same(S.normalizeState('garbage', norm), S.emptyState()) && same(S.normalizeState(null, norm), S.emptyState()), 'something that is not a state reads as an empty one');
 

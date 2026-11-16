@@ -648,6 +648,17 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
     assert.ok(has(m, /neither "domain" nor "identityKey"/, 'fail'));
   });
 
+  await check('manifest: a service that says it requires a credential is checked for a usable class', async () => {
+    let m = await withManifest((j) => { j.postOffice = { enabled: true, requiresCredential: true, credentialClass: 'atlas.postoffice.membership' }; j.domainMembership = { enabled: true, requiresCredential: true, credentialClass: 'atlas.membership' }; });
+    assert.ok(!has(m, /requiresCredential|credentialClass/), 'a good descriptor raises nothing: ' + probs(m).join(' | '));
+    m = await withManifest((j) => { j.assetStudio = { enabled: true, requiresCredential: true, credentialClass: 'Not A Class' }; });
+    assert.ok(has(m, /"assetStudio" says it requires a credential but "credentialClass" is missing or is not a class name/, 'warn'));
+    m = await withManifest((j) => { j.scanner = { enabled: true, requiresCredential: 'yes', credentialClass: 'atlas.scanner.membership' }; });
+    assert.ok(has(m, /"scanner.requiresCredential" is not exactly true/, 'warn'));
+    m = await withManifest((j) => { j.calendar = { requiresCredential: true, credentialClass: 'atlas.calendar.membership' }; });
+    assert.ok(has(m, /"calendar" has requiresCredential but "enabled" is not true/, 'warn'));
+  });
+
   await check('manifest: broken JSON, a missing file, a non-list "worlds" and an empty list are each reported plainly', async () => {
     let m = await withManifest(() => '{ "domain": ');
     assert.strictEqual(m.state, 'invalid'); assert.ok(has(m, /not a valid JSON object/, 'fail')); assert.deepStrictEqual(m.worlds, []);

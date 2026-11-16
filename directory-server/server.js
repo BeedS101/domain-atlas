@@ -303,7 +303,8 @@ const SERVICE_TYPES = [
   { key: 'scanner', label: 'Scanner', category: 'ledger' },
   { key: 'tradingStation', label: 'Trading station', category: 'trading', aliases: ['trading'] },
   { key: 'directory', label: 'Directory', category: 'directory' },
-  { key: 'calendar', label: 'Calendar', category: 'other' }
+  { key: 'calendar', label: 'Calendar', category: 'other' },
+  { key: 'domainMembership', label: 'Domain membership', category: 'communication' }
 ];
 const SERVICE_BY_KEY = new Map(SERVICE_TYPES.map((t, i) => [t.key, { ...t, order: i }]));
 const SITE_CATEGORIES = new Set(['all', 'worlds', ...SERVICE_CATEGORIES]);
