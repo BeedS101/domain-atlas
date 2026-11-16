@@ -12004,7 +12004,7 @@ const AtlasWallet = (() => {
     const services = getServices();
     const view = await services.service(domainInput, key);
     if (!view) throw new Error('Add the domain to Services first.');
-    if (!view.advertised) throw new Error('This domain does not advertise that service.');
+    if (!view.advertised && !view.implied) throw new Error('This domain does not advertise that service.');
     if (view.credentials.some((c) => c.state === 'valid' || c.state === 'unverified' || c.state === 'pending')) throw new Error('You already hold a membership card for this service.');
     const minted = await mintAsset('self', view.domain, spec.credentialClass);
     await services.setEnabled(view.domain, key, true);

@@ -117,7 +117,8 @@
     head.appendChild(statusBadge(s.status));
     row.appendChild(head);
     const bits = [];
-    if (!s.advertised) bits.push('from the membership card you hold');
+    if (s.implied) bits.push('not announced by the domain');
+    else if (!s.advertised) bits.push('from the membership card you hold');
     if (s.operates) bits.push(s.enabled ? 'switched on' : 'switched off');
     else bits.push('card shown, service not used from here');
     if (bits.length) row.appendChild(el('div', { className: 'meta', textContent: bits.join(' · ') }));
@@ -149,7 +150,7 @@
   function advertisedList(found) {
     const box = el('div', { className: 'svc-advertised' });
     if (!found.services.length) box.appendChild(el('div', { className: 'meta', textContent: 'It advertises no services that need a membership card.' }));
-    found.services.forEach((s) => box.appendChild(el('div', { className: 'svc-advertised-item', textContent: s.label })));
+    found.services.forEach((s) => box.appendChild(el('div', { className: 'svc-advertised-item', textContent: s.label + (s.implied ? ' (not announced by the domain; you can still ask for the card)' : '') })));
     if (found.others > 0) box.appendChild(el('div', { className: 'meta', textContent: (found.others === 1 ? 'It advertises one more service that does not' : 'It advertises ' + found.others + ' more services that do not') + ' need a card, so ' + (found.others === 1 ? 'it is' : 'they are') + ' not listed here.' }));
     return box;
   }
@@ -250,8 +251,8 @@
       host.appendChild(el('div', { className: 'empty-note', textContent: s.operates
         ? 'You have not joined ' + s.label + ' at ' + d.domain + ' with this identity.'
         : 'You do not hold the card ' + s.label + ' needs (' + s.credentialClass + ') from ' + d.domain + ' with this identity.' }));
-      if (s.operates && s.advertised) {
-        host.appendChild(el('div', { className: 'item-actions' }, [button('Join…', () => { panel = { kind: 'join', domain: d.domain, key: s.key, label: s.label }; render(); }, '', 'svcJoin')]));
+      if (s.operates && (s.advertised || s.implied)) {
+        host.appendChild(el('div', { className: 'item-actions' }, [button('Join…', () => { panel = { kind: 'join', domain: d.domain, key: s.key, label: s.label, implied: !!s.implied }; render(); }, '', 'svcJoin')]));
       }
       return;
     }
@@ -330,7 +331,7 @@
       page.appendChild(stepBox('Join ' + panel.label + ' at ' + panel.domain + '?', [
         'The domain will issue a membership card to this identity: ' + (identity ? identity.label + ' (' + shortKey(identity.publicKey) + ')' : 'the identity the wallet is acting as') + '.',
         'You can switch the service off again at any time. Joining does not delete or change anything you already hold.'
-      ], [button('Join', () => act(async () => { const p = panel; panel = null; await AtlasWallet.joinService(p.domain, p.key); if (cfg.afterJoin) await cfg.afterJoin(); }, 'Joined.'), '', 'svcJoinConfirm'), cancel()]));
+      ].concat(panel.implied ? [panel.domain + ' has not announced Domain Membership. This sends the same request as Subscribe inside the domain, and the domain may decline it.'] : []), [button('Join', () => act(async () => { const p = panel; panel = null; await AtlasWallet.joinService(p.domain, p.key); if (cfg.afterJoin) await cfg.afterJoin(); }, 'Joined.'), '', 'svcJoinConfirm'), cancel()]));
     }
 
     if (s.operates) {

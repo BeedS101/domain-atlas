@@ -2029,7 +2029,7 @@ const presentBtn = document.getElementById('presentBtn');
 const reverifyBtn = document.getElementById('reverifyBtn');
 const loadoutNoteEl = document.getElementById('loadoutNote');
 
-// Inventory: Collectibles/Services/Ledger sub-tabs of one merged
+// Inventory: Collectibles/Ledger/Services sub-tabs of one merged
 // section — see showInventorySubtab() below for how the two levels of
 // tabbing (walletTabBar -> inventorySubtabBar) interact, same pattern as
 // Social's Mail/Friends/Favorites.
@@ -4806,11 +4806,11 @@ function showMailBoxSubtab(id) {
   if (mailBoxComposeSubtabBtn) mailBoxComposeSubtabBtn.classList.toggle('active-subtab', id === 'mailBoxComposeSubscreen');
 }
 
-// Inventory tab's own second level of tabbing: Collectibles / Services /
-// Ledger, same show-one-hide-the-rest idea as showSocialSubtab() right
+// Inventory tab's own second level of tabbing: Collectibles / Ledger /
+// Services, same show-one-hide-the-rest idea as showSocialSubtab() right
 // above, just scoped to Inventory's .subscreen elements.
 function showInventorySubtab(id) {
-  [collectiblesSubscreen, servicesSubscreen, document.getElementById('ledgerSubscreen')].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
+  [collectiblesSubscreen, document.getElementById('ledgerSubscreen'), servicesSubscreen].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
   if (collectiblesSubtabBtn) collectiblesSubtabBtn.classList.toggle('active-subtab', id === 'collectiblesSubscreen');
   if (servicesSubtabBtn) servicesSubtabBtn.classList.toggle('active-subtab', id === 'servicesSubscreen');
   const ledgerBtn = document.getElementById('ledgerSubtabBtn');

@@ -1,6 +1,7 @@
 # Services (wallet tab)
 
-The Services sub-tab of the wallet's Inventory replaces the old Documents sub-tab. It lists only services that need a
+The Services sub-tab of the wallet's Inventory replaces the old Documents sub-tab (the Inventory tabs are Collectibles,
+Ledger, Services). It lists only services that need a
 membership card or another credential held in the wallet to operate: Global Mail, Trading Station and Domain Membership,
 plus any service a domain declares with a card it needs. Services that need no card (Scanner, Directory, Asset Studio,
 Calendar, Chain Labs, site chat and the like) are not listed; the directory and the domain's own pages show those. A
@@ -40,6 +41,23 @@ key that appears twice in the manifest text is reported as a warning, since JSON
 
 The manifest is fetched with `GET /.well-known/spatial.json`, no credentials, no cache, redirects refused, a time limit
 and a size limit (256 KB). Nothing about the person is sent.
+
+## Domain Membership for someone who holds no card yet
+
+Domain Membership is the card `atlas.membership`; holding it is the subscription (`SPEC.md` §11.1). A person who does not
+hold it yet can find and join it from Services in two cases:
+
+- The domain announces `domainMembership` in its manifest: it is listed as announced and Join is offered.
+- The domain has not announced it (every manifest written before `domainMembership` existed) but runs a service that needs
+  a card from its own issuer, Global Mail or Trading Station: Services still offers Domain Membership, marked "not
+  announced by the domain", and the Join step says the domain has not announced it and may decline. The wallet has always
+  let a visitor ask any domain for this card (the Subscribe button inside a world), and Join sends that same request. No new
+  endpoint is used and the offer is an inference by the wallet, never a claim by the manifest. A domain that sets
+  `domainMembership` to `false` or `{ "enabled": false }` is not offered it, and a domain that runs nothing that needs a
+  card (only chat, a calendar, a directory and the like) offers nothing at all.
+
+A card held from a domain that does neither is still shown on that domain's Domain Membership page, so no card is ever
+without one.
 
 ## Adding and discovering
 

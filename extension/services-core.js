@@ -166,6 +166,7 @@
     const claimed = normalize(manifest.domain);
     if (claimed !== domain) return { problem: 'domain-mismatch', text: 'That manifest was served by ' + domain + ' but says it belongs to a different domain, so it was not used.', warnings };
     const services = [];
+    let membershipDeclined = false;
     for (const type of SERVICE_TYPES.concat([MEMBERSHIP])) {
       const name = [type.manifestName || type.key].concat(type.aliases || []).find((n) => Object.prototype.hasOwnProperty.call(manifest, n));
       if (name === undefined) continue;
@@ -177,10 +178,14 @@
           url = safeServiceUrl(declared.url, baseOrigin);
           if (!url) warnings.push('url-ignored:' + type.key);
         }
-      } else continue;
+      } else {
+        // A domain that names Domain Membership and says it is not offered is not offered it, whatever else it runs.
+        if (type === MEMBERSHIP) membershipDeclined = true;
+        continue;
+      }
       services.push({ key: type.key, label: type.label, category: type.category, url, credential: credentialNeed(type.key, declared, warnings) });
     }
-    return { problem: null, services, warnings };
+    return { problem: null, services, warnings, membershipDeclined };
   }
 
   async function readCapped(res, max) {
@@ -246,7 +251,9 @@
           const declared = !own && isObject(x.credential) && validClass(x.credential.class) ? { class: x.credential.class, source: 'manifest' } : null;
           const credential = own || declared;
           if (!credential) return;
-          services.push({ key: x.key, label: type.label, category: type.category, url: typeof x.url === 'string' && x.url.length <= MAX_URL_CHARS ? x.url : null, credential });
+          const row = { key: x.key, label: type.label, category: type.category, url: typeof x.url === 'string' && x.url.length <= MAX_URL_CHARS ? x.url : null, credential };
+          if (x.key === MEMBERSHIP.key && x.implied === true) row.implied = true;
+          services.push(row);
         });
         s.manifests[domain] = {
           fetchedAt: Number.isFinite(m.fetchedAt) ? m.fetchedAt : null,
@@ -427,9 +434,17 @@
       // Only services that need a membership card are kept; the rest of what a domain advertises is the directory's to show.
       const gated = read.services.filter((x) => x.credential);
       const keys = new Set(gated.map((x) => x.key));
+      // A domain that has not announced Domain Membership but runs a service that needs a card from its own issuer (Global Mail,
+      // Trading Station) is offered it anyway, marked as not announced, so a person who holds no card yet can still ask for one.
+      // The wallet has always let a visitor ask any domain for this card (the Subscribe button in a world), and nothing new is
+      // sent: the request is the same one, and the domain may decline it. A domain that says it does not offer it is left alone.
+      if (!keys.has(MEMBERSHIP.key) && !read.membershipDeclined && gated.some((x) => OPERATES[x.key])) {
+        gated.push({ key: MEMBERSHIP.key, label: MEMBERSHIP.label, category: MEMBERSHIP.category, url: null, credential: { class: OPERATES.membership.credentialClass, source: 'known' }, implied: true });
+        keys.add(MEMBERSHIP.key);
+      }
       const warnings = read.warnings.filter((w) => { const at = w.indexOf(':'); return at < 0 || !TYPE_BY_KEY.has(w.slice(at + 1)) || keys.has(w.slice(at + 1)); })
         .concat(duplicates.map((k) => 'duplicate-key:' + k));
-      const found = { domain, services: gated, others: read.services.length - gated.length, warnings, fetchedAt: nowMs() };
+      const found = { domain, services: gated, others: read.services.filter((x) => !x.credential).length, warnings, fetchedAt: nowMs() };
       issued.set(domain, found);
       if (issued.size > MAX_ISSUED) issued.delete(issued.keys().next().value);
       return found;
@@ -521,11 +536,11 @@
       const spec = OPERATES[advertised.key];
       const outcome = spec ? s.outcomes[settingKey(domain, spec.check)] || null : null;
       return {
-        key: advertised.key, label: type.label, category: type.category, url: advertised.url || null, advertised: !advertised.held,
+        key: advertised.key, label: type.label, category: type.category, url: advertised.url || null, advertised: !advertised.held && !advertised.implied, implied: !!advertised.implied,
         operates: !!spec, enabled, explicit: typeof explicit === 'boolean' ? explicit : null,
         credentialClass: spec ? spec.credentialClass : declaredClass,
         credentials: credentials.map((c) => ({ id: c.id, state: c.state, entry: c.entry })),
-        status: computeStatus({ key: advertised.key, advertised: !advertised.held, explicit, enabled, credentials, outcome, nowMs: now, credentialClass: spec ? spec.credentialClass : declaredClass })
+        status: computeStatus({ key: advertised.key, advertised: !advertised.held && !advertised.implied, explicit, enabled, credentials, outcome, nowMs: now, credentialClass: spec ? spec.credentialClass : declaredClass })
       };
     }
 

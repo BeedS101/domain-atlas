@@ -244,7 +244,7 @@
 
   /* Sub-tab-bar pattern, shared by every tab that has its own second level
      of tabbing — Social's Mail/Contacts/Favorites/Calendar (#socialSubtabBar)
-     and Inventory's Collectibles/Documents (#inventorySubtabBar) both use
+     and Inventory's Collectibles/Ledger/Services (#inventorySubtabBar) both use
      this one class rather than each inventing their own look. A smaller
      echo of #walletTabBar's own look, nested one level in. */
   .subtab-bar { display: flex; gap: 6px; margin-bottom: 14px; }
@@ -2337,8 +2337,8 @@
 
           <div id="inventorySubtabBar" class="subtab-bar">
             <button id="collectiblesSubtabBtn" type="button">Collectibles</button>
-            <button id="servicesSubtabBtn" type="button">Services</button>
             <button id="ledgerSubtabBtn" type="button">Ledger</button>
+            <button id="servicesSubtabBtn" type="button">Services</button>
           </div>
 
           <!-- Sub-screen: Collectibles — every asset with
@@ -2362,6 +2362,11 @@
 
           </div>
 
+          <!-- Sub-screen: Ledger. The chain labs coins, drawn by chain-labs-tab.js. -->
+          <div id="ledgerSubscreen" class="subscreen">
+            <div id="chainLabsSection" role="group" aria-labelledby="chainLabsHeading"></div>
+          </div>
+
           <!-- Sub-screen: Services. The domains the person added and what each advertises, drawn by services-tab.js. Below it,
                the documents that do not belong to a service: membership cards that a service shows on its own page are not
                repeated here. -->
@@ -2375,11 +2380,6 @@
               <span>Only show items compatible with this domain</span>
             </label>
             <div id="selfDocumentsList" class="item-list" aria-labelledby="otherDocumentsHeading"></div>
-          </div>
-
-          <!-- Sub-screen: Ledger. The chain labs coins, drawn by chain-labs-tab.js. -->
-          <div id="ledgerSubscreen" class="subscreen">
-            <div id="chainLabsSection" role="group" aria-labelledby="chainLabsHeading"></div>
           </div>
         </div>
       </div>

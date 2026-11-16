@@ -52,6 +52,14 @@ const HANDLE = 'svc' + Date.now().toString(36);
     await page.click('#servicesSubtabBtn');
     await page.waitForSelector('#servicesSubscreen.active');
     await waitText(/No domains added yet/);
+    check('the Inventory sub-tabs are in the order Collectibles, Ledger, Services', (await page.$$eval('#inventorySubtabBar button', (b) => b.map((x) => x.innerText.trim()))).join(',') === 'Collectibles,Ledger,Services');
+    for (const [btn, screen] of [['#ledgerSubtabBtn', '#ledgerSubscreen'], ['#collectiblesSubtabBtn', '#collectiblesSubscreen'], ['#servicesSubtabBtn', '#servicesSubscreen']]) {
+      await page.click(btn);
+      await page.waitForSelector(screen + '.active');
+      const active = await page.$$eval('#inventorySubtabBar button.active-subtab', (b) => b.map((x) => x.id));
+      const shown = await page.$$eval('#walletPanelContent .subscreen.active, .subscreen.active', (e) => e.map((x) => x.id).filter((id) => /^(collectibles|ledger|services)Subscreen$/.test(id)));
+      check('each sub-tab opens its own screen and only that one: ' + btn, active.length === 1 && active[0] === btn.slice(1) && shown.length === 1 && shown[0] === screen.slice(1), { active, shown });
+    }
     check('the Documents sub-tab is replaced by Services', (await page.$('#documentsSubtabBtn')) === null && /Services/.test(await text('#servicesSubtabBtn')));
     check('documents that belong to no service stay under "Other documents"', /Other documents/i.test(await text('#servicesSubscreen')) && (await page.$('#selfDocumentsList')) !== null);
 
@@ -80,7 +88,8 @@ const HANDLE = 'svc' + Date.now().toString(36);
     check('adding sent no mail request and presented no identity', (await sent()).slice(before).every((s) => /\.well-known\/spatial\.json GET/.test(s)), (await sent()).slice(before));
     const card = await text('.svc-domain[data-domain="' + D + '"]');
     check('the card lists Global Mail with a status that is not green', /Global Mail/.test(card) && (await page.$eval('.svc-service[data-service="postOffice"] .svc-status', (e) => e.dataset.state)) !== 'active', card);
-    check('services that need no card are not listed at all', !/Site chat|Calendar|Scanner|Directory|Asset Studio|Chain Labs/.test(card) && (await page.$$('.svc-domain[data-domain="' + D + '"] .svc-service')).length === 1, card);
+    check('services that need no card are not listed at all', !/Site chat|Calendar|Scanner|Directory|Asset Studio|Chain Labs/.test(card) && (await page.$$('.svc-domain[data-domain="' + D + '"] .svc-service')).length === 2, card);
+    check('Domain Membership is offered although this domain never announced it, marked as not announced', /Domain Membership/.test(card) && /not announced by the domain/.test(card), card);
 
     console.log('--- Global Mail settings: joining ---');
     await openSettings('postOffice');
@@ -216,6 +225,28 @@ const HANDLE = 'svc' + Date.now().toString(36);
     await w.wallet(([f, pw, seed]) => AtlasWallet.importFullBackup(f, pw, seed), [file, 'services-tab-password', seed]);
     const restored = await state();
     check('a backup restores the domain and the choices', restored.domains.length === 1 && restored.domains[0].domain === D, restored);
+
+    console.log('--- Domain Membership: a new member who holds no card yet ---');
+    await page.reload();
+    await page.waitForFunction(() => typeof routeWalletScreen === 'function' && !!window.AtlasServicesTab, null, { timeout: 15000 });
+    await page.evaluate(() => routeWalletScreen());
+    await page.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 10000 });
+    await page.click('#servicesSubtabBtn');
+    await page.waitForSelector('.svc-domain[data-domain="' + D + '"]');
+    check('before joining, the wallet holds no Domain Membership card', (await held()).filter((e) => e.credential.asset.class === 'atlas.membership').length === 0);
+    await openSettings('membership');
+    check('the page offers to join and shows it is not set up', (await page.$('#svcJoin')) !== null && (await badge()).state === 'unknown');
+    await page.click('#svcJoin');
+    await page.waitForSelector('#svcJoinConfirm');
+    check('joining asks first and says the domain has not announced it', /has not announced Domain Membership/.test(await text('#svcSettings')));
+    check('nothing is issued before the person confirms', (await held()).filter((e) => e.credential.asset.class === 'atlas.membership').length === 0);
+    await page.click('#svcJoinConfirm');
+    await page.waitForSelector('#svcCredentials .wallet-item', { timeout: 20000 });
+    check('the card was issued by the domain and is shown on the Domain Membership page', (await held()).filter((e) => e.credential.asset.class === 'atlas.membership' && e.credential.issuer.domain === D).length === 1 && /Verification: Verified/.test(await text('#svcSettings')), await text('#svcSettings'));
+    check('joining switched the service on', (await state()).enabled[D + '|membership'] === true);
+    await page.click('#svcBack');
+    const otherDocs = await page.$$eval('#selfDocumentsList .wallet-item', (n) => n.map((x) => x.innerText));
+    check('the Global Mail card and the Domain Membership card are both on their service pages, not in the list of other documents', otherDocs.length === 0, otherDocs);
 
     check('no page errors', errors.length === 0, errors);
   } catch (err) {

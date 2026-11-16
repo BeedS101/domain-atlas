@@ -123,9 +123,21 @@ const evilManifest = JSON.stringify({ spec: 'domain-atlas/1.0', domain: FULL, po
     await viewer.click('#servicesAddBtn');
     await waitText(/Add lean\.example to Services\?/);
     check('the preview names the services that need a card, including the alias spelling, and counts the rest', /Trading Station/.test(await section()) && /Global Mail/.test(await section()) && !/Directory/.test(await section()) && /one more service that does not need a card/.test(await section()), await section());
+    check('a domain that never announced Domain Membership still offers it, marked as not announced', /Domain Membership \(not announced by the domain; you can still ask for the card\)/.test(await section()), await section());
     await viewer.click('#svcAddConfirm');
     await viewer.waitForSelector('.svc-domain[data-domain="' + LEAN + '"]');
     check('both domains are kept', (await state()).domains.map((d) => d.domain).sort().join() === [LEAN, FULL].sort().join());
+    const leanMember = await text('.svc-domain[data-domain="' + LEAN + '"] .svc-service[data-service="membership"]');
+    check('it is listed on the card as not announced, grey, and not switched on', /Domain Membership/.test(leanMember) && /not announced by the domain/.test(leanMember) && (await viewer.$eval('.svc-domain[data-domain="' + LEAN + '"] .svc-service[data-service="membership"] .svc-status', (e) => e.dataset.state)) === 'unknown', leanMember);
+    await viewer.click('.svc-domain[data-domain="' + LEAN + '"] .svc-service[data-service="membership"] .svc-open');
+    await viewer.waitForSelector('#svcJoin');
+    await viewer.click('#svcJoin');
+    await viewer.waitForSelector('#svcJoinConfirm');
+    const askJoin = await text('#svcSettings');
+    check('joining asks first, says the domain has not announced it and may decline', /Join Domain Membership at lean\.example\?/.test(askJoin) && /has not announced Domain Membership/.test(askJoin) && /may decline/.test(askJoin), askJoin);
+    check('nothing is sent to the domain by asking', requests.every((r) => /^GET /.test(r)), requests);
+    await viewer.click('#svcSettings button:has-text("Cancel")');
+    await viewer.click('#svcBack');
 
     console.log('--- a domain with nothing that needs a card ---');
     await viewer.fill('#servicesAddInput', PLAIN);

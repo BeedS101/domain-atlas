@@ -112,12 +112,14 @@ Described in `docs/services.md`. Open items:
   and issues only to the identity the wallet is acting as), but anyone can ask an issuer to issue a membership card to
   any public key. A fix is an issuer protocol change: require a signed challenge from the owner key on
   `/atlas/asset/issue` for membership classes.
-- **A manifest that names a key twice.** Confirmed on one of the two live domains that were read (through a summarising
-  fetch, so not byte exact): `walletBridge` appears twice at the top level. The first copy has `read`, `sign` with one
-  purpose and an `offer` list; the second has two sign purposes and no `offer`. Most JSON parsers (and the wallet) keep the
-  last, so the offer is dropped. The other domain has no repeated key. The wallet shows a warning when such a domain is
-  added; the domain should remove the duplicate. The service addresses on both are absolute and on their own domain; the
-  relative paths in the manifests are world scene addresses.
+- **A manifest that names a key twice.** Found on one of the two live domains that were read: `walletBridge` appeared twice
+  at the top level, the first copy with one sign purpose and an `offer` list, the second with two sign purposes and no
+  `offer`. Most JSON parsers (and the wallet) keep the last, so the offer was dropped. The domain owner has since merged
+  them into one entry (read, both sign purposes, the offer), checked again on 2026-11-16 with a cache-busting request
+  (a plain request was still answered from a cache). The other domain never had a repeated key. The wallet still shows a
+  warning when it adds any domain whose manifest repeats a top-level key, so a repeat is caught wherever it appears. The
+  service addresses on both domains are absolute and on their own domain; the relative paths in the manifests are world
+  scene addresses.
 - **Relative service addresses.** Some manifests could give a service address as a path (`/mail/`). The Services tab resolves a
   path against the domain it was fetched from and refuses anything on another host, scheme or port. `SPEC.md` §3.9 does not
   say a path is allowed; it should.
