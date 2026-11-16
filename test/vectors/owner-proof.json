@@ -1,0 +1,2461 @@
+{
+ "about": "Decision table shared by issuer-server/lib-owner-proof.js and issuer-php/lib/owner-proof.php. Each case is a request body, the context the issuer supplies, and the exact verdict both must return. Signatures are raw P-256 over the canonical payload, made with throw-away test keys.",
+ "keys": {
+  "owner": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+  "victim": "BNB64od7HihRv8ZD6MWxGNK1rdWhJY6jR5457D1nWE9vv6OJyWWUf54NK1VHnmaQy3F71vvODL2zdTkpZQ8wkwI",
+  "attacker": "BHhHmqsFV2ApTlNzixgKUJGFWvjM4W953SddqqFinv_39zV4JwFysfdLTL4ic42VWFMBEaNptS70xVlFwDnSYuk"
+ },
+ "cases": [
+  {
+   "name": "off: an unsigned request is not this check's business",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "off",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef"
+   },
+   "expect": {
+    "ok": true,
+    "skipped": true
+   }
+  },
+  {
+   "name": "off: even a bad intent is ignored",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "off",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": "garbage"
+   },
+   "expect": {
+    "ok": true,
+    "skipped": true
+   }
+  },
+  {
+   "name": "accept: an unsigned request passes as an unsigned issuance",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef"
+   },
+   "expect": {
+    "ok": true,
+    "legacy": true
+   }
+  },
+  {
+   "name": "accept: an intent of null counts as none",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": null
+   },
+   "expect": {
+    "ok": true,
+    "legacy": true
+   }
+  },
+  {
+   "name": "require: an unsigned request is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef"
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "require: an intent of null is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": null
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a class outside the three is never gated (require)",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.badge",
+    "requestId": "req-0123456789abcdef"
+   },
+   "expect": {
+    "ok": true,
+    "skipped": true
+   }
+  },
+  {
+   "name": "no assetClass is not gated here",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw"
+   },
+   "expect": {
+    "ok": true,
+    "skipped": true
+   }
+  },
+  {
+   "name": "accept: a correct request for atlas.membership is accepted",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "p-v3-24E4FSx7sbkVQggtR8DaMNtcWSrehzlIIs-kmLOQE4wi-v88X9nHSMRIPJRiaOyE0pbSftGtqTM_JE4BQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   }
+  },
+  {
+   "name": "require: a correct request for atlas.membership is accepted",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "3ctGbg8zEQK14VpMi3egK7uCNoEnlrL7veUk80B0kmzz5tyhOzjhceUbn_K5gkItx9YhzabxRphZFbtVZ61hTw"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   }
+  },
+  {
+   "name": "accept: a correct request for atlas.postoffice.membership is accepted",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "ICcFVO-DUCDuXUU68lXOzRrp1KYgrxPQVG6kEeU3i2WdM6sZjhvU_kqWoldr2EqSOFbtTwTSmynlm7O0qq2jvg"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   }
+  },
+  {
+   "name": "require: a correct request for atlas.postoffice.membership is accepted",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "e43f4_tpdqWotOq-GpxzmJw-gGeXRlyy_XckxLF3kJoGkxTNOL8Opge3ws4UNpnxMbWJaxRZRZKc0m5AFpwX7w"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   }
+  },
+  {
+   "name": "accept: a correct request for atlas.tradingstation.membership is accepted",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.tradingstation.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.tradingstation.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "AG4wUmSiJj1H62HQPZ5igCpTbid7mugyQzwnWnNvhb3ilukg48mS_4iSnP9J3_VH2Pa6ZKOYKXa271K9yLeODA"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   }
+  },
+  {
+   "name": "require: a correct request for atlas.tradingstation.membership is accepted",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.tradingstation.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.tradingstation.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "rwjr6otGVVOo7FSvHBJFfSqMVApJ-NqpuMUoMsb9cGjtC0KeLWV1wZeGAeYNVS-VphhFEbFtvlfpvKvNcbZQRg"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   }
+  },
+  {
+   "name": "a correct request for the Global Mail class (canonical bytes pinned for the wallet)",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "YrO5aTnTRDKYVq-lRr52zLmD0T1WRL8x1RE41gm7GcNrWmHAbsZQ71NdrSPOSVLkHYWq74z8q6nTAsJs8ImG4Q"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   },
+   "canonicalPayload": "{\"action\":\"issue\",\"assetClass\":\"atlas.postoffice.membership\",\"domain\":\"issuer.example.test\",\"issuedAt\":\"2026-11-17T12:00:00.000Z\",\"ownerPublicKey\":\"BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw\",\"quantity\":1,\"requestId\":\"req-0123456789abcdef\"}"
+  },
+  {
+   "name": "accept: a signature with its last bytes changed is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "lbFSe5j_D-zImi9v61-_lMqy3EE2_th242sV6-QdtQH7eT-jae-OcDO3hsyGW98xHTVREW6kx5Qx1Pm7awfeAA"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "accept: a truncated signature is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "lbFSe5j_D-zImi9v61-_lMqy3EE2_th242sV6-QdtQH7eT-jae-OcA"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "accept: the attacker's signature under the owner's name is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "Mr230Sqqynh4qTDSgFIBwrb2P14MIyoo-UfakYRyKl3kej5YZISsos59MfUcy8jXf1YqXr1FkVAMBtjYq7JYxA"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "accept: a passkey-style proof that does not verify is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "webauthn",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "clientDataJSON": "e30",
+      "authenticatorData": "AA",
+      "signature": "AA"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "accept: an unknown signer role is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "magic",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "lbFSe5j_D-zImi9v61-_lMqy3EE2_th242sV6-QdtQH7eT-jae-OcDO3hsyGW98xHTVREW6kx5Qx1Pm7awfepA"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "require: a signature with its last bytes changed is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "28dwwsar3dnyrzymOYhV1W7VFmQU3RKQhEaLi4H3QgSE7D8L6Gmdd71ODvCnlbCzac38oBztzli01oJf6yclAA"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "require: a truncated signature is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "28dwwsar3dnyrzymOYhV1W7VFmQU3RKQhEaLi4H3QgSE7D8L6Gmddw"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "require: the attacker's signature under the owner's name is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "yNMeFMAQOGKRuFCQrWL-wY-BhNuDk92OWDOPzwrb-4yaOKQsy5gSmiFZWTFWN_mgcYXAe8jHhd_wDtgeQ58xxQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "require: a passkey-style proof that does not verify is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "webauthn",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "clientDataJSON": "e30",
+      "authenticatorData": "AA",
+      "signature": "AA"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "require: an unknown signer role is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "magic",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "28dwwsar3dnyrzymOYhV1W7VFmQU3RKQhEaLi4H3QgSE7D8L6Gmdd71ODvCnlbCzac38oBztzli01oJf6ycl_g"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "the attacker signs a request naming the victim: refused as not the owner",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BNB64od7HihRv8ZD6MWxGNK1rdWhJY6jR5457D1nWE9vv6OJyWWUf54NK1VHnmaQy3F71vvODL2zdTkpZQ8wkwI",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BNB64od7HihRv8ZD6MWxGNK1rdWhJY6jR5457D1nWE9vv6OJyWWUf54NK1VHnmaQy3F71vvODL2zdTkpZQ8wkwI",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BHhHmqsFV2ApTlNzixgKUJGFWvjM4W953SddqqFinv_39zV4JwFysfdLTL4ic42VWFMBEaNptS70xVlFwDnSYuk",
+      "signature": "XF2VG1O-LGJx4BP-r62TOf496IKHNz1MwNc1czV_CkRZWnDLeLp0Io5Ei7GehyIvkuKcWgaS6m84-54vY9TzAQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "not-owner"
+   }
+  },
+  {
+   "name": "the same, in accept mode",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BNB64od7HihRv8ZD6MWxGNK1rdWhJY6jR5457D1nWE9vv6OJyWWUf54NK1VHnmaQy3F71vvODL2zdTkpZQ8wkwI",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BNB64od7HihRv8ZD6MWxGNK1rdWhJY6jR5457D1nWE9vv6OJyWWUf54NK1VHnmaQy3F71vvODL2zdTkpZQ8wkwI",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BHhHmqsFV2ApTlNzixgKUJGFWvjM4W953SddqqFinv_39zV4JwFysfdLTL4ic42VWFMBEaNptS70xVlFwDnSYuk",
+      "signature": "XF2VG1O-LGJx4BP-r62TOf496IKHNz1MwNc1czV_CkRZWnDLeLp0Io5Ei7GehyIvkuKcWgaS6m84-54vY9TzAQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "not-owner"
+   }
+  },
+  {
+   "name": "the attacker's own request replayed with the victim as the body recipient is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BNB64od7HihRv8ZD6MWxGNK1rdWhJY6jR5457D1nWE9vv6OJyWWUf54NK1VHnmaQy3F71vvODL2zdTkpZQ8wkwI",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BHhHmqsFV2ApTlNzixgKUJGFWvjM4W953SddqqFinv_39zV4JwFysfdLTL4ic42VWFMBEaNptS70xVlFwDnSYuk",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BHhHmqsFV2ApTlNzixgKUJGFWvjM4W953SddqqFinv_39zV4JwFysfdLTL4ic42VWFMBEaNptS70xVlFwDnSYuk",
+      "signature": "oCgOz326K_9hXe0Bsiutwqa-kU83u2p7rJurV1drZAPNAM-6PnRj4I_3A3OSHiLVonI8vktTAkwe8UHTeBtuRQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "the owner's request with the proof key swapped for the attacker's is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BHhHmqsFV2ApTlNzixgKUJGFWvjM4W953SddqqFinv_39zV4JwFysfdLTL4ic42VWFMBEaNptS70xVlFwDnSYuk",
+      "signature": "XW3EEexxD4e0mPdJC9JuWTDRRafb_YdoHYdMuJR8nEmdu76JwYn2spX_R1hEpz3lu_RQy48us4oEGwHCh52pDw"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "a request signed for another domain is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "other.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "YjYr9n8lWsiw9QqWzlUoNjWF9WOu515ITjP0v9H4SKX5-bPaWGLyKssub0Rxv1YwDV9WLdnXYnZXY4TSgX5Xdg"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a request for one class presented for another is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "dOp1hwsECRt1kMV1n5keId_VZkLZ9595XlfarjGeBnl9EdwPxt9HIF-OUjg_l8dpiEU5c_TRyx6axxW__DkX3w"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a request for another recipient is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BNB64od7HihRv8ZD6MWxGNK1rdWhJY6jR5457D1nWE9vv6OJyWWUf54NK1VHnmaQy3F71vvODL2zdTkpZQ8wkwI",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "8FStPclmLcNPumzwrb-6bJnvSCorXIBUEH936Diqyt37wTSEAz9FePFClhVs4RI331QLeNFClvMkNJXNx-nV0g"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a request for another request id is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-ffffffffffffffff"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "yTwDWRW49PaWo1leACu-qRlHCqiEuPrPczq8BUl3yPajfTFkiA3WZzqxhdfC_KsA1PS6F0-qPd3aUH57EYjcLw"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a quantity of 2 is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 2,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "1bu2oYcL5cw2a2Hza7bF6ny9qpG7VPP9_eSJLI2VQQ6NM7l2IX2YEoqUnAFdgXJ75DNCvMvZtaUdFcEqGmJmRA"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a quantity of \"1\" (text) is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": "1",
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "HF3UT0Vvy6oECkBPT29Oy9vtkXOHmY38-s-vzwQtcc6ZbTOkjU0xU5KFlr4YWovYsJfp_LVmHO8YDkXD4E5iyA"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a quantity written 1.0 is the same value as 1",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1.0,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "FkRleokUWDUuV1b9yQSzAVeZ40EA6lc8tUgo0py_aZpPW2bWzbM_gLAjbuOc-iUlwliXwGlE0oNwVwbsRzLdiQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   }
+  },
+  {
+   "name": "an extra field in the signed payload is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef",
+      "note": "x"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "QvSrGzGfWMlaHt0Hy1SRWCwOUZ_JVnPWauE0oNTliMtMi_bvn4OMvqLC8tJtieqyR64Wlbngc-80W5UYEIxGuQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a signed payload with a field missing is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "1E3H1hF6Lsu8Im759YMf-BGGRepWwVApvAjgwQaC-nmKHHOIcZ7z0PfRlC1lQEMaQn_opkw7chyxxej-H4icRQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "another operation named in the signed payload is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "convert",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "pYYcVzfmRuEw-VlqoCCrf2408dCNDkGJX_jIHm78yh9mfipZIhtgeowRurjNc82OzL1wVTyTPf1S6wolf_vpUA"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a signed mail check presented as an issue request is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "mail-check",
+      "domain": "issuer.example.test",
+      "credentialIds": [],
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "nonce": "nnnnnnnnnnnnnnnnnn"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "ysvi5Wbw7n7iqw9Fr1VKNKukN6tBQdvGZAy0HLzy5_42k6PPl0BYkzsWmNZniK1kmiCzRqPikmAZ62U7NEdMCg"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a bridge-wrapped signature is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "ctx": "atlas.bridge.sign/1",
+      "origin": "https://page.example.test",
+      "payload": {
+       "action": "issue",
+       "assetClass": "atlas.postoffice.membership",
+       "domain": "issuer.example.test",
+       "issuedAt": "2026-11-17T12:00:00.000Z",
+       "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+       "quantity": 1,
+       "requestId": "req-0123456789abcdef"
+      }
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "StHlqhlrqwVRQkTrLRZRq0bR8zJ5epqsh2MnZa8yepZex6QAgXiHxH4DIhnBZRCpU-jacUDe8y2M_AWdskuEbQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a signed request without a requestId is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "f4maMSjOdoxFAx94krQQgbkb4tCMiYn97IXvLbYH0Xhwgkmu5Ke0v1pfToZLyw9L24peGWGIpPmKBzynreFr5g"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 400,
+    "code": "request-id-required"
+   }
+  },
+  {
+   "name": "a requestId that is too short is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "short",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "f4maMSjOdoxFAx94krQQgbkb4tCMiYn97IXvLbYH0Xhwgkmu5Ke0v1pfToZLyw9L24peGWGIpPmKBzynreFr5g"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 400,
+    "code": "request-id-required"
+   }
+  },
+  {
+   "name": "a requestId that is not text is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": 12345678901234568,
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "f4maMSjOdoxFAx94krQQgbkb4tCMiYn97IXvLbYH0Xhwgkmu5Ke0v1pfToZLyw9L24peGWGIpPmKBzynreFr5g"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 400,
+    "code": "request-id-required"
+   }
+  },
+  {
+   "name": "a requestId with a forbidden character is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req 0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "f4maMSjOdoxFAx94krQQgbkb4tCMiYn97IXvLbYH0Xhwgkmu5Ke0v1pfToZLyw9L24peGWGIpPmKBzynreFr5g"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 400,
+    "code": "request-id-required"
+   }
+  },
+  {
+   "name": "an intent that is a string is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": "x"
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "accept: an intent that is a string is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": "x"
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an intent that is a number is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": 7
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "accept: an intent that is a number is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": 7
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an intent that is true is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": true
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "accept: an intent that is true is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": true
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an intent that is an array is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": []
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "accept: an intent that is an array is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": []
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an intent that is an empty object is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {}
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "accept: an intent that is an empty object is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {}
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an intent that is a list of two is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": [
+     1,
+     2
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "accept: an intent that is a list of two is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": [
+     1,
+     2
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a payload that is a list is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": [
+      {
+       "action": "issue",
+       "assetClass": "atlas.postoffice.membership",
+       "domain": "issuer.example.test",
+       "issuedAt": "2026-11-17T12:00:00.000Z",
+       "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+       "quantity": 1,
+       "requestId": "req-0123456789abcdef"
+      }
+     ],
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "wPtJEuIAsq5wIeSCiCSUTrHlluVJ2sTUVIecE2oDvqBofQXR5xN75R6K6utHzxRVs8cUVCpcIhqc7mHHFlVz9Q"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a proof that is a string is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": "x"
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a proof without a key is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "signature": "wPtJEuIAsq5wIeSCiCSUTrHlluVJ2sTUVIecE2oDvqBofQXR5xN75R6K6utHzxRVs8cUVCpcIhqc7mHHFlVz9Q"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "a proof key that is not text is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": 5,
+      "signature": "wPtJEuIAsq5wIeSCiCSUTrHlluVJ2sTUVIecE2oDvqBofQXR5xN75R6K6utHzxRVs8cUVCpcIhqc7mHHFlVz9Q"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-signature-invalid"
+   }
+  },
+  {
+   "name": "no recipient in the body is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "wPtJEuIAsq5wIeSCiCSUTrHlluVJ2sTUVIecE2oDvqBofQXR5xN75R6K6utHzxRVs8cUVCpcIhqc7mHHFlVz9Q"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a recipient that is not text is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": 5,
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "wPtJEuIAsq5wIeSCiCSUTrHlluVJ2sTUVIecE2oDvqBofQXR5xN75R6K6utHzxRVs8cUVCpcIhqc7mHHFlVz9Q"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "a request made now is fresh",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "a2GfBRZZxS7yaqKKmx8phASF9kA1qUwAr1aAsUTziWwUkQ6UNxXKjkUsh57_lF7q98VhTA3uxCgjqAccjJb7XQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   }
+  },
+  {
+   "name": "a request exactly two minutes old is still fresh",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T11:58:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "gThOIGwYbhtPtQmp02FZTy9iiNx-QIv74pluOnlVKGn4VnVpL60fBbkcc-82vF5uvWH4_hvUibpBdJct1aGpJw"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   }
+  },
+  {
+   "name": "a request exactly two minutes ahead is still fresh",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:02:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "yJAYGldIk8EMPUUf57jCnsu0Vj51X5ZUSKzbSJf6AK5woLdvl2LUlqloQP31bG5r8zU-iNqCkKg4IvmQgOiQHA"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   }
+  },
+  {
+   "name": "a request 121 seconds old is stale",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T11:57:59.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "zzhqNYKIsCFvnPzNUy2J74-MTKKSr_RJQQiOo_kBXEl6cMR--J-iHE97yB1VrL1Vbte470DwADj-dfyWxVG8og"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 401,
+    "code": "stale-request",
+    "serverTime": "2026-11-17T12:00:00.000Z"
+   }
+  },
+  {
+   "name": "a request 121 seconds ahead is stale",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:02:01.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "3yn6dIeh0fdX_LmsANlKOj0nKilM-v9E4kUnQUefrzlxnMvhCUmNsDqqJiAYFUcbwCqpg4O1IiaI3s5zrBnZkw"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 401,
+    "code": "stale-request",
+    "serverTime": "2026-11-17T12:00:00.000Z"
+   }
+  },
+  {
+   "name": "an old request is accepted when freshness is not being asked for (a retry of a completed issuance)",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": false
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-16T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "za-cavSvsnQBHsWLkVAq8AKc9HuTzWsKbsMjrtPjN05TnEn52BUXDh-nb-VFOWJPhKG7J0cRR2JJ0REgVfIxLA"
+     }
+    }
+   },
+   "expect": {
+    "ok": true,
+    "signed": true
+   }
+  },
+  {
+   "name": "an old request in accept mode is stale when freshness is asked for",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "accept",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T11:50:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "P1b8QZE0QFlkkCZBiDF-sZyJtG8bdWhxZYldBhFoMDc7WhTI1SwrU5mUxF5UI4xp5l58iysTosOK-cECsgiplg"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 401,
+    "code": "stale-request",
+    "serverTime": "2026-11-17T12:00:00.000Z"
+   }
+  },
+  {
+   "name": "an issue time without milliseconds is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "xlRaaSolajG1SFuW-tGCS0WcVn8kSIGAMNycDtxk8UozDtwLNZoKvJci0KUKc81fEch5BrZC70hKU-3jwpTm9A"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an issue time with an offset is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T12:00:00.000+00:00",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "hoZGd8I6TOn6ojVfdMvcloxIdJ-lKd1DgmI-55rDXuTt_qxVGG4ZlgGbtFoPelUFBjkjQ6M56h7K5JWuFVeFqw"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an issue time date only is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "vSva1x5bOOLz67MNJukIwdnFSzyWc9zoGzrpHHY8TdgH5jCqrI9yjH3omaOEFhrkrtvxkPjcRXybjZ2UaohHpQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an issue time an impossible day is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-02-31T12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "SO2c74SxuCr7ZQVxca6Av22489OZuCA8vHxJb97m3CWVieExjrdZu1ZJip79LTk4t_bCLcn58hilG-eVPAhV6Q"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an issue time an impossible hour is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17T25:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "1CMsFZbSZs5YwLE-eN0AbKNuRB-BVfYNx_FDedQ9c3K2JZWJvWF3OqSHN3V_l-7Gm8n52JjqEfR-mr2vmLn9Fg"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an issue time a space for the T is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "2026-11-17 12:00:00.000Z",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "s3pprg4K-m2NfYBVaYPm0kKiNjf0v2gvQk8y7Mq1WR9Vh4U4yQVvLaSZhvHUNVb9b7nwckbw5B2V3aDKpFmz-g"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an issue time not a date is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "now",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "nggXEN1CebXXveXKKROx7dfFuZW35dAT3z1yThY4a1oTSX8bMAmDMK3OA63g7irgseeOaxtBbGCK-SR2NruuPQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an issue time empty is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": "",
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "nPLHXEf-5LGOb1RdMDQJ3rTDu6OWEE9t-dYxdMkXkrOUQHZ_Ky-woOJNh3-dUzzI_F8YIgnmm7B8XMI-KIjYEQ"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  },
+  {
+   "name": "an issue time that is a number is refused",
+   "ctx": {
+    "domain": "issuer.example.test",
+    "mode": "require",
+    "nowMs": 1794916800000,
+    "requireFresh": true
+   },
+   "body": {
+    "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+    "assetClass": "atlas.postoffice.membership",
+    "requestId": "req-0123456789abcdef",
+    "intent": {
+     "payload": {
+      "action": "issue",
+      "assetClass": "atlas.postoffice.membership",
+      "domain": "issuer.example.test",
+      "issuedAt": 1794916800000,
+      "ownerPublicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "quantity": 1,
+      "requestId": "req-0123456789abcdef"
+     },
+     "proof": {
+      "signerRole": "raw-ecdsa",
+      "publicKey": "BE6p79G8u1JogwTegQTmzMBg1p4rOjQ8v85GDvatPNpD-g8TwtMnU8LqtasQURtJS7ivje5WRiMvg7LYaxFYdrw",
+      "signature": "xtGgGSgJGkVuiYgDApsQclP60vzqAKmuPwOH9QULuyzJro_1zbr5LDzpmki3yLFRAUjXJDKKquuWgx3Qlj6rSA"
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "status": 403,
+    "code": "owner-authorization-required"
+   }
+  }
+ ]
+}

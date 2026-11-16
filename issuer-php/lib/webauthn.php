@@ -123,7 +123,10 @@ function atlas_webauthn_problem($envelope, $expectedChallenge, $policy, &$parts 
   if (!$originOk) return 'origin not expected here';
   $rpHash = substr($auth, 0, 32);
   $matches = false;
-  foreach (atlas_webauthn_allowed_rp_ids($parsed) as $id) if (hash_equals(hash('sha256', $id, true), $rpHash)) $matches = true;
+  // A browser extension asserts with its own origin as the relying-party id (chrome-extension://<id>); a web page uses its host.
+  $rpIds = atlas_webauthn_allowed_rp_ids($parsed);
+  if (atlas_webauthn_is_extension_scheme($parsed['scheme'])) $rpIds[] = $origin;
+  foreach ($rpIds as $id) if (hash_equals(hash('sha256', $id, true), $rpHash)) $matches = true;
   if (!$matches) return 'relying party does not match the origin';
   if (is_array($policy['rpIds'])) {
     $pinned = false;

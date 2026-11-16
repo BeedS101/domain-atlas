@@ -843,6 +843,20 @@ Authenticated as the domain operator, not as any visitor or the credential's own
 
 **Deliberately out of scope: whether this was really theft, and how much of it.** This spec has no way to answer either question, and does not try to. A balance that's since been split, consolidated with legitimate funds, or spent partway is not something this mechanism traces or apportions — it recovers exactly the quantity named on the credential presented for clawback, no more. Which fraction of a mixed balance is actually tainted is a human investigation's conclusion to reach, using whatever audit trail (§5.1.1's `supersedes` chain, or a domain's own opt-in archive of superseded credentials) that investigation has available; this section only specifies what happens once that conclusion is acted on.
 
+### 5.13 Signed membership issuance
+
+An issuer that hands a membership card to whoever asks lets anyone enrol any public key: the card then sits in that key's wallet, in the issuer's roster and in its mail list, though its holder never asked. For the three membership classes (`atlas.membership`, `atlas.postoffice.membership`, `atlas.tradingstation.membership`) the recipient therefore signs one exact request, following the same owner-intent pattern §5.4 and §5.6 use.
+
+The request to `POST /atlas/asset/issue` carries, besides the existing fields, `intent: { payload, proof }`. The payload is exactly
+
+```json
+{ "action": "issue", "assetClass": "...", "domain": "...", "issuedAt": "2026-01-01T00:00:00.000Z", "ownerPublicKey": "...", "quantity": 1, "requestId": "..." }
+```
+
+signed by `ownerPublicKey` (§6.2 envelope: a raw key signature or a passkey assertion). The issuer compares the payload with the canonical JSON of what it expects for this request (its own domain, the requested class, the request's recipient and `requestId`), checks the signature, and checks that the signer is the recipient. `issuedAt` is a UTC timestamp with milliseconds in exactly the form shown. A request outside two minutes of the issuer's clock is refused with `stale-request` and the issuer's `serverTime`, so a wallet with a wrong clock can correct itself and retry once. The time is checked only when an issuance is about to be created: a repeat of a request the issuer has already completed (same `requestId`) is answered from the stored result however old it is, so a lost answer can always be recovered.
+
+A request that carries an intent is always checked, and a bad one is refused in every mode. Whether a request without one is served is the issuer's setting, advertised in `GET /atlas/capabilities` as `ownerProof: { "version": 1, "operation": "issue", "classes": [...], "mode": "accept" | "require" }`. `accept` serves an unsigned request and is a temporary compatibility mode for the period while wallets update; `require` refuses it with `403 owner-authorization-required` and `updateWallet: true`. An issuer without the record, or whose mode is `off`, is one that predates the check, and a wallet sends the request it always sent. A refusal is decided before anything is issued, so a failed request leaves no credential, no roster entry and no welcome mail. `test/vectors/owner-proof.json` fixes the decisions for every implementation.
+
 ## 6. Identity
 
 1. **Registration.** A visitor creates an identity once, client-side: `navigator.credentials.create()` (WebAuthn) generates a keypair in the device's authenticator. The private key never leaves secure hardware. The public key *is* the identity.

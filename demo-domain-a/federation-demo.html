@@ -279,8 +279,32 @@
   }
   function errText(res) { return (res.body && res.body.error) || 'unknown error'; }
 
-  async function issueAsset(domain, ownerPublicKey, assetClass) {
-    const res = await postJson(domain, '/atlas/asset/issue', { ownerPublicKey, assetClass, quantity: 1 });
+  // A domain that asks for proof of key ownership lists the class under ownerProof in /atlas/capabilities; the request then
+  // carries the recipient key's signature over this exact issue request (the same payload the wallet signs).
+  async function issuerWantsProof(domain, assetClass) {
+    try {
+      const caps = await fetch(baseUrl(domain) + '/atlas/capabilities', { cache: 'no-store' }).then((r) => r.json());
+      const rec = caps && caps.ownerProof;
+      return !!rec && rec.operation === 'issue' && Array.isArray(rec.classes) && rec.classes.includes(assetClass) && rec.mode !== 'off';
+    } catch (err) {
+      return false;
+    }
+  }
+  async function issueAsset(domain, identity, assetClass, skewMs) {
+    const ownerPublicKey = identity.publicKey;
+    const body = { ownerPublicKey, assetClass, quantity: 1 };
+    if (await issuerWantsProof(domain, assetClass)) {
+      body.requestId = b64urlEncode(crypto.getRandomValues(new Uint8Array(18)));
+      const payload = {
+        action: 'issue', assetClass, domain, issuedAt: new Date(Date.now() + (skewMs || 0)).toISOString(),
+        ownerPublicKey, quantity: 1, requestId: body.requestId
+      };
+      body.intent = { payload, proof: await signWithSelf(identity, payload) };
+    }
+    const res = await postJson(domain, '/atlas/asset/issue', body);
+    if (!res.ok && res.body && res.body.code === 'stale-request' && !skewMs && Date.parse(res.body.serverTime)) {
+      return issueAsset(domain, identity, assetClass, Date.parse(res.body.serverTime) - Date.now());
+    }
     if (!res.ok) throw new Error(errText(res));
     return res.body;
   }
@@ -400,7 +424,7 @@
     btn.disabled = true;
     try {
       alice = await genIdentity();
-      aliceMembership = await issueAsset(DOMAIN_A, alice.publicKey, 'atlas.postoffice.membership');
+      aliceMembership = await issueAsset(DOMAIN_A, alice, 'atlas.postoffice.membership');
       aliceHandle = 'alice' + randomSuffix();
       await setHandle(DOMAIN_A, alice, aliceHandle);
       resultEl.innerHTML = '<div class="result ok">Alice joined ' + DOMAIN_A + '\'s Post Office as ' + aliceHandle + '#' + DOMAIN_A + '.</div>';
@@ -425,7 +449,7 @@
     if (!domB) { resultEl.innerHTML = '<div class="result err">Enter Domain B\'s address above first.</div>'; btn.disabled = false; return; }
     try {
       bob = await genIdentity();
-      bobMembership = await issueAsset(domB, bob.publicKey, 'atlas.postoffice.membership');
+      bobMembership = await issueAsset(domB, bob, 'atlas.postoffice.membership');
       bobHandle = 'bob' + randomSuffix();
       await setHandle(domB, bob, bobHandle);
       resultEl.innerHTML = '<div class="result ok">Bob joined ' + domB + '\'s Post Office as ' + bobHandle + '#' + domB + ' — a completely separate server from ' + DOMAIN_A + '.</div>';

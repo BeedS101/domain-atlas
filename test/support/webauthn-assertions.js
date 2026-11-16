@@ -62,6 +62,8 @@ async function buildCases() {
 
   // What the wallet really sends: an extension-origin passkey, rpIdHash = sha256(extension id), user present.
   add('wallet passkey: extension origin, user present', true, {});
+  add('wallet passkey: extension origin, relying party is the extension origin (what Chrome sends)', true, { rpId: EXT_ORIGIN });
+  add('a Firefox extension origin as its own relying party', true, { origin: 'moz-extension://' + MOZ_ID, rpId: 'moz-extension://' + MOZ_ID });
   add('wallet passkey with user verification', true, { flags: 0x05 });
   add('synced passkey (backup eligible and backed up)', true, { flags: 0x1d });
   add('authenticator extension data after the fixed part', true, { flags: 0x81, extra: Buffer.from([0xa1, 0x61, 0x78, 0x01]) });
@@ -108,6 +110,8 @@ async function buildCases() {
 
   // Relying-party context.
   add('rpIdHash of the wrong relying party', false, { rpId: 'other-extension-id' });
+  add('another extension\'s origin as the relying party', false, { rpId: 'chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba' });
+  add('a web origin never gets the extension form of the relying party', false, { origin: OWN_ORIGIN, rpId: OWN_ORIGIN });
   add('rpIdHash all zero', false, { rpIdHash: Buffer.alloc(32, 0) });
   add('an origin that is not this domain', false, { origin: 'https://evil.example', rpId: 'evil.example' });
   add('a look-alike of this domain', false, { origin: 'https://issuer.example.evil.example', rpId: 'issuer.example.evil.example' });

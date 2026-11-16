@@ -150,7 +150,7 @@ If saved state cannot be read, the tab refuses to overwrite it and the backgroun
 
 A service that needs a card the wallet cannot use yet is listed only if the manifest declares the card; its page shows
 which card, whether the person holds it, and that nothing is sent to the domain for it. Joining is offered for Global
-Mail, Trading Station and Domain Membership only, through the same issue request as the Join buttons in a world. Settings
+Mail, Trading Station and Domain Membership only, through the same issue request as the Join buttons in a world. That request is signed by the identity the card is for where the issuer asks for it (`docs/owner-proof.md`). Settings
 are loaded from the domain only when the person asks.
 
 ## Tests

@@ -117,7 +117,10 @@ function assertionProblem(envelope, expectedChallenge, policy, parts) {
     : policy.ownOrigins.includes(clientData.origin) || isExtensionScheme(parsed.scheme);
   if (!originOk) return 'origin not expected here';
   const rpHash = authData.subarray(0, 32);
-  if (!allowedRpIds(parsed).some((id) => rpHash.equals(sha256(id)))) return 'relying party does not match the origin';
+  // A browser extension asserts with its own origin as the relying-party id (chrome-extension://<id>); a web page uses its host.
+  const rpIds = allowedRpIds(parsed);
+  if (isExtensionScheme(parsed.scheme)) rpIds.push(clientData.origin);
+  if (!rpIds.some((id) => rpHash.equals(sha256(id)))) return 'relying party does not match the origin';
   if (policy.rpIds && !policy.rpIds.some((id) => rpHash.equals(sha256(id)))) return 'relying party not expected here';
   if (parts) { parts.clientDataRaw = clientDataRaw; parts.authData = authData; }
   return null;

@@ -58,6 +58,7 @@ const { connectImap } = require('./lib-imap');
 const { parseMimeMessage } = require('./lib-mime-parse');
 const { evaluateTransferPolicy, evaluateDeliveryGate, evaluateMintForDelivery } = require('./lib-transfer-policy');
 const { createDeliveryEngine } = require('./lib-delivery');
+const ownerProof = require('./lib-owner-proof');
 const { createLedgerIssuance } = require('./lib-ledger-issuance');
 const { createSiteStatus } = require('./lib-site-status');
 const itemIssuer = require('./item-standard-issuer');
@@ -2414,7 +2415,7 @@ function createFileNoClobber(file, text, mode) {
 // request throttling create without anything having been issued (admin sessions and
 // nonces, login and mail nonces, relay rate counters, the calendar and the visit counter).
 const ESTABLISHED_STATE_FILE = /^atlas-[A-Za-z0-9._-]*\.json$/;
-const NOT_EVIDENCE_FILE = /(-config\.json|^atlas-admin-[a-z-]*\.json|^atlas-(login|mail)-nonces-store\.json|^atlas-federation-(blocklist\.json|relay-rate-store\.json)|^atlas-trusted-trade-peers-store\.json|^atlas-(calendar|visits)-store\.json)$/;
+const NOT_EVIDENCE_FILE = /(-config\.json|^atlas-admin-[a-z-]*\.json|^atlas-(login|mail)-nonces-store\.json|^atlas-owner-proof-stats-store\.json|^atlas-federation-(blocklist\.json|relay-rate-store\.json)|^atlas-trusted-trade-peers-store\.json|^atlas-(calendar|visits)-store\.json)$/;
 function listDirectoryNames(dir, found, label) {
   try {
     return fs.readdirSync(dir);
@@ -3631,6 +3632,44 @@ function mintOriginAllowed(req, assetClass) {
   if (listed(MINT_TRUSTED_ORIGINS.concat((process.env.ATLAS_MINT_ORIGINS || '').split(',').map((s) => s.trim())))) return true;
   return FEDERATION_MINT_CLASSES.has(assetClass) && listed(FEDERATION_MINT_ORIGINS.concat((process.env.ATLAS_FEDERATION_MINT_ORIGINS || '').split(',').map((s) => s.trim())));
 }
+
+// Proof that the requester controls the key a membership card is issued to (lib-owner-proof.js): the recipient key
+// signs an exact request naming this domain, the class, the recipient and the request id.
+//   ATLAS_OWNER_PROOF=accept   (default) a request without a proof is still served; one with a bad proof is refused
+//   ATLAS_OWNER_PROOF=require  a request without a valid proof is refused
+//   ATLAS_OWNER_PROOF=off      no check (isolated test issuers only)
+// 'accept' is a compatibility step for wallets that predate the signed request, not the finished protection: until
+// 'require' is set, anyone can still ask this issuer to issue a membership card to a key they do not hold.
+// tools/owner-proof-readiness.js reads the outcome counts below and says when 'require' will not turn anyone away.
+const OWNER_PROOF_STATS_FILE = path.join(STATE_DIR, 'atlas-owner-proof-stats-store.json');
+const OWNER_PROOF_MODE = (() => {
+  const raw = process.env.ATLAS_OWNER_PROOF;
+  if (raw === undefined || raw === '') return 'accept';
+  const mode = ownerProof.parseMode(raw);
+  if (mode) return mode;
+  console.warn('ATLAS_OWNER_PROOF="' + raw + '" is not off, accept or require; using accept.');
+  return 'accept';
+})();
+function updateOwnerProofStats(change) {
+  try {
+    let doc = null;
+    try { doc = JSON.parse(fs.readFileSync(OWNER_PROOF_STATS_FILE, 'utf8')); } catch (err) { doc = null; }
+    writeFileAtomic(OWNER_PROOF_STATS_FILE, JSON.stringify(change(doc), null, 1));
+  } catch (err) {
+    console.error('could not record the owner-proof outcome:', err.message);
+  }
+}
+function noteOwnerProof(assetClass, kind, code) {
+  updateOwnerProofStats((doc) => ownerProof.recordOutcome(ownerProof.recordMode(doc, OWNER_PROOF_MODE, new Date().toISOString()), assetClass, kind, code, new Date().toISOString()));
+}
+if (OWNER_PROOF_MODE === 'accept') {
+  console.warn('Membership owner proof: ACCEPT (temporary compatibility mode). Membership cards can still be issued to a key the requester does not hold. Run tools/owner-proof-readiness.js to see when ATLAS_OWNER_PROOF=require is safe.');
+} else if (OWNER_PROOF_MODE === 'off') {
+  console.warn('Membership owner proof is OFF (ATLAS_OWNER_PROOF=off): for isolated test issuers only.');
+} else {
+  console.log('Membership owner proof: REQUIRE.');
+}
+updateOwnerProofStats((doc) => ownerProof.recordMode(doc, OWNER_PROOF_MODE, new Date().toISOString()));
 
 const MINT_ALLOWANCE_DIR = path.join(STATE_DIR, 'mint-allowance');
 // ATLAS_MINT_LIMITS=off switches the limits off for isolated test issuers only; a live issuer never sets it.
@@ -6830,6 +6869,16 @@ async function main() {
           mintQuantity = 1;
         }
 
+        // Proof that the requester holds the recipient key, for the membership classes (see OWNER_PROOF_MODE). Nothing
+        // below has been touched yet, so a refusal leaves no lease, credential, roster row or mail behind. Freshness is
+        // judged further down, and only when this request is about to create something.
+        const proofVerdict = await ownerProof.ownerProofVerdict(issueBody, { domain: DOMAIN, mode: OWNER_PROOF_MODE, nowMs: Date.now(), requireFresh: false }, verifyEnvelope);
+        if (!proofVerdict.ok) {
+          noteOwnerProof(assetClass, 'refused', proofVerdict.code);
+          const { ok, status, ...refusal } = proofVerdict;
+          return sendJson(res, status, refusal);
+        }
+
         // A repeated request id returns the credential already issued for it.
         const issueRequestId = parseRequestId(issueBody);
         const issueReplayable = issueRequestId !== null;
@@ -6845,6 +6894,16 @@ async function main() {
             // The roster rows below are written after the journal commits; a retry completes them if that was cut short.
             await recordIssuance(assetClass, prior.response, ownerPublicKey);
             return sendJson(res, 200, prior.response);
+          }
+        }
+        // The signed request has to be recent only when it is about to create something: a retry of one the issuer already
+        // completed (answered above) may be much older.
+        if (proofVerdict.signed) {
+          const stale = ownerProof.staleProblem(proofVerdict.issuedAtMs, Date.now());
+          if (stale) {
+            noteOwnerProof(assetClass, 'refused', stale.code);
+            const { ok, status, ...refusal } = stale;
+            return sendJson(res, status, refusal);
           }
         }
 
@@ -6912,6 +6971,11 @@ async function main() {
         console.log('Issued', mintQuantity, credential.asset.name, 'to', ownerPublicKey.slice(0, 16) + '...');
 
         await recordIssuance(assetClass, credential, ownerPublicKey);
+        if (proofVerdict.signed) noteOwnerProof(assetClass, 'signed');
+        else if (proofVerdict.legacy) {
+          console.warn('Issued ' + assetClass + ' without proof of key ownership (ATLAS_OWNER_PROOF=accept).');
+          noteOwnerProof(assetClass, 'unsigned');
+        }
 
         return sendJson(res, 200, credential);
       }
@@ -8856,7 +8920,9 @@ async function main() {
             version: 1,
             operations: ['issue', 'issue-unique', 'split', 'consolidate', 'convert', 'purchase', 'trade-claim', 'trade-claim-remainder', 'transfer'],
             retentionHours: REPLAY_TTL_MS / 3600000
-          }
+          },
+          // Which classes want a request signed by the key they are issued to, and whether the issuer insists on it yet.
+          ...(OWNER_PROOF_MODE === 'off' ? {} : { ownerProof: { version: 1, operation: 'issue', classes: ownerProof.OWNER_PROOF_CLASSES, mode: OWNER_PROOF_MODE } })
         });
       }
 

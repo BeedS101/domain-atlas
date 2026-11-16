@@ -106,12 +106,11 @@ See "Not covered" in `bridge-prompt-window.md`.
 
 Described in `docs/services.md`. Open items:
 
-- **Join has no proof of key ownership.** Joining Global Mail or Trading Station from the Services tab uses the same
-  request as the Join buttons in a world: `POST /atlas/asset/issue` with the identity's public key and no signature
-  proving the requester holds the matching private key. The tab does not widen this (it asks first, names the identity,
-  and issues only to the identity the wallet is acting as), but anyone can ask an issuer to issue a membership card to
-  any public key. A fix is an issuer protocol change: require a signed challenge from the owner key on
-  `/atlas/asset/issue` for membership classes.
+- **Join proof of key ownership: fixed in code, not yet enforced.** Joining a membership service now sends a request signed
+  by the identity the card is for (`SPEC.md` §5.13, `docs/owner-proof.md`). Each issuer starts in `accept` mode, which still
+  serves an unsigned request so wallets that have not updated keep working. That is a temporary compatibility mode, not the
+  fix: until an issuer is switched to `require`, anyone can still ask it to issue a card to a key they do not hold. Switch
+  each issuer once `node tools/owner-proof-readiness.js` reports it ready.
 - **A manifest that names a key twice.** Found on one of the two live domains that were read: `walletBridge` appeared twice
   at the top level, the first copy with one sign purpose and an `offer` list, the second with two sign purposes and no
   `offer`. Most JSON parsers (and the wallet) keep the last, so the offer was dropped. The domain owner has since merged

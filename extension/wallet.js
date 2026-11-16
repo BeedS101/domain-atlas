@@ -1791,6 +1791,11 @@ const AtlasWallet = (() => {
     return b64urlEncode(crypto.getRandomValues(new Uint8Array(18)).buffer);
   }
 
+  // The wording for an issuer that refuses a membership request for lack of a signed request, or null for any other error.
+  function explainOwnerProofRefusal(err) {
+    return typeof AtlasOwnerProof === 'undefined' || !err ? null : AtlasOwnerProof.explainRefusal(err);
+  }
+
   // Whether an issuer answers a repeated request id for an operation, from its GET /atlas/capabilities.
   //   'yes'          listed: the same request may be sent again with the same requestId
   //   'no'           route missing or operation not listed (an older issuer): a repeat would create a
@@ -1809,7 +1814,11 @@ const AtlasWallet = (() => {
       try { data = JSON.parse(await res.text()); } catch (err) { return { support: 'no', retentionHours: null }; }
       const ids = data && data.requestIds;
       const listed = !!ids && Number(ids.version) >= 1 && Array.isArray(ids.operations) && ids.operations.includes(operation);
-      return { support: listed ? 'yes' : 'no', retentionHours: listed && Number(ids.retentionHours) > 0 ? Number(ids.retentionHours) : null };
+      return {
+        support: listed ? 'yes' : 'no', retentionHours: listed && Number(ids.retentionHours) > 0 ? Number(ids.retentionHours) : null,
+        // What the issuer asks to have signed before it issues a membership card (owner-proof-core.js), or null.
+        ownerProof: typeof AtlasOwnerProof === 'undefined' ? null : AtlasOwnerProof.parseCapability(data)
+      };
     } catch (err) {
       return { support: 'unreachable', retentionHours: null };
     } finally {
@@ -1990,6 +1999,8 @@ const AtlasWallet = (() => {
     err.status = status;
     err.code = data && data.code ? data.code : undefined;
     err.credentialId = data && data.credentialId ? data.credentialId : undefined;
+    if (data && typeof data.serverTime === 'string') err.serverTime = data.serverTime;
+    if (data && data.updateWallet === true) err.updateWallet = true;
     return Object.assign(err, extra || {});
   }
 
@@ -2677,13 +2688,40 @@ const AtlasWallet = (() => {
     // requestId). A unique one does only on an issuer that lists 'issue-unique'; any other would make a
     // second item for a repeat, so it gets the single, unjournalled request it always had.
     let journalled = quantity !== undefined;
+    // A membership card is issued only to a key the requester can sign with: when the issuer asks for it (its capabilities
+    // list the class under ownerProof) the request carries the recipient key's signature over an exact "issue" request.
+    let signRequest = false;
     if (!journalled) {
-      const support = await issuerRepeatSupport(issuerDomain, 'issue-unique');
-      if (support === 'unreachable') throw repeatSupportError('Mint', issuerDomain);
-      journalled = support === 'yes';
+      const capability = await issuerCapability(issuerDomain, 'issue-unique');
+      if (capability.support === 'unreachable') throw repeatSupportError('Mint', issuerDomain);
+      journalled = capability.support === 'yes';
+      signRequest = typeof AtlasOwnerProof !== 'undefined' && AtlasOwnerProof.shouldSign(capability.ownerProof, assetClass);
+      if (signRequest && !journalled) {
+        throw operationError('Mint', 0, issuerDomain + ' asks for a signed request but cannot repeat one safely, so nothing was sent', null, {});
+      }
     }
     if (journalled) {
-      const done = await runIssuerOperation({ owner: owner.publicKey, kind: 'mint', label: 'Mint', domain: issuerDomain, path: '/atlas/asset/issue', body });
+      // Built after the request id exists, because the signature names it. A request the issuer finds too old (this
+      // wallet's clock is off) created nothing: the clock is corrected from the issuer's answer and one new request is signed.
+      const signedBody = async (requestId) => Object.assign({}, body, {
+        intent: await AtlasOwnerProof.buildIssueIntent(
+          { assetClass, domain: issuerDomain, ownerPublicKey: owner.publicKey, requestId }, mailNow(issuerDomain), (payload) => signAs(role, payload))
+      });
+      const attempt = () => runIssuerOperation({ owner: owner.publicKey, kind: 'mint', label: 'Mint', domain: issuerDomain, path: '/atlas/asset/issue', body: signRequest ? signedBody : body });
+      let done;
+      try {
+        done = await attempt();
+      } catch (err) {
+        const offset = signRequest && err && err.code === 'stale-request' ? AtlasOwnerProof.clockOffsetFrom({ serverTime: err.serverTime }, Date.now()) : null;
+        if (offset !== null) {
+          mailClockOffsets.set(issuerDomain, offset);
+          done = await attempt();
+        } else {
+          const explained = explainOwnerProofRefusal(err);
+          if (explained) err.message = explained;
+          throw err;
+        }
+      }
       credential = done.data;
       requestId = done.requestId || null;
       verdict = done.changes[0].add[0].lastVerdict;

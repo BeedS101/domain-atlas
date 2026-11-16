@@ -28,10 +28,21 @@ if ($has('asset/transfer.php', 'atlas_commit_replacement')) $operations[] = 'tra
 if ($has('trade/claim.php', 'atlas_store_claim_outcome')) $operations[] = 'trade-claim';
 if ($has('trade/claim.php', "'remainder' => \$bRemainder, 'code' => 'claim-incomplete'")) $operations[] = 'trade-claim-remainder';
 
-send_json(200, [
+// Which classes want a request signed by the key they are issued to, and whether the issuer insists on it yet. Listed
+// only when issue.php is the version that checks it and lib/owner-proof.php is uploaded with it, so a half-uploaded
+// bundle does not advertise a check it cannot make.
+$ownerProof = null;
+if ($has('asset/issue.php', 'atlas_owner_proof_verdict') && is_file(__DIR__ . '/../lib/owner-proof.php')) {
+  require_once __DIR__ . '/../lib/owner-proof.php';
+  if (atlas_owner_proof_mode() !== 'off') {
+    $ownerProof = ['version' => 1, 'operation' => 'issue', 'classes' => ATLAS_OWNER_PROOF_CLASSES, 'mode' => atlas_owner_proof_mode()];
+  }
+}
+
+send_json(200, array_merge([
   'requestIds' => [
     'version' => 1,
     'operations' => $operations,
     'retentionHours' => atlas_replay_ttl_seconds() / 3600,
   ],
-]);
+], $ownerProof === null ? [] : ['ownerProof' => $ownerProof]));

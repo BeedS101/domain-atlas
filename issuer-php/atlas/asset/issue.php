@@ -5,6 +5,7 @@
 // (SPEC.md §5), depending entirely on what ATLAS_ASSET_CATALOG says that
 // class is.
 require_once __DIR__ . '/../../lib/bootstrap.php';
+require_once __DIR__ . '/../../lib/owner-proof.php';
 handle_preflight();
 require_post();
 $kp = atlas_load_keys();
@@ -102,6 +103,19 @@ if ($catalogEntry['fungible']) {
   $mintQuantity = 1;
 }
 
+// Proof that the requester holds the recipient key, for the membership classes (see atlas_owner_proof_mode()). Nothing
+// below has been touched yet, so a refusal leaves no lease, credential, roster row or mail behind. Freshness is judged
+// further down, and only when this request is about to create something.
+$proofVerdict = atlas_owner_proof_verdict($body, [
+  'domain' => atlas_domain(), 'mode' => atlas_owner_proof_mode(), 'nowMs' => (int) round(microtime(true) * 1000), 'requireFresh' => false,
+], function ($payload, $proof) { return verify_envelope($payload, $proof); });
+if (!$proofVerdict['ok']) {
+  atlas_owner_proof_note($assetClass, 'refused', $proofVerdict['code']);
+  $refusal = $proofVerdict;
+  unset($refusal['ok'], $refusal['status']);
+  send_json($proofVerdict['status'], $refusal);
+}
+
 // A repeated request id returns the credential already issued for it.
 $issueRequestId = atlas_parse_request_id($body);
 $issueReplayable = $issueRequestId !== null;
@@ -127,6 +141,18 @@ if ($issueReplayable) {
     no_store_headers();
     echo $prior['responseJson'];
     exit;
+  }
+}
+
+// The signed request has to be recent only when it is about to create something: a retry of one the issuer already
+// completed (answered above) may be much older.
+if (!empty($proofVerdict['signed'])) {
+  $stale = atlas_owner_proof_stale($proofVerdict['issuedAtMs'], (int) round(microtime(true) * 1000));
+  if ($stale !== null) {
+    atlas_owner_proof_note($assetClass, 'refused', $stale['code']);
+    $refusal = $stale;
+    unset($refusal['ok'], $refusal['status']);
+    send_json($stale['status'], $refusal);
   }
 }
 
@@ -186,5 +212,10 @@ if ($journalled) {
 }
 
 atlas_record_issuance($kp, $assetClass, $credential, $ownerPublicKey);
+if (!empty($proofVerdict['signed'])) atlas_owner_proof_note($assetClass, 'signed');
+elseif (!empty($proofVerdict['legacy'])) {
+  error_log('atlas: issued ' . $assetClass . ' without proof of key ownership (owner proof mode accept).');
+  atlas_owner_proof_note($assetClass, 'unsigned');
+}
 
 send_json(200, $credential);
