@@ -39,7 +39,7 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => 
 // functions do), so it's safe to call from a service worker with no window.
 // This is extension-wide state, not a per-tab one, so a plain setIcon with
 // no tabId is all that's needed.
-importScripts('item-standard.js', 'item-effects.js', 'wallet.js');
+importScripts('item-standard.js', 'item-effects.js', 'services-core.js', 'wallet.js');
 // Calling is optional: if its module is missing or fails to load, the wallet worker still starts
 // and every other feature works (the call functions then report that calling is unavailable).
 try { importScripts('call-protocol.js'); } catch (err) { /* calling stays unavailable */ }
@@ -197,6 +197,23 @@ function openBridgeConfirmWindow(token, parentWindowId) {
     return win && typeof win.id === 'number' ? win.id : null;
   })();
 }
+
+// The Services tab asks which site the person is looking at. Only the wallet's own pages are answered, and only with the origin of
+// an http(s) page: no path, query or title leaves the browser's own record of the tab.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.type !== 'services-current-site') return;
+  const own = chrome.runtime.getURL('');
+  if (sender.id !== chrome.runtime.id || typeof sender.url !== 'string' || !sender.url.startsWith(own)) { sendResponse({ ok: false }); return; }
+  chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((tabs) => {
+    let origin = null;
+    try {
+      const u = new URL(tabs && tabs[0] && tabs[0].url ? tabs[0].url : '');
+      if (u.protocol === 'https:' || u.protocol === 'http:') origin = u.origin;
+    } catch (err) { origin = null; }
+    sendResponse({ ok: true, origin });
+  }).catch(() => sendResponse({ ok: false }));
+  return true;
+});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!sender.tab || typeof sender.tab.id !== 'number') return;

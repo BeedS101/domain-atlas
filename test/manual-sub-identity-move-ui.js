@@ -59,7 +59,7 @@ function check(name, ok, detail) {
     check('the coupon offers Move', actions.filter((a) => a === 'move-identity').length === 1, actions);
     check('the bound badge does not', actions.filter((a) => a === 'move-identity').length === 1 && actions.includes('hide'));
 
-    await frame.locator('#documentsSubtabBtn').click();
+    await frame.locator('#servicesSubtabBtn').click();
     const couponCard = frame.locator('#selfDocumentsList .wallet-item', { hasText: 'Coupon' }).first();
     await couponCard.locator('.card-menu-toggle').click();
     await couponCard.locator('button[data-action="move-identity"]').click();

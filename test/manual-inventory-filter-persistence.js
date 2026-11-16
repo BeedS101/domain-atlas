@@ -91,7 +91,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     console.log('PASS: Collectibles checkbox survived the reload, Documents stayed independent');
 
     console.log('STEP 4: checking Documents\' checkbox now too, reloading again, both must come back checked');
-    await frame.locator('#documentsSubtabBtn').click();
+    await frame.locator('#servicesSubtabBtn').click();
     await frame.locator('#documentsCompatOnlyCheckbox').check();
     await frame.page().waitForTimeout(200);
     const afterBothChecked = await frame.evaluate(() => AtlasWallet.getInventoryFilterSettings());

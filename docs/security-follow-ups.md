@@ -101,3 +101,29 @@ The overlay frame item below still applies to the signing prompt.
 ## Overlay frame
 
 See "Not covered" in `bridge-prompt-window.md`.
+
+## Services tab: what remains
+
+Described in `docs/services.md`. Open items:
+
+- **Join has no proof of key ownership.** Joining Global Mail or Trading Station from the Services tab uses the same
+  request as the Join buttons in a world: `POST /atlas/asset/issue` with the identity's public key and no signature
+  proving the requester holds the matching private key. The tab does not widen this (it asks first, names the identity,
+  and issues only to the identity the wallet is acting as), but anyone can ask an issuer to issue a membership card to
+  any public key. A fix is an issuer protocol change: require a signed challenge from the owner key on
+  `/atlas/asset/issue` for membership classes.
+- **A manifest that names a key twice.** `walletBridge` appears twice at the top level of at least one live manifest (as
+  reported when the manifests were read; not verified from here). JSON parsers keep different ones. The wallet reads the
+  last one and shows a warning when it adds the domain; the domain should remove the duplicate.
+- **Relative service addresses.** Some manifests give a service address as a path (`/mail/`). The Services tab resolves a
+  path against the domain it was fetched from and refuses anything on another host, scheme or port. `SPEC.md` §3.9 does
+  not say a path is allowed; it should.
+- **Switching Global Mail off pauses more than mail.** The background check presents one request per issuer domain, and
+  update notices, chat and friend mail ride the same request. With the Global Mail credential left out, those wait for that
+  domain until the service is switched on again. Other credentials held at the domain are still presented.
+- **Unreadable saved state fails open for the mail check.** If the Services state cannot be read, the check behaves as it
+  did before the tab existed, so a storage fault does not silence mail. Removing a domain from the list also removes its
+  switched-off choice, so checks resume; the confirmation says so.
+- **A discovered manifest is only trusted for what it says about itself.** A domain's advertisement says what it offers,
+  never what the wallet does; an address on another host is dropped. A manifest cannot enable a service, register the
+  person or choose an identity.

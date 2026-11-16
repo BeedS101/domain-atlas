@@ -534,6 +534,30 @@
   #ledgerSubscreen #chainLabsSection select { font-family: inherit; font-size: 12px; background: #141f26; color: #e7edef; border: 1px solid #2c3c44; border-radius: 6px; padding: 8px; margin-top: 4px; margin-bottom: 8px; }
   #ledgerSubscreen .ledger-open-label { display: block; font-size: 12px; color: #a9b8bf; margin-top: 6px; }
 
+  /* Services tab. The colour of a status is always paired with an icon and words. */
+  #servicesSubscreen #servicesSection { margin-top: 8px; }
+  #servicesSubscreen .svc-domain, #servicesSubscreen .svc-found, #servicesSubscreen .svc-step, #servicesSubscreen .svc-discover { margin-bottom: 10px; }
+  #servicesSubscreen .svc-domain-name { font-size: 15px; font-weight: 600; }
+  #servicesSubscreen .svc-service { border-top: 1px solid #2c3c44; margin-top: 8px; padding-top: 8px; }
+  #servicesSubscreen .svc-service-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  #servicesSubscreen .svc-service-name, #servicesSubscreen .svc-title { font-size: 13px; font-weight: 600; }
+  #servicesSubscreen .svc-title { font-size: 15px; margin: 8px 0; }
+  #servicesSubscreen .svc-status { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; border: 1px solid currentColor; }
+  #servicesSubscreen .svc-active { color: #57c28f; }
+  #servicesSubscreen .svc-disabled { color: #e0b84c; }
+  #servicesSubscreen .svc-problem { color: #ef7b6e; }
+  #servicesSubscreen .svc-unknown { color: #a9b8bf; }
+  #servicesSubscreen .svc-issue { font-size: 11px; color: #ef7b6e; margin-top: 4px; }
+  #servicesSubscreen .svc-status-block { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 8px; }
+  #servicesSubscreen .svc-row { margin-top: 10px; }
+  #servicesSubscreen .svc-row-label { font-size: 12px; font-weight: 600; color: #e7edef; }
+  #servicesSubscreen .svc-advertised-item { font-size: 12px; margin-top: 3px; }
+  #servicesSubscreen .svc-step { border-color: #e0b84c; }
+  #servicesSubscreen .svc-link { margin-top: 10px; font-size: 11px; word-break: break-all; }
+  #servicesSubscreen #servicesSection input[type="text"], #servicesSubscreen #servicesSection select { width: 100%; box-sizing: border-box; }
+  #servicesSubscreen #servicesSection select { font-family: inherit; font-size: 12px; background: #141f26; color: #e7edef; border: 1px solid #2c3c44; border-radius: 6px; padding: 8px; margin-top: 4px; }
+  #servicesSubscreen button:focus-visible, #servicesSubscreen input:focus-visible, #servicesSubscreen select:focus-visible, #servicesSubscreen a:focus-visible { outline: 2px solid #8fbfe8; outline-offset: 2px; }
+
   .settings-category { border-bottom: 1px solid #2c3c44; margin-top: 4px; }
   .settings-category:first-child { margin-top: 0; }
   .settings-category-toggle {
@@ -2313,15 +2337,15 @@
 
           <div id="inventorySubtabBar" class="subtab-bar">
             <button id="collectiblesSubtabBtn" type="button">Collectibles</button>
-            <button id="documentsSubtabBtn" type="button">Documents</button>
+            <button id="servicesSubtabBtn" type="button">Services</button>
             <button id="ledgerSubtabBtn" type="button">Ledger</button>
           </div>
 
           <!-- Sub-screen: Collectibles — every asset with
                presentation: "collectible", fungible and non-fungible
                together in one list. A stackable (fungible) card shows its
-               quantity ("Iron (Fe) ×47 g" — task #206: quantities are
-               counted in grams by convention); a unique (non-fungible) card
+               quantity ("Iron (Fe) ×47 g": quantities are counted in
+               grams by convention); a unique (non-fungible) card
                shows none. -->
           <div id="collectiblesSubscreen" class="subscreen active">
             <input type="text" id="collectiblesSearchInput" placeholder="Search collectibles…">
@@ -2338,19 +2362,19 @@
 
           </div>
 
-          <!-- Sub-screen: Documents — every asset with
-               presentation: "document" (currently just atlas.membership,
-               per the issuer's catalog — this panel works even though
-               it's sparse today). -->
-          <div id="documentsSubscreen" class="subscreen">
-            <input type="text" id="documentsSearchInput" placeholder="Search documents…" style="margin-top:8px;">
+          <!-- Sub-screen: Services. The domains the person added and what each advertises, drawn by services-tab.js. Below it,
+               the documents that do not belong to a service: membership cards that a service shows on its own page are not
+               repeated here. -->
+          <div id="servicesSubscreen" class="subscreen">
+            <div id="servicesSection" role="group" aria-labelledby="servicesHeading"></div>
+            <div class="subhead" id="otherDocumentsHeading">Other documents</div>
+            <input type="text" id="documentsSearchInput" placeholder="Search documents…" aria-label="Search documents">
             <!-- Same compatibility filter as Collectibles above. -->
             <label class="check-row">
               <input type="checkbox" id="documentsCompatOnlyCheckbox">
               <span>Only show items compatible with this domain</span>
             </label>
-            <div class="subhead">Yours</div>
-            <div id="selfDocumentsList" class="item-list"></div>
+            <div id="selfDocumentsList" class="item-list" aria-labelledby="otherDocumentsHeading"></div>
           </div>
 
           <!-- Sub-screen: Ledger. The chain labs coins, drawn by chain-labs-tab.js. -->
@@ -3091,8 +3115,10 @@
   <script src="chain-labs-wallet.js"></script>
   <script src="item-standard.js"></script>
   <script src="item-effects.js"></script>
+<script src="services-core.js"></script>
 <script src="wallet.js"></script>
   <script src="chain-labs-tab.js"></script>
+  <script src="services-tab.js"></script>
   <script src="compass-hud.js"></script>
   <script src="action-bar.js"></script>
   <script src="side-view.js"></script>

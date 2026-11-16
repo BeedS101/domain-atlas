@@ -2029,15 +2029,15 @@ const presentBtn = document.getElementById('presentBtn');
 const reverifyBtn = document.getElementById('reverifyBtn');
 const loadoutNoteEl = document.getElementById('loadoutNote');
 
-// Inventory (task #44): Collectibles/Documents sub-tabs of one merged
+// Inventory: Collectibles/Services/Ledger sub-tabs of one merged
 // section — see showInventorySubtab() below for how the two levels of
 // tabbing (walletTabBar -> inventorySubtabBar) interact, same pattern as
 // Social's Mail/Friends/Favorites.
 const inventorySubtabBar = document.getElementById('inventorySubtabBar');
 const collectiblesSubtabBtn = document.getElementById('collectiblesSubtabBtn');
-const documentsSubtabBtn = document.getElementById('documentsSubtabBtn');
+const servicesSubtabBtn = document.getElementById('servicesSubtabBtn');
 const collectiblesSubscreen = document.getElementById('collectiblesSubscreen');
-const documentsSubscreen = document.getElementById('documentsSubscreen');
+const servicesSubscreen = document.getElementById('servicesSubscreen');
 const collectiblesSearchInput = document.getElementById('collectiblesSearchInput');
 const collectiblesCompatOnlyCheckbox = document.getElementById('collectiblesCompatOnlyCheckbox');
 const selfCollectiblesListEl = document.getElementById('selfCollectiblesList');
@@ -4166,6 +4166,7 @@ async function refreshViewsIfActingIdentityChanged() {
   const key = acting ? acting.publicKey : null;
   if (key === lastDrawnActingKey) return;
   if (window.AtlasChainLabsTab) AtlasChainLabsTab.identityChanged().catch(() => {});
+  if (window.AtlasServicesTab) AtlasServicesTab.identityChanged().catch(() => {});
   await refreshInventoryDisplay();
   await refreshMailDisplay();
   await refreshMessagingDisplay();
@@ -4805,13 +4806,13 @@ function showMailBoxSubtab(id) {
   if (mailBoxComposeSubtabBtn) mailBoxComposeSubtabBtn.classList.toggle('active-subtab', id === 'mailBoxComposeSubscreen');
 }
 
-// Inventory tab's own second level of tabbing (task #44): Collectibles /
-// Documents, same show-one-hide-the-rest idea as showSocialSubtab() right
-// above, just scoped to Inventory's two .subscreen elements.
+// Inventory tab's own second level of tabbing: Collectibles / Services /
+// Ledger, same show-one-hide-the-rest idea as showSocialSubtab() right
+// above, just scoped to Inventory's .subscreen elements.
 function showInventorySubtab(id) {
-  [collectiblesSubscreen, documentsSubscreen, document.getElementById('ledgerSubscreen')].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
+  [collectiblesSubscreen, servicesSubscreen, document.getElementById('ledgerSubscreen')].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
   if (collectiblesSubtabBtn) collectiblesSubtabBtn.classList.toggle('active-subtab', id === 'collectiblesSubscreen');
-  if (documentsSubtabBtn) documentsSubtabBtn.classList.toggle('active-subtab', id === 'documentsSubscreen');
+  if (servicesSubtabBtn) servicesSubtabBtn.classList.toggle('active-subtab', id === 'servicesSubscreen');
   const ledgerBtn = document.getElementById('ledgerSubtabBtn');
   if (ledgerBtn) ledgerBtn.classList.toggle('active-subtab', id === 'ledgerSubscreen');
 }
@@ -6774,6 +6775,18 @@ async function runWalletRecovery() {
 // the acting one when its reads finish, is dropped instead of painting the previous identity's holdings over the new ones.
 let inventoryRefreshSeq = 0;
 
+// The domains in the acting identity's Services list; empty when Services cannot be read (every document then stays in the list).
+async function listedServiceDomains() {
+  try { return new Set((await AtlasWallet.getServices().load()).domains.map((d) => d.domain)); } catch (err) { return new Set(); }
+}
+
+// A credential of a service the person added, at that service's domain: it is shown on the service's page, not in the document list.
+function belongsToListedService(entry, listed) {
+  const cls = entry.credential.asset.class;
+  const domain = AtlasWallet.servicesDomain(entry.credential.issuer.domain);
+  return !!domain && !!AtlasServices.CREDENTIAL_CLASSES[cls] && listed.has(domain);
+}
+
 async function refreshInventoryDisplay() {
   const drawSeq = ++inventoryRefreshSeq;
   refreshPendingOpsDisplay().catch(() => {});
@@ -6832,11 +6845,15 @@ async function refreshInventoryDisplay() {
     renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, moveEnabled, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
   }
 
-  // --- Documents ---
-  const selfDocuments = selfVisible.filter((e) => e.credential.asset.presentation === 'document');
+  // --- Documents that do not belong to a service ---
+  // A service credential moves to its service's page once the domain is listed in Services; until then it stays here, so nothing
+  // is ever without a place.
+  const serviceDomains = await listedServiceDomains();
+  const selfDocuments = selfVisible.filter((e) => e.credential.asset.presentation === 'document' && !belongsToListedService(e, serviceDomains));
   selfDocumentsListEl.innerHTML = '';
   if (selfDocuments.length === 0) {
-    selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'No documents yet.') + '</div>';
+    const elsewhere = selfVisible.some((e) => e.credential.asset.presentation === 'document');
+    selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? (elsewhere ? 'Your other documents are shown with their services above.' : 'Everything here is hidden — manage it in Settings.') : 'No other documents.') + '</div>';
   } else {
     renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, moveEnabled, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
   }
@@ -6857,6 +6874,7 @@ async function refreshInventoryDisplay() {
   await refreshActivityLogDisplay();
   await refreshAssetUpdatesBadge();
   await refreshPendingExportsDisplay();
+  if (window.AtlasServicesTab && servicesSubscreen && servicesSubscreen.classList.contains('active')) AtlasServicesTab.render().catch(() => {});
 }
 
 // The Wallet tab's own small notification (SPEC.md §5.1.1) — same
@@ -7498,11 +7516,17 @@ async function showAssetInInventory(ref, noteEl) {
   if (!entry) { say('No longer in your inventory.'); return; }
   if (entry.hidden) { say('This item is hidden. Unhide it under Settings \u2192 Hidden assets.'); return; }
   const documents = entry.credential.asset.presentation === 'document';
+  const onServicePage = documents && belongsToListedService(entry, await listedServiceDomains());
   const inventory = document.querySelector('.settings-category[data-category="inventory"]');
   if (inventory) inventory.classList.add('open');
-  showInventorySubtab(documents ? 'documentsSubscreen' : 'collectiblesSubscreen');
+  showInventorySubtab(documents ? 'servicesSubscreen' : 'collectiblesSubscreen');
+  if (onServicePage && window.AtlasServicesTab) {
+    await AtlasServicesTab.revealCredential({ assetClass: entry.credential.asset.class, domain: entry.credential.issuer.domain });
+  } else if (documents && window.AtlasServicesTab) {
+    await AtlasServicesTab.open();
+  }
   const search = documents ? documentsSearchInput : collectiblesSearchInput;
-  const list = documents ? selfDocumentsListEl : selfCollectiblesListEl;
+  const list = onServicePage ? document.getElementById('svcCredentials') : documents ? selfDocumentsListEl : selfCollectiblesListEl;
   if (search && search.value) {
     search.value = '';
     search.dispatchEvent(new Event('input', { bubbles: true }));
@@ -7678,6 +7702,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
   if (areaName === 'session' && (changes.atlasUnlockedIdentity || changes.atlasActiveSubIdentity)) {
     // The Ledger tab holds per-identity state (the open step, the last draw), so it is reset at once, before the slower refreshes below.
     if (window.AtlasChainLabsTab) AtlasChainLabsTab.identityChanged().catch(() => {});
+    if (window.AtlasServicesTab) AtlasServicesTab.identityChanged().catch(() => {});
     await refreshIdentityDisplay();
     // The Messaging button and window are gated behind an unlocked wallet (see
     // refreshMessagingLockGate()). Every local-mode lock and unlock path changes
@@ -10199,13 +10224,50 @@ mailBoxComposeSubtabBtn && mailBoxComposeSubtabBtn.addEventListener('click', asy
   await refreshComposeFriendPicker();
 });
 
-// Inventory's own sub-tab bar (task #44) — Collectibles/Documents, same
+// Inventory's own sub-tab bar — Collectibles/Services/Ledger, same
 // click-to-switch idea as Social's sub-tabs right above. Data is already
 // current from whatever last called refreshInventoryDisplay() (opening
 // the Wallet tab, or any asset action), so switching sub-tabs is just a
 // visibility toggle — no extra fetch needed.
 collectiblesSubtabBtn && collectiblesSubtabBtn.addEventListener('click', () => showInventorySubtab('collectiblesSubscreen'));
-documentsSubtabBtn && documentsSubtabBtn.addEventListener('click', () => showInventorySubtab('documentsSubscreen'));
+servicesSubtabBtn && servicesSubtabBtn.addEventListener('click', () => {
+  showInventorySubtab('servicesSubscreen');
+  if (window.AtlasServicesTab) AtlasServicesTab.open();
+});
+
+// ---------- Services tab (second sub-tab of Inventory) ----------
+//
+// services-tab.js draws the tab into #servicesSection. What belongs to this page is handed over here: which site is open, how a
+// membership card is drawn, and the other tabs a service's settings can point to.
+if (window.AtlasServicesTab) {
+  AtlasServicesTab.configure({
+    // The site the person is looking at, from the browser itself (the overlay's parent frame, or the active tab through the
+    // background); never from anything a page says about itself.
+    currentSite: async () => {
+      let origin = overlayHostOrigin;
+      if (!origin) {
+        const reply = await chrome.runtime.sendMessage({ type: 'services-current-site' });
+        origin = reply && reply.ok && typeof reply.origin === 'string' ? reply.origin : null;
+      }
+      if (!origin) return null;
+      try { return { domain: new URL(origin).host }; } catch (err) { return null; }
+    },
+    identityInfo: async () => {
+      const info = await AtlasWallet.getActiveIdentityInfo();
+      return info ? { label: info.kind === 'sub' ? info.label : 'Main identity', publicKey: info.publicKey } : null;
+    },
+    renderCredentials: async (entries, container) => {
+      let moveEnabled = false;
+      try { moveEnabled = (await AtlasWallet.listMoveTargets()).length > 0; } catch (err) { /* locked, or a passkey account */ }
+      const loadout = await AtlasWallet.getLoadout();
+      renderAssetList(entries, container, { loadable: false, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, fileExportEnabled: true, moveEnabled });
+    },
+    afterJoin: () => refreshInventoryDisplay(),
+    openMail: () => { socialTabBtn.click(); const b = document.getElementById('mailSettingsSubtabBtn'); if (b) b.click(); },
+    openTrade: () => { if (tradeTabBtn) tradeTabBtn.click(); },
+    openLedger: () => { const b = document.getElementById('ledgerSubtabBtn'); if (b) b.click(); }
+  });
+}
 
 // ---------- Ledger tab (third sub-tab of Inventory) ----------
 //
@@ -14233,6 +14295,7 @@ function assetActionHandler(listEl) {
 }
 assetActionHandler(selfCollectiblesListEl);
 assetActionHandler(selfDocumentsListEl);
+assetActionHandler(document.getElementById('servicesSection'));
 
 // Dispatch for a clicked in-scene interactable (see the "interactables"
 // note in enterWorld). Five actions exist today: "open-chest" (spend a Studio key for a reward, see AtlasWallet.openChest()), "mint" (calls

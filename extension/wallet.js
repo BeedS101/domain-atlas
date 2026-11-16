@@ -6836,6 +6836,10 @@ const AtlasWallet = (() => {
     { field: 'lastPostOfficeSendDomain', key: 'atlasLastPostOfficeSendDomain', store: null, fallback: () => null },
     { field: 'lastPostOfficeSettingsDomain', key: 'atlasLastPostOfficeSettingsDomain', store: null, fallback: () => null },
     { field: 'chainLabsDomains', key: 'atlasChainLabsDomains', store: null, fallback: () => [] },
+    // The domains added in Services and the choices made for them. Read and written through the explicit-identity path, and
+    // left out of a backup when the identity has none.
+    { field: 'services', key: 'atlasServices', store: 'services', fallback: () => null, omitNull: true,
+      normalize: (v) => (typeof AtlasServices === 'undefined' ? v : AtlasServices.normalizeState(v, servicesDomain)) },
     // Equipped avatar choices, the offers waiting from live pages, and the sites trusted to skip the offer prompt.
     // They are read and written through the explicit-identity path for every identity, the main one included.
     { field: 'avatarLook', key: 'atlasAvatarLook', store: 'avatarLook', fallback: () => null, skipNull: true },
@@ -6847,7 +6851,7 @@ const AtlasWallet = (() => {
     { field: 'trustedBridgeDomains', key: 'atlasTrustedBridgeDomains', store: 'trustedBridgeDomains', fallback: () => [] }
   ];
   // The families the active-identity payload does not assemble from its own getters.
-  const BACKUP_EXPLICIT_FIELDS = ['avatarLook', 'avatarHat', 'avatarShoes', 'avatarHand', 'avatarSlots', 'bridgeOffers', 'trustedBridgeDomains'];
+  const BACKUP_EXPLICIT_FIELDS = ['avatarLook', 'avatarHat', 'avatarShoes', 'avatarHand', 'avatarSlots', 'bridgeOffers', 'trustedBridgeDomains', 'services'];
   const BACKUP_UNREADABLE = {};
 
   function perOwnerMap(value) {
@@ -6870,6 +6874,7 @@ const AtlasWallet = (() => {
         value = await decryptAtRest(identity, f.store, raw, BACKUP_UNREADABLE);
         if (value === BACKUP_UNREADABLE) throw new Error('Part of this identity’s data could not be read, so it was not backed up (' + f.field + ').');
       }
+      if (f.omitNull && value === null) continue;
       out[f.field] = f.normalize ? f.normalize(value) : value;
     }
     return out;
@@ -10974,10 +10979,14 @@ const AtlasWallet = (() => {
 
     const assets = await getWallet(identity.publicKey);
     const byDomain = new Map(); // domain -> Set(credentialId)
+    // A service the person switched off in Services is not asked for: the credential that belongs to it is not presented.
+    // Without a saved choice everything is checked as before.
+    const servicesState = await servicesStateFor(identity);
     assets.forEach((entry) => {
       const domain = entry.credential.issuer && entry.credential.issuer.domain;
       if (!domain) return;
       if (opts.onlyDomain && domain !== opts.onlyDomain) return;
+      if (servicesState && servicesSwitchedOff(servicesState, domain, entry.credential.asset && entry.credential.asset.class)) return;
       if (!byDomain.has(domain)) byDomain.set(domain, new Set());
       byDomain.get(domain).add(entry.credential.id);
     });
@@ -11018,6 +11027,7 @@ const AtlasWallet = (() => {
     const incomingCall = [];
 
     for (const [domain, idSet] of byDomain) {
+      let outcomeKnown = false;
       try {
         const base = baseUrl(domain);
         if (originIsDown(base)) continue; // failed moments ago; tried again on a later cycle
@@ -11062,7 +11072,13 @@ const AtlasWallet = (() => {
           messages.push(...(result.messages || []));
           updates.push(...(result.updates || []));
         }
-        if (!answered) continue;
+        outcomeKnown = true;
+        // A passkey identity that has no open session is not asked for a prompt in the background: nothing was tried.
+        if (!answered) {
+          if (identity.privateKeyJwk || opts.interactive) await recordServiceOutcome(identity, domain, 'mail', false, 'the domain did not answer, or refused the signed request');
+          continue;
+        }
+        await recordServiceOutcome(identity, domain, 'mail', true, '');
         // Messages the person deleted that this domain still holds (deleted
         // while offline, or before domains could be asked to forget them).
         const staleOnServer = [];
@@ -11154,6 +11170,7 @@ const AtlasWallet = (() => {
         if (staleOnServer.length) await deleteMessagesOnServer(identity, domain, staleOnServer, assets);
       } catch (err) {
         // unreachable domain — move on, don't let it block the others
+        if (!outcomeKnown) await recordServiceOutcome(identity, domain, 'mail', false, 'the domain could not be reached');
       }
     }
 
@@ -11776,6 +11793,133 @@ const AtlasWallet = (() => {
     return chainLabsInstance;
   }
 
+  // ---------- Services ----------
+  //
+  // The domains the person added in the Services tab, per identity, and which of each domain's services are switched on
+  // (services-core.js holds the rules). The state is encrypted like the rest of the identity's data and is part of its backup.
+  // The wallet adds what the core needs from its host: where the state lives, which credentials are held, and how a domain may
+  // be reached (the same domain rules as every other request). Nothing here runs in the background by itself: the one
+  // background reader is checkAllMail, which asks this file only which credentials the person switched off.
+  const SERVICES_KEY = 'atlasServices';
+  const SERVICES_UNREADABLE = {};
+  let servicesInstance = null;
+
+  // A domain as Services keeps it: the same host[:port] rules as baseUrl(), in lower case, or null.
+  function servicesDomain(input) {
+    const p = parseDomainReference(input);
+    return !p.problem && domainProblem(input) === null ? p.hostPort : null;
+  }
+
+  async function servicesWho() {
+    const identity = await getIdentity();
+    return identity ? { identity, key: identity.publicKey } : null;
+  }
+
+  // Throws when saved state exists but cannot be read, so a later save can never replace it with an empty one.
+  async function servicesLoad() {
+    const who = await servicesWho();
+    if (!who) return null;
+    const got = await chrome.storage.local.get(SERVICES_KEY);
+    const stored = (got[SERVICES_KEY] || {})[who.key];
+    if (stored === undefined || stored === null) return null;
+    const value = await decryptAtRest(who.identity, 'services', stored, SERVICES_UNREADABLE);
+    if (value === SERVICES_UNREADABLE) throw Object.assign(new Error('Services could not be read, so it was left as it is.'), { code: 'unreadable' });
+    return value;
+  }
+
+  async function servicesSave(state, expectedKey) {
+    const who = await servicesWho();
+    if (!who) throw storageError('wallet-locked', WALLET_LOCKED_MESSAGE);
+    if (expectedKey && who.key !== expectedKey) throw Object.assign(new Error('The wallet is acting as a different identity now.'), { code: 'identity-changed' });
+    const got = await chrome.storage.local.get(SERVICES_KEY);
+    const all = perOwnerMap(got[SERVICES_KEY]);
+    all[who.key] = await encryptAtRest(who.identity, 'services', state);
+    await chrome.storage.local.set({ [SERVICES_KEY]: all });
+  }
+
+  function getServices() {
+    if (typeof AtlasServices === 'undefined') throw new Error('The services module is not loaded in this page.');
+    if (!servicesInstance) {
+      servicesInstance = AtlasServices.create({
+        fetch: (url, init) => fetch(url, init),
+        loadState: servicesLoad,
+        saveState: servicesSave,
+        ownerKey: async () => { const who = await servicesWho(); return who ? who.key : null; },
+        entries: async () => { const who = await servicesWho(); return who ? getWallet(who.key) : []; },
+        origin: baseUrl,
+        normalizeDomain: servicesDomain
+      });
+    }
+    return servicesInstance;
+  }
+
+  // The saved state of `identity`, read for the mail check. A state that cannot be read counts as none: the check goes ahead as it
+  // always has rather than the wallet going silent.
+  async function servicesStateFor(identity) {
+    if (typeof AtlasServices === 'undefined' || !identity) return null;
+    try {
+      const got = await chrome.storage.local.get(SERVICES_KEY);
+      const stored = (got[SERVICES_KEY] || {})[identity.publicKey];
+      if (stored === undefined || stored === null) return null;
+      const raw = await decryptAtRest(identity, 'services', stored, null);
+      return raw ? AtlasServices.normalizeState(raw, servicesDomain) : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // True only when the person switched off every service this credential belongs to at its domain.
+  function servicesSwitchedOff(state, domain, assetClass) {
+    const keys = typeof assetClass === 'string' ? AtlasServices.CREDENTIAL_CLASSES[assetClass] : null;
+    const d = keys ? servicesDomain(domain) : null;
+    return !!d && keys.every((k) => state.enabled[AtlasServices.settingKey(d, k)] === false);
+  }
+
+  // What a check or an operation found, for a domain the person added. Never throws: a status note is not worth failing a check.
+  async function recordServiceOutcome(identity, domain, kind, ok, reason) {
+    try {
+      if (typeof AtlasServices === 'undefined') return;
+      const active = await getIdentity();
+      if (!active || active.publicKey !== identity.publicKey) return;
+      await getServices().recordOutcome(domain, kind, ok, reason);
+    } catch (err) { /* the status stays as it was */ }
+  }
+
+  // Joins a service the domain advertises, as the identity the wallet is acting as. The domain issues a membership credential to
+  // that identity's public key (the same request the Join buttons in a world make); switching the service on is part of joining.
+  async function joinService(domainInput, key) {
+    const spec = key === 'postOffice' || key === 'tradingStation' ? AtlasServices.OPERATES[key] : null;
+    if (!spec) throw new Error('This wallet cannot join that service from here.');
+    const services = getServices();
+    const view = await services.service(domainInput, key);
+    if (!view) throw new Error('Add the domain to Services first.');
+    if (!view.advertised) throw new Error('This domain does not advertise that service.');
+    if (view.credentials.some((c) => c.state === 'valid' || c.state === 'unverified' || c.state === 'pending')) throw new Error('You already hold a membership card for this service.');
+    const minted = await mintAsset('self', view.domain, spec.credentialClass);
+    await services.setEnabled(view.domain, key, true);
+    return minted;
+  }
+
+  // A check the person asked for. Global Mail and Domain Membership ask for mail (one signed request to the domain); Trading Station
+  // reads the public listings. The result is recorded and drawn as the service's status.
+  async function checkService(domainInput, key) {
+    const spec = AtlasServices.OPERATES[key];
+    if (!spec) throw new Error('This wallet has no check for that service.');
+    const services = getServices();
+    const view = await services.service(domainInput, key);
+    if (!view) throw new Error('Add the domain to Services first.');
+    if (view.explicit === false) throw new Error('Switch the service on first.');
+    if (spec.check === 'listings') {
+      try { await fetchTradeListings(view.domain); await services.recordOutcome(view.domain, 'listings', true, ''); }
+      catch (err) { await services.recordOutcome(view.domain, 'listings', false, 'the listings could not be read'); }
+    } else {
+      const held = view.credentials[0];
+      if (!held) throw new Error('There is nothing to check until you have joined.');
+      await checkAllMail({ onlyDomain: held.entry.credential.issuer.domain, interactive: true });
+    }
+    return services.service(view.domain, key);
+  }
+
   return {
     getAccountIdentity, listSubIdentities, getActiveIdentityInfo, createSubIdentity, renameSubIdentity, switchIdentity, removeSubIdentity,
     getSiteIdentity, setSiteIdentity, createSiteIdentity, forgetSiteIdentity, listSiteIdentities, useIdentityInThisContext, releaseIdentityContext, followSiteIdentity,
@@ -11879,6 +12023,7 @@ const AtlasWallet = (() => {
     grantCalling, revokeCalling, resetCallSettings,
     onWalletChanged,
     // Chain labs coins (see "chain labs coins"): the domain list, holdings, sending and buying with Gold.
-    getChainLabs, getChainLabsGold, inspectChainLabsGold, signChainLabs
+    getChainLabs, getChainLabsGold, inspectChainLabsGold, signChainLabs,
+    getServices, joinService, checkService, servicesDomain
   };
 })();

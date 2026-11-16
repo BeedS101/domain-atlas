@@ -35,11 +35,11 @@ const { check } = L;
     const entry = log.find((e) => /^Minted/.test(e.text));
     check('the mint entry records the item', entry && entry.meta && entry.meta.assetClass === 'atlas.element.iron' && entry.meta.domain === minted.issuer.domain, entry);
     await page.evaluate(() => { const c = [...document.querySelectorAll('#mainWalletScreen .settings-category')].find((x) => /Activity log/.test(x.querySelector('.settings-category-toggle').textContent)); c.classList.add('open'); });
-    await page.evaluate(() => showInventorySubtab('documentsSubscreen'));
+    await page.evaluate(() => showInventorySubtab('servicesSubscreen'));
     await page.click('#activityLogList .activity-link');
     await page.waitForSelector('.wallet-item.jump-flash', { timeout: 5000 });
     const opened = await page.evaluate(() => {
-      const sub = document.querySelector('#collectiblesSubscreen.active, #documentsSubscreen.active');
+      const sub = document.querySelector('#collectiblesSubscreen.active, #servicesSubscreen.active');
       const card = sub && sub.querySelector('.wallet-item.jump-flash');
       return { sub: sub && sub.id, card: !!card, text: card ? card.textContent : '' };
     });
