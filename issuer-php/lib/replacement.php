@@ -352,6 +352,23 @@ function atlas_mint_origin_allowed($assetClass = null) {
   return false;
 }
 
+// A native app (no page, so no Origin header) joins a membership service with a request its own key has signed. That is
+// the only origin-less request the public route serves: one for a membership class, whose signed owner proof is then
+// verified in full (atlas_owner_proof_verdict with the mode forced to 'require', whatever the issuer's own mode). Any
+// request that carries an Origin header, even one the issuer does not list, is judged by atlas_mint_origin_allowed alone.
+const ATLAS_NATIVE_JOIN_CLASSES = ['atlas.postoffice.membership', 'atlas.tradingstation.membership', 'atlas.membership'];
+// A native app saves its signed request before sending it and re-sends that same request after an interruption, so a
+// request that has not yet created anything may be days old. Only the age of such a request is relaxed: the signature,
+// recipient, domain, class and request id are checked exactly as for a page, and a retry of a request already issued
+// is answered from the replay record whatever its age.
+const ATLAS_NATIVE_JOIN_WINDOW_MS = 30 * 24 * 3600 * 1000;
+
+function atlas_native_join_possible($assetClass, $body) {
+  if (isset($_SERVER['HTTP_ORIGIN'])) return false;
+  if (!is_string($assetClass) || !in_array($assetClass, ATLAS_NATIVE_JOIN_CLASSES, true)) return false;
+  return is_array($body) && isset($body['intent']);
+}
+
 // ---------- mint allowance (mintLimits) ----------
 // A class with `mintLimits` can be minted fresh only up to `perRequest` units at a time and up to `perWindow`
 // units per owner key in any rolling `windowSeconds`, whatever the caller says the mint is for. Each reservation

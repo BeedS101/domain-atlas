@@ -70,8 +70,12 @@ if (!empty(ATLAS_ASSET_CATALOG[$assetClass]['restrictedIssuance'])) {
 
 // The public route serves this domain's own pages only, and only for classes the domain offers. Checked before
 // any lease, reservation or signing.
+$nativeJoin = false;
 if (!atlas_mint_origin_allowed($assetClass)) {
-  send_json(403, ['error' => 'minting is open to this domain\'s own pages only', 'code' => 'mint-origin-refused']);
+  if (!atlas_native_join_possible($assetClass, $body)) {
+    send_json(403, ['error' => 'minting is open to this domain\'s own pages only', 'code' => 'mint-origin-refused']);
+  }
+  $nativeJoin = true;
 }
 if (!atlas_public_mint_offered($assetClass)) {
   send_json(403, ['error' => ATLAS_ASSET_CATALOG[$assetClass]['name'] . ' is not offered by this domain', 'code' => 'mint-not-offered']);
@@ -106,11 +110,16 @@ if ($catalogEntry['fungible']) {
 // Proof that the requester holds the recipient key, for the membership classes (see atlas_owner_proof_mode()). Nothing
 // below has been touched yet, so a refusal leaves no lease, credential, roster row or mail behind. Freshness is judged
 // further down, and only when this request is about to create something.
+// A request that arrives without an Origin header (a native app) is served only on a signed request from the recipient's
+// own key, verified here in 'require' mode whatever the issuer's mode is.
 $proofVerdict = atlas_owner_proof_verdict($body, [
-  'domain' => atlas_domain(), 'mode' => atlas_owner_proof_mode(), 'nowMs' => (int) round(microtime(true) * 1000), 'requireFresh' => false,
+  'domain' => atlas_domain(), 'mode' => $nativeJoin ? 'require' : atlas_owner_proof_mode(), 'nowMs' => (int) round(microtime(true) * 1000), 'requireFresh' => false,
 ], function ($payload, $proof) { return verify_envelope($payload, $proof); });
+if ($nativeJoin && $proofVerdict['ok'] && (empty($proofVerdict['signed']) || ($body['intent']['proof']['publicKey'] ?? null) !== $ownerPublicKey)) {
+  send_json(403, ['error' => 'minting is open to this domain\'s own pages only', 'code' => 'mint-origin-refused']);
+}
 if (!$proofVerdict['ok']) {
-  atlas_owner_proof_note($assetClass, 'refused', $proofVerdict['code']);
+  if (!$nativeJoin) atlas_owner_proof_note($assetClass, 'refused', $proofVerdict['code']);
   $refusal = $proofVerdict;
   unset($refusal['ok'], $refusal['status']);
   send_json($proofVerdict['status'], $refusal);
@@ -147,9 +156,9 @@ if ($issueReplayable) {
 // The signed request has to be recent only when it is about to create something: a retry of one the issuer already
 // completed (answered above) may be much older.
 if (!empty($proofVerdict['signed'])) {
-  $stale = atlas_owner_proof_stale($proofVerdict['issuedAtMs'], (int) round(microtime(true) * 1000));
+  $stale = atlas_owner_proof_stale($proofVerdict['issuedAtMs'], (int) round(microtime(true) * 1000), $nativeJoin ? ATLAS_NATIVE_JOIN_WINDOW_MS : null);
   if ($stale !== null) {
-    atlas_owner_proof_note($assetClass, 'refused', $stale['code']);
+    if (!$nativeJoin) atlas_owner_proof_note($assetClass, 'refused', $stale['code']);
     $refusal = $stale;
     unset($refusal['ok'], $refusal['status']);
     send_json($stale['status'], $refusal);

@@ -43,10 +43,24 @@ The mode is advertised in `GET /atlas/capabilities` as `ownerProof`, which is ho
 `ownerProof` only when `atlas/asset/issue.php` contains the check and `lib/owner-proof.php` is present, so a half-uploaded bundle
 never claims a check it does not run.
 
+## Native apps (no Origin header)
+
+The public issue route normally serves pages of the issuing domain, wallet extensions and listed origins, judged by the `Origin`
+header. A native app sends none, so one origin-less request is served: a membership issuance (`atlas.postoffice.membership`,
+`atlas.tradingstation.membership`, `atlas.membership`) that carries a signed `intent`. That intent is verified in full with the mode
+forced to `require`, whatever `ATLAS_OWNER_PROOF` says: exact payload, this domain, this class, this request id, a good signature,
+and the recipient's own key as signer. A missing, null or malformed intent, a wrong signer, any other class, and any request that does
+carry an `Origin` header (listed or not) keep the existing refusal.
+
+A native app saves its signed request before sending it and re-sends that same request after an interruption, so for this path only the
+age limit on a request that is about to create something is 30 days instead of two minutes (a request ahead of the clock is still
+limited to two minutes). A request id already issued is answered with the same credential at any age, and reusing it for another
+request is `request-id-conflict`. Origin-less outcomes are not counted in the readiness statistics.
+
 ## PHP upload
 
-Upload together: `atlas/asset/issue.php`, `atlas/capabilities.php`, `lib/owner-proof.php` and `lib/webauthn.php`. The first
-three are the check; the last accepts passkey assertions made by the wallet extension itself (see below).
+Upload together: `atlas/asset/issue.php`, `atlas/capabilities.php`, `lib/owner-proof.php`, `lib/replacement.php` and `lib/webauthn.php`.
+The first four are the check; the last accepts passkey assertions made by the wallet extension itself (see below).
 
 ## When is an issuer ready for `require`?
 
@@ -79,5 +93,7 @@ identity's signature is refused as `owner-signature-invalid`. It is a separate c
 - `node test/manual-owner-proof-vectors.js` — 79 shared cases run through the Node module, the PHP module and the wallet's core.
 - `node test/manual-owner-proof-issuers.js` — live Node and PHP issuers in every mode: bad signatures, replay, concurrency, stale
   and future time, cross-domain and cross-implementation, and no credential, roster row or mail left by a refusal.
+- `node test/manual-native-join.js` — a native Join against live Node and PHP issuers with the origin check on, in every mode: success
+  for the three classes, unsigned and hostile requests, browser compatibility, other classes, old saved requests and repeats.
 - `xvfb-run -a node test/manual-owner-proof-wallet.js` — the real extension against local issuers, including a wrong clock, a lost
   answer and a passkey identity.

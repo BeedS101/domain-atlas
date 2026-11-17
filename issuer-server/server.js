@@ -3633,6 +3633,22 @@ function mintOriginAllowed(req, assetClass) {
   return FEDERATION_MINT_CLASSES.has(assetClass) && listed(FEDERATION_MINT_ORIGINS.concat((process.env.ATLAS_FEDERATION_MINT_ORIGINS || '').split(',').map((s) => s.trim())));
 }
 
+// A native app (no page, so no Origin header) joins a membership service with a request its own key has signed. That is
+// the only origin-less request the public route serves: one for a membership class, whose signed owner proof is then
+// verified in full (ownerProofVerdict with the mode forced to 'require', whatever OWNER_PROOF_MODE is). Any request that
+// carries an Origin header, even one the issuer does not list, is judged by mintOriginAllowed alone.
+const NATIVE_JOIN_CLASSES = new Set(['atlas.postoffice.membership', 'atlas.tradingstation.membership', 'atlas.membership']);
+// A native app saves its signed request before sending it and re-sends that same request after an interruption, so a
+// request that has not yet created anything may be days old. Only the age of such a request is relaxed: the signature,
+// recipient, domain, class and request id are checked exactly as for a page, and a retry of a request already issued
+// is answered from the replay record whatever its age.
+const NATIVE_JOIN_WINDOW_MS = 30 * 24 * 3600 * 1000;
+function nativeJoinPossible(req, assetClass, body) {
+  if (req.headers.origin !== undefined) return false;
+  if (!NATIVE_JOIN_CLASSES.has(assetClass)) return false;
+  return !!body && typeof body === 'object' && body.intent !== undefined && body.intent !== null;
+}
+
 // Proof that the requester controls the key a membership card is issued to (lib-owner-proof.js): the recipient key
 // signs an exact request naming this domain, the class, the recipient and the request id.
 //   ATLAS_OWNER_PROOF=accept   (default) a request without a proof is still served; one with a bad proof is refused
@@ -6836,8 +6852,12 @@ async function main() {
         }
 
         // The public route serves this domain's own pages only, and only for classes the domain offers.
+        let nativeJoin = false;
         if (!mintOriginAllowed(req, assetClass)) {
-          return sendJson(res, 403, { error: "minting is open to this domain's own pages only", code: 'mint-origin-refused' });
+          if (!nativeJoinPossible(req, assetClass, issueBody)) {
+            return sendJson(res, 403, { error: "minting is open to this domain's own pages only", code: 'mint-origin-refused' });
+          }
+          nativeJoin = true;
         }
         if (!publicMintOffered(assetClass)) {
           return sendJson(res, 403, { error: `${catalogEntry.name} is not offered by this domain`, code: 'mint-not-offered' });
@@ -6872,9 +6892,14 @@ async function main() {
         // Proof that the requester holds the recipient key, for the membership classes (see OWNER_PROOF_MODE). Nothing
         // below has been touched yet, so a refusal leaves no lease, credential, roster row or mail behind. Freshness is
         // judged further down, and only when this request is about to create something.
-        const proofVerdict = await ownerProof.ownerProofVerdict(issueBody, { domain: DOMAIN, mode: OWNER_PROOF_MODE, nowMs: Date.now(), requireFresh: false }, verifyEnvelope);
+        // A request that arrives without an Origin header (a native app) is served only on a signed request from the
+        // recipient's own key, verified here in 'require' mode whatever OWNER_PROOF_MODE is.
+        const proofVerdict = await ownerProof.ownerProofVerdict(issueBody, { domain: DOMAIN, mode: nativeJoin ? 'require' : OWNER_PROOF_MODE, nowMs: Date.now(), requireFresh: false }, verifyEnvelope);
+        if (nativeJoin && proofVerdict.ok && (!proofVerdict.signed || !issueBody.intent.proof || issueBody.intent.proof.publicKey !== ownerPublicKey)) {
+          return sendJson(res, 403, { error: "minting is open to this domain's own pages only", code: 'mint-origin-refused' });
+        }
         if (!proofVerdict.ok) {
-          noteOwnerProof(assetClass, 'refused', proofVerdict.code);
+          if (!nativeJoin) noteOwnerProof(assetClass, 'refused', proofVerdict.code);
           const { ok, status, ...refusal } = proofVerdict;
           return sendJson(res, status, refusal);
         }
@@ -6899,9 +6924,9 @@ async function main() {
         // The signed request has to be recent only when it is about to create something: a retry of one the issuer already
         // completed (answered above) may be much older.
         if (proofVerdict.signed) {
-          const stale = ownerProof.staleProblem(proofVerdict.issuedAtMs, Date.now());
+          const stale = ownerProof.staleProblem(proofVerdict.issuedAtMs, Date.now(), nativeJoin ? NATIVE_JOIN_WINDOW_MS : undefined);
           if (stale) {
-            noteOwnerProof(assetClass, 'refused', stale.code);
+            if (!nativeJoin) noteOwnerProof(assetClass, 'refused', stale.code);
             const { ok, status, ...refusal } = stale;
             return sendJson(res, status, refusal);
           }

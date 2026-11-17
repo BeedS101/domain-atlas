@@ -64,8 +64,11 @@ function refuse(status, code, error, extra) {
   return Object.assign({ ok: false, status, code, error }, extra || {});
 }
 
-function staleProblem(issuedAtMs, nowMs) {
-  if (Math.abs(nowMs - issuedAtMs) <= OWNER_PROOF_WINDOW_MS) return null;
+// pastWindowMs widens only how old a request may be (a native app re-sending its saved request); a request signed ahead
+// of the issuer's clock is judged by the standard window either way.
+function staleProblem(issuedAtMs, nowMs, pastWindowMs) {
+  const past = Number.isFinite(pastWindowMs) ? Math.max(pastWindowMs, OWNER_PROOF_WINDOW_MS) : OWNER_PROOF_WINDOW_MS;
+  if (issuedAtMs - nowMs <= OWNER_PROOF_WINDOW_MS && nowMs - issuedAtMs <= past) return null;
   return refuse(401, 'stale-request', 'request is outside the allowed time window', { serverTime: new Date(nowMs).toISOString() });
 }
 

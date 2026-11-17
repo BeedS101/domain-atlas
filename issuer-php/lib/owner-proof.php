@@ -56,8 +56,11 @@ function atlas_owner_proof_refuse($status, $code, $error, $extra = []) {
   return array_merge(['ok' => false, 'status' => $status, 'code' => $code, 'error' => $error], $extra);
 }
 
-function atlas_owner_proof_stale($issuedAtMs, $nowMs) {
-  if (abs($nowMs - $issuedAtMs) <= ATLAS_OWNER_PROOF_WINDOW_MS) return null;
+// $pastWindowMs widens only how old a request may be (a native app re-sending its saved request); a request signed ahead
+// of the issuer's clock is judged by the standard window either way.
+function atlas_owner_proof_stale($issuedAtMs, $nowMs, $pastWindowMs = null) {
+  $past = $pastWindowMs === null ? ATLAS_OWNER_PROOF_WINDOW_MS : max($pastWindowMs, ATLAS_OWNER_PROOF_WINDOW_MS);
+  if ($issuedAtMs - $nowMs <= ATLAS_OWNER_PROOF_WINDOW_MS && $nowMs - $issuedAtMs <= $past) return null;
   return atlas_owner_proof_refuse(401, 'stale-request', 'request is outside the allowed time window',
     ['serverTime' => gmdate('Y-m-d\TH:i:s', intdiv($nowMs, 1000)) . sprintf('.%03dZ', $nowMs % 1000)]);
 }

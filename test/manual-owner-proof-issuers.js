@@ -254,7 +254,10 @@ async function strictSuite(inst) {
   const foreign = { Origin: 'https://page.example.test' };
   const own = { Origin: inst.base };
   await refusedWithoutTrace(inst, 'a valid signed request from another site\'s page', (await signedBody(inst, owner, owner, POST_OFFICE)).body, 403, 'mint-origin-refused', foreign);
-  await refusedWithoutTrace(inst, 'a valid signed request with no origin', (await signedBody(inst, owner, owner, POST_OFFICE)).body, 403, 'mint-origin-refused');
+  await refusedWithoutTrace(inst, 'an unsigned request with no origin', { ownerPublicKey: owner.publicKey, assetClass: POST_OFFICE }, 403, 'mint-origin-refused');
+  await refusedWithoutTrace(inst, 'a valid signed request for another class with no origin', (await signedBody(inst, owner, owner, 'atlas.badge')).body, 403, 'mint-origin-refused');
+  const native = await issue(inst, (await signedBody(inst, owner, owner, POST_OFFICE)).body);
+  check(inst.name + ': a valid signed membership request with no origin (a native app) is issued (see manual-native-join.js)', native.status === 200, native);
   const ok = await issue(inst, (await signedBody(inst, owner, owner, POST_OFFICE)).body, own);
   check(inst.name + ': the same request from the domain\'s own page is issued', ok.status === 200, ok);
   const ext = await issue(inst, (await signedBody(inst, owner, owner, 'atlas.membership')).body, { Origin: 'chrome-extension://abcdefghijklmnop' });
