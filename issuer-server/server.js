@@ -10997,13 +10997,12 @@ async function main() {
         return sendJson(res, 200, message);
       }
 
-      // Task #94 (consent/block model, "both, recipient's choice" per direct
-      // instruction): three self-service settings endpoints below, all
-      // sharing the same self-signed-envelope authentication
-      // /atlas/postoffice/send already uses for the sender half —
-      // proof.publicKey, once verified, IS the caller, and
-      // updatePostOfficeMember() above means a caller can only ever touch
-      // THEIR OWN membership here, never someone else's roster entry.
+      // Three self-service settings routes (mailmode, block, unblock) share the self-signed-envelope authentication
+      // /atlas/postoffice/send uses for its sender: proof.publicKey, once verified, IS the caller, and
+      // updatePostOfficeMember() means a caller can only ever touch THEIR OWN membership.
+      // mailmode: "open" accepts fellow members and senders relayed by other Post Offices; "friendsOnly" accepts only the keys in
+      // payload.friends, the allowed-sender list the wallet builds from its Friends and pending outgoing friend requests and
+      // replaces whenever it changes (extension/wallet.js friendsAllowlist()). A block wins over the list.
       if (req.method === 'POST' && req.url === '/atlas/postoffice/mailmode') {
         const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
         if (!payload || !proof) return sendJson(res, 400, { error: 'payload and proof are required' });

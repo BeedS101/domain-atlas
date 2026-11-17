@@ -274,12 +274,21 @@
       el('input', { type: 'text', id: 'svcHandleInput', 'aria-label': 'Handle', value: data.handle || '', placeholder: 'e.g. bruno', autocomplete: 'off', maxlength: '40' }),
       el('div', { className: 'item-actions' }, [button('Save handle', () => act(async () => { const v = document.getElementById('svcHandleInput').value.trim(); await AtlasWallet.setPostOfficeHandle(d.domain, v); mailSettings = { domain: d.domain, data: await AtlasWallet.getPostOfficeSettings(d.domain) }; }, 'Handle saved.'), '', 'svcHandleSave')])));
     if (data.handle) host.appendChild(el('div', { className: 'meta', id: 'svcHandleShown', textContent: 'People can reach you as ' + data.handle + '#' + d.domain + '.' }));
-    const select = el('select', { id: 'svcModeSelect', 'aria-label': 'Who can write to you' });
-    [['open', 'Any member of this Post Office'], ['friendsOnly', 'Only your contacts']].forEach(([v, t]) => { const o = el('option', { value: v, textContent: t }); if ((data.mailMode || 'open') === v) o.selected = true; select.appendChild(o); });
-    host.appendChild(row('Who can write to you', select,
-      el('div', { className: 'meta', textContent: 'Only your contacts shares your contacts’ public keys with ' + d.domain + ' so it can filter.' }),
+    const select = el('select', { id: 'svcModeSelect', 'aria-label': 'Who can contact you' });
+    [['open', 'Anyone from participating Post Offices'], ['friendsOnly', 'Friends only']].forEach(([v, t]) => { const o = el('option', { value: v, textContent: t }); if ((data.mailMode || 'open') === v) o.selected = true; select.appendChild(o); });
+    host.appendChild(row('Who can contact you', select,
+      el('div', { className: 'meta', id: 'svcModeHelp', textContent: 'Choose who can send you Global Mail and friend requests. Anyone from participating Post Offices accepts messages from eligible members of your Post Office and other federated Post Offices. Friends only accepts messages from your approved friends and people you’ve sent friend requests to.' }),
+      el('div', { className: 'meta', id: 'svcModeSyncNote', textContent: 'When you add or remove a friend, or change a pending friend request, your wallet automatically updates the allowed-sender public keys at your Post Offices where Friends Only is enabled. Only public keys are shared, not contact names or personal notes. If synchronization fails, the wallet will warn you because the Post Office may still be using an older list.' }),
       el('div', { className: 'item-actions' }, [button('Apply', () => act(async () => { await AtlasWallet.setPostOfficeMailMode(d.domain, document.getElementById('svcModeSelect').value); mailSettings = { domain: d.domain, data: await AtlasWallet.getPostOfficeSettings(d.domain) }; }, 'Saved.'), '', 'svcModeSave')])));
-    host.appendChild(el('div', { className: 'meta', id: 'svcBlockedCount', textContent: (data.blockedSenders || []).length + ' blocked sender(s) · ' + (data.friendsCount || 0) + ' contact(s) shared with this domain' }));
+    host.appendChild(el('div', { className: 'meta', id: 'svcBlockedCount', textContent: (data.blockedSenders || []).length + ' blocked sender(s) · ' + (data.friendsCount || 0) + ' allowed-sender public key(s) shared with this domain' }));
+    const sync = await AtlasWallet.getFriendsSyncStatus().catch(() => ({ automatic: true, failures: [] }));
+    const failing = sync.failures.map((f) => f.domain);
+    if (failing.length) {
+      host.appendChild(el('div', { className: 'meta svc-warning', id: 'svcSyncWarning', role: 'alert', textContent: 'The allowed-sender list could not be updated at ' + failing.join(', ') + '. ' + (failing.length === 1 ? 'That Post Office may' : 'Those Post Offices may') + ' still be using an older list, so someone you removed could still be able to message you there. The wallet keeps trying.' }));
+      host.appendChild(el('div', { className: 'item-actions' }, [button('Try again now', () => act(async () => { await AtlasWallet.syncFriendsToPostOffices({ force: true }); const after = await AtlasWallet.getFriendsSyncStatus(); if (after.failures.length) throw new Error('Still could not update ' + after.failures.map((f) => f.domain).join(', ') + '.'); }, 'The allowed-sender list is up to date.'), '', 'svcSyncRetry')]));
+    } else if (!sync.automatic && (data.mailMode || 'open') === 'friendsOnly') {
+      host.appendChild(el('div', { className: 'meta svc-warning', id: 'svcSyncManual', textContent: 'This identity cannot update the list in the background, so it only changes when you apply the mode here.' }));
+    }
     if (cfg.openMail) host.appendChild(el('div', { className: 'item-actions' }, [button('Open Mail settings', () => cfg.openMail(), '', 'svcOpenMail')]));
   }
 

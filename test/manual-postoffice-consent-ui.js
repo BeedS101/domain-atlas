@@ -134,7 +134,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     console.log('STEP 5: save "Friends only" with zero local friends — reports 0 synced, round-trips through a real save+reload');
     await frame.locator('#postOfficeMailModeInput').selectOption('friendsOnly');
     await frame.locator('#postOfficeSaveMailModeBtn').click();
-    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeStatus').textContent.includes('0 friends synced'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeStatus').textContent.includes('0 allowed senders synced'), null, { timeout: 5000 });
     console.log('PASS: friends-only saved with 0 friends (this wallet has none locally)');
 
     console.log('STEP 6: switching domain away and back reloads settings from the server, confirming friendsOnly actually persisted');
@@ -146,7 +146,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     console.log('STEP 7: switch back to open and confirm it reloads that way too');
     await frame.locator('#postOfficeMailModeInput').selectOption('open');
     await frame.locator('#postOfficeSaveMailModeBtn').click();
-    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeStatus').textContent.includes('open to anyone'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeStatus').textContent.includes('anyone from participating'), null, { timeout: 5000 });
     await frame.locator('#postOfficeSettingsDomainInput').selectOption('');
     await frame.locator('#postOfficeSettingsDomainInput').selectOption('localhost:8002');
     await frame.waitForFunction(() => document.getElementById('postOfficeMailModeInput').value === 'open', null, { timeout: 5000 });

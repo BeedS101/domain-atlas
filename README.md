@@ -901,13 +901,23 @@ mail you" panel:
   everything else below. Also reachable straight from a relayed message
   itself: every mail card from a real sender (not domain-to-subscriber
   mail) carries an inline **Block sender** button next to Delete.
-- **Friends only.** Switch a membership to friends-only and the domain
-  will only relay mail from public keys in a snapshot you submit — pulled
-  from this wallet's own local Friends list (Social → Contacts), which
-  otherwise never leaves the wallet at all; turning this on is an explicit,
-  one-time disclosure of that snapshot to that one domain. It's a snapshot,
-  not a live sync — add someone to Friends later and they're not covered
-  until you save the panel again.
+- **Who can contact you.** Two choices per membership. *Anyone from
+  participating Post Offices* accepts messages from eligible members of your
+  Post Office and other federated Post Offices. *Friends only* accepts
+  messages from your approved friends and people you've sent friend requests
+  to (their answer has to be able to reach you), and the domain checks the
+  ORIGINAL sender's public key, including for relayed mail. Friend requests
+  are ordinary mail, so the same choice and the block list apply to them.
+  The allowed-sender list is built from the wallet's local Friends list and
+  pending outgoing requests, and the wallet keeps it current on its own:
+  whenever a friend is added or removed, or a pending request is sent or
+  cancelled, it sends the new list to every Post Office where Friends only is
+  on (and to none where it is off), and checks again on every mail check.
+  Only public keys are shared, never contact names or notes. If a Post Office
+  cannot be updated the wallet says so in Contacts and in the mail settings,
+  because that Post Office may still admit someone you removed, and offers
+  "Try again now". An identity that cannot sign without a prompt (a passkey)
+  does not update in the background; its list changes when the mode is saved.
 
 Both settings are per membership (a wallet belonging to several Post
 Offices sets them separately for each) and self-service — three new
@@ -925,8 +935,11 @@ mail from you right now") so a sender can't distinguish an outright block
 from simply not being on a friends-only list. `test/manual-postoffice-
 consent.js` covers the server side end to end (block/unblock, friends-only
 admission and exclusion, block-beats-friends-only, mode-switch clearing
-the snapshot); `test/manual-postoffice-consent-ui.js` drives the real
-wallet panel.
+the list); `test/manual-postoffice-mail-modes.js` runs open, friends-only,
+blocks and friend requests, local and relayed, across Node and PHP Post
+Offices in all four pairings; `test/manual-friends-allowlist-sync.js` drives
+the real wallet's automatic synchronization and its failure warnings; and
+`test/manual-postoffice-consent-ui.js` drives the real wallet panel.
 
 **Handle addressing (task #94's last remaining piece — "hide the raw
 public key from users").** A member can register a short handle at ONE

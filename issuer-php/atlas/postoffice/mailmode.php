@@ -1,21 +1,13 @@
 <?php
-// POST /atlas/postoffice/mailmode — mirrors issuer-server/server.js's same
-// route. Task #94 (consent/block model, "both, recipient's choice" per
-// direct instruction).
+// POST /atlas/postoffice/mailmode — mirrors issuer-server/server.js's same route.
 //
-// Lets a member switch their OWN Post Office membership at this domain
-// between two modes:
-//   - "open" (the default, and the only mode that existed before this
-//     task): accept mail from any fellow member, exactly as
-//     atlas/postoffice/send.php's baseline symmetric-membership check
-//     already required.
-//   - "friendsOnly": only accept mail from public keys in the snapshot
-//     submitted here as `payload.friends` — the wallet's own Friends list
-//     (see extension/wallet.js's getFriends()), which otherwise never
-//     leaves the wallet at all. Turning this on is an explicit, one-time
-//     opt-in disclosure of that snapshot to this domain; it does not stay
-//     in sync automatically — the wallet has to call this again to update
-//     it, same as any other "sync" action in this codebase.
+// Lets a member switch their OWN Post Office membership at this domain between two modes:
+//   - "open" (the default): accept mail from fellow members here and from senders relayed by other Post Offices
+//     (atlas/postoffice/send.php's membership check and atlas/postoffice/relay.php's attestation check still apply).
+//   - "friendsOnly": only accept mail from public keys in `payload.friends`, the allowed-sender list the wallet builds from
+//     its Friends and its pending outgoing friend requests (extension/wallet.js friendsAllowlist()). Each update REPLACES the
+//     list, and the wallet sends a fresh one whenever it changes, so this route is called often; a block (block.php) wins
+//     over the list. Only public keys are sent.
 //
 // Authenticated the same self-signed-envelope way
 // atlas/postoffice/send.php authenticates its sender half:

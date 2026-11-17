@@ -1804,6 +1804,8 @@ const postOfficeHandleStatusEl = document.getElementById('postOfficeHandleStatus
 const postOfficeMailModeInput = document.getElementById('postOfficeMailModeInput');
 const postOfficeSaveMailModeBtn = document.getElementById('postOfficeSaveMailModeBtn');
 const postOfficeMailModeStatusEl = document.getElementById('postOfficeMailModeStatus');
+const postOfficeFriendsSyncWarningEl = document.getElementById('postOfficeFriendsSyncWarning');
+const friendsSyncWarningEl = document.getElementById('friendsSyncWarning');
 const postOfficeBlockedListEl = document.getElementById('postOfficeBlockedList');
 const postOfficeBlockPublicKeyInput = document.getElementById('postOfficeBlockPublicKeyInput');
 const postOfficeBlockBtn = document.getElementById('postOfficeBlockBtn');
@@ -10544,6 +10546,7 @@ let currentPostOfficeSettings = null;
 function renderPostOfficeSettings(settings) {
   currentPostOfficeSettings = settings;
   if (postOfficeMailModeInput) postOfficeMailModeInput.value = settings ? (settings.mailMode || 'open') : 'open';
+  renderFriendsSyncWarnings().catch(() => {});
 
   const domain = postOfficeSettingsDomainInput ? postOfficeSettingsDomainInput.value : '';
   if (postOfficeYourHandleDisplayEl) {
@@ -10645,10 +10648,52 @@ postOfficeClearHandleBtn && postOfficeClearHandleBtn.addEventListener('click', a
   }
 });
 
+// The allowed-sender list is kept current by the wallet (AtlasWallet.syncFriendsToPostOffices). When a Post Office could not
+// be updated it may still be using an older list, so this says so wherever the list or the mode is shown, with a retry.
+function friendsSyncWarningText(domains) {
+  return 'The allowed-sender list could not be updated at ' + domains.join(', ') + '. ' +
+    (domains.length === 1 ? 'That Post Office may' : 'Those Post Offices may') +
+    ' still be using an older list, so someone you removed could still be able to message you there. The wallet keeps trying; you can also try again now.';
+}
+
+function fillFriendsSyncWarning(el, domains, extra) {
+  if (!el) return;
+  el.textContent = '';
+  if (!domains.length && !extra) { el.hidden = true; return; }
+  if (domains.length) {
+    el.appendChild(document.createTextNode(friendsSyncWarningText(domains) + ' '));
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'btn-secondary';
+    retry.textContent = 'Try again now';
+    retry.addEventListener('click', async () => {
+      retry.disabled = true;
+      retry.textContent = 'Trying…';
+      try { await AtlasWallet.syncFriendsToPostOffices({ force: true }); } catch (err) { /* shown again below */ }
+      await renderFriendsSyncWarnings();
+    });
+    el.appendChild(retry);
+  }
+  if (extra) el.appendChild(document.createTextNode((domains.length ? ' ' : '') + extra));
+  el.hidden = false;
+}
+
+// Shows the saved sync failures in the Contacts tab and under the mail mode setting. `justFailed` names domains a removal could
+// not update a moment ago (the answer to AtlasWallet.removeFriend / cancelOutgoingFriendRequest), shown even before the stored
+// record is read back.
+async function renderFriendsSyncWarnings(justFailed) {
+  let status = { automatic: true, failures: [] };
+  try { status = await AtlasWallet.getFriendsSyncStatus(); } catch (err) { /* nothing to show */ }
+  const domains = Array.from(new Set(status.failures.map((f) => f.domain).concat(justFailed || []))).sort();
+  fillFriendsSyncWarning(friendsSyncWarningEl, domains);
+  const manual = !status.automatic && currentPostOfficeSettings && currentPostOfficeSettings.mailMode === 'friendsOnly'
+    ? 'This identity cannot update the list in the background, so it only changes when you save the mode here.' : '';
+  fillFriendsSyncWarning(postOfficeFriendsSyncWarningEl, domains, manual);
+}
+
 // Saves the mode select's current value against whichever membership is
-// selected — see AtlasWallet.setPostOfficeMailMode's own comment on what
-// switching to "friendsOnly" actually submits (a one-time snapshot of this
-// wallet's local Friends list, not an ongoing sync).
+// selected. Switching to "friendsOnly" sends the current allowed-sender list;
+// after that the wallet keeps it current on its own.
 postOfficeSaveMailModeBtn && postOfficeSaveMailModeBtn.addEventListener('click', async () => {
   const domain = postOfficeSettingsDomainInput ? postOfficeSettingsDomainInput.value : '';
   const mode = postOfficeMailModeInput ? postOfficeMailModeInput.value : 'open';
@@ -10663,13 +10708,14 @@ postOfficeSaveMailModeBtn && postOfficeSaveMailModeBtn.addEventListener('click',
     const result = await AtlasWallet.setPostOfficeMailMode(domain, mode);
     currentPostOfficeSettings = { ...currentPostOfficeSettings, mailMode: result.mailMode, friendsCount: result.friendsCount };
     postOfficeMailModeStatusEl.textContent = mode === 'friendsOnly'
-      ? 'Saved — friends only (' + result.friendsCount + ' friend' + (result.friendsCount === 1 ? '' : 's') + ' synced).'
-      : 'Saved — open to anyone at this Post Office.';
+      ? 'Saved — friends only (' + result.friendsCount + ' allowed sender' + (result.friendsCount === 1 ? '' : 's') + ' synced).'
+      : 'Saved — anyone from participating Post Offices can contact you.';
   } catch (err) {
     postOfficeMailModeStatusEl.textContent = 'Save failed: ' + err.message;
   } finally {
     postOfficeSaveMailModeBtn.disabled = false;
     postOfficeSaveMailModeBtn.textContent = 'Save';
+    await renderFriendsSyncWarnings();
   }
 });
 
@@ -12180,6 +12226,7 @@ function renderFriendCard(f, container) {
 }
 
 async function refreshFriendsDisplay() {
+  renderFriendsSyncWarnings().catch(() => {});
   const friends = await AtlasWallet.getFriends();
 
   const requestIdentity = await AtlasWallet.getIdentity();
@@ -12277,8 +12324,9 @@ socialScreen && socialScreen.addEventListener('click', async (e) => {
   }
 
   if (action === 'cancel-sent-request') {
-    await AtlasWallet.cancelOutgoingFriendRequest(btn.dataset.key);
+    const cancelled = await AtlasWallet.cancelOutgoingFriendRequest(btn.dataset.key);
     await refreshFriendsDisplay();
+    await renderFriendsSyncWarnings(cancelled && cancelled.syncFailed);
     return;
   }
 
@@ -12342,8 +12390,9 @@ socialScreen && socialScreen.addEventListener('click', async (e) => {
   }
 
   if (action === 'remove-contact-confirm') {
-    await AtlasWallet.removeFriend(btn.dataset.key);
+    const removed = await AtlasWallet.removeFriend(btn.dataset.key);
     await refreshFriendsDisplay();
+    await renderFriendsSyncWarnings(removed && removed.syncFailed);
     return;
   }
 

@@ -2783,16 +2783,22 @@
             </div>
             <div id="postOfficeHandleStatus" class="empty-note" style="margin-top:6px;"></div>
 
-            <h3>Who can mail you</h3>
-            <div class="subhead">"Friends only" sends your current Friends list's public keys to this domain as a one-time snapshot; it won't include anyone you add to Friends afterward until you save again.</div>
-            <select id="postOfficeMailModeInput" style="margin-top:8px;">
-              <option value="open">Accept mail from anyone at this Post Office</option>
+            <h3>Who can contact you</h3>
+            <div class="subhead">Choose who can send you Global Mail and friend requests at this Post Office.</div>
+            <select id="postOfficeMailModeInput" aria-label="Who can contact you" style="margin-top:8px;">
+              <option value="open">Anyone from participating Post Offices</option>
               <option value="friendsOnly">Friends only</option>
             </select>
+            <div class="subhead" id="postOfficeMailModeHelp" style="margin-top:8px;">
+              <strong>Anyone from participating Post Offices:</strong> accept messages from eligible members of your Post Office and other federated Post Offices.<br>
+              <strong>Friends only:</strong> accept messages from your approved friends and people you've sent friend requests to.
+            </div>
+            <div class="subhead" id="postOfficeMailModeSyncNote" style="margin-top:8px;">When you add or remove a friend, or change a pending friend request, your wallet automatically updates the allowed-sender public keys at your Post Offices where Friends Only is enabled. Only public keys are shared, not contact names or personal notes. If synchronization fails, the wallet will warn you because the Post Office may still be using an older list.</div>
             <div class="btn-row" style="margin-top:8px;">
               <button id="postOfficeSaveMailModeBtn" type="button" class="btn-secondary">Save</button>
             </div>
             <div id="postOfficeMailModeStatus" class="empty-note" style="margin-top:6px;"></div>
+            <div id="postOfficeFriendsSyncWarning" class="empty-note" role="alert" style="margin-top:6px;" hidden></div>
 
             <h3>Blocked senders</h3>
             <div class="subhead">Blocked at whichever membership is selected above, regardless of mail mode — a block always wins.</div>
@@ -2843,6 +2849,7 @@
         <!-- Sub-screen: Contacts — the actual saved friends list. -->
         <div id="contactsListSubscreen" class="subscreen active">
           <input type="text" id="contactsSearchInput" placeholder="Search contacts (name or notes)…" style="margin-top:8px;">
+          <div id="friendsSyncWarning" class="empty-note" role="alert" style="margin-top:10px;" hidden></div>
           <div id="contactsList" class="item-list" style="margin-top:10px;"></div>
         </div>
 
