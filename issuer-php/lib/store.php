@@ -3039,6 +3039,7 @@ function atlas_write_file_atomic($file, $text, $newMode = 0644) {
     @chmod($tmp, $perms);
     if ($file === atlas_revocations_file()) atlas_fault_point('txn:revoke-tmp-written');
     if ($file === atlas_suspensions_file()) atlas_fault_point('suspensions:write-tmp-written');
+    if ($file === atlas_mail_file()) atlas_fault_point('mail:tmp-written');
     if (!@rename($tmp, $file)) throw new Exception('could not replace ' . $name . '; the existing file was not changed', 503);
     $ok = true;
     atlas_fsync_dir($dir);
@@ -3410,40 +3411,75 @@ function walk_asset_history($id) {
   return array_reverse($chain);
 }
 
-// ---------- mail (flock-guarded, same reasoning as revocations above —
-// a flat array of signed messages, each tied to one credentialId) ----------
+// ---------- mail (a flat array of signed messages, each tied to one credentialId) ----------
+//
+// Every change is one locked read-modify-write ending in an atomic replace (atlas_write_file_atomic), the same shape
+// the revocation list uses: a reader sees the whole old file or the whole new one, and a request that is cut off
+// part-way leaves the old file exactly as it was. The lock is a separate file, because the data file is replaced by
+// rename and a lock held on the replaced file would no longer order anyone. A mail file that exists but cannot be
+// read as a message list is never treated as an empty mailbox set: reads and changes both refuse with a 503 and
+// leave the file alone, so the next message cannot overwrite what is there.
+
+function atlas_mail_lock_file() {
+  return __DIR__ . '/atlas-mail-store.lock';
+}
+
+// The stored message list, or throws (503) when the file cannot be read as one. A missing or zero-length file is an
+// empty list (the first message creates it).
+function atlas_mail_load() {
+  $file = atlas_mail_file();
+  if (!file_exists($file)) return ['messages' => []];
+  $data = @file_get_contents($file);
+  if ($data === false) throw new Exception('mail storage cannot be read right now; nothing was changed', 503);
+  if (trim($data) === '') return ['messages' => []];
+  $doc = json_decode($data, true);
+  if ($doc === []) return ['messages' => []]; // an empty JSON object or list: no messages yet
+  if (!is_array($doc) || !isset($doc['messages']) || !is_array($doc['messages'])) {
+    error_log('atlas: lib/atlas-mail-store.json is damaged or not a message list; mail requests are refused until it is restored');
+    throw new Exception('mail storage is damaged; nothing was changed', 503);
+  }
+  return $doc;
+}
 
 function read_mail() {
-  $fh = fopen(atlas_mail_file(), 'c+');
-  if ($fh === false) return ['messages' => []];
-  flock($fh, LOCK_SH);
-  $data = stream_get_contents($fh);
-  flock($fh, LOCK_UN);
-  fclose($fh);
-  $doc = json_decode($data, true);
-  return is_array($doc) ? $doc : ['messages' => []];
+  return atlas_mail_load();
 }
 
-// Same as append_mail(), unless a message with this id is already stored.
+// Runs $fn(array &$doc) under the mail lock and writes the document back atomically when $fn returns true. Returns
+// whatever $fn stored in $result (by reference as its second argument). Throws, with the stored file untouched, when
+// the file cannot be read, encoded or replaced.
+function atlas_mail_update($fn) {
+  $lock = @fopen(atlas_mail_lock_file(), 'c');
+  if ($lock === false) throw new Exception('could not take the mail lock; nothing was changed', 503);
+  flock($lock, LOCK_EX);
+  try {
+    $doc = atlas_mail_load();
+    $result = null;
+    if ($fn($doc, $result)) {
+      $text = json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+      if ($text === false) throw new Exception('could not encode the mail store; nothing was changed', 503);
+      atlas_write_file_atomic(atlas_mail_file(), $text, 0600);
+    }
+    return $result;
+  } finally {
+    flock($lock, LOCK_UN);
+    fclose($lock);
+  }
+}
+
+// Same as append_mail(), unless a message with this id is already stored; the check and the write share one lock.
 function append_mail_once($message) {
-  $file = atlas_mail_file();
-  $doc = is_file($file) ? json_decode((string) @file_get_contents($file), true) : null;
-  foreach (is_array($doc) ? ($doc['messages'] ?? []) : [] as $m) if (($m['id'] ?? null) === ($message['id'] ?? null)) return;
-  append_mail($message);
+  atlas_mail_update(function (&$doc, &$result) use ($message) {
+    foreach ($doc['messages'] as $m) if (is_array($m) && ($m['id'] ?? null) === ($message['id'] ?? null)) return false;
+    atlas_mail_append_to($doc, $message);
+    return true;
+  });
 }
 
-function append_mail($message) {
-  $file = atlas_mail_file();
-  $fh = fopen($file, 'c+');
-  flock($fh, LOCK_EX);
-  $data = stream_get_contents($fh);
-  $doc = json_decode($data, true);
-  if (!is_array($doc)) $doc = ['messages' => []];
+// Adds the message, then enforces ATLAS_MAILBOX_CAP (see its own comment above): only this message's own mailbox is
+// ever pruned, and only its oldest entries; every other recipient's mail is untouched.
+function atlas_mail_append_to(&$doc, $message) {
   $doc['messages'][] = $message;
-
-  // ATLAS_MAILBOX_CAP enforcement (see its own comment above): only this
-  // message's own mailbox is ever pruned, and only its oldest entries —
-  // every other recipient's mail is untouched.
   $own = array_values(array_filter($doc['messages'], function ($m) use ($message) {
     return ($m['credentialId'] ?? null) === $message['credentialId'];
   }));
@@ -3453,13 +3489,13 @@ function append_mail($message) {
       return !isset($dropIds[$m['id'] ?? null]);
     }));
   }
+}
 
-  ftruncate($fh, 0);
-  rewind($fh);
-  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-  fflush($fh);
-  flock($fh, LOCK_UN);
-  fclose($fh);
+function append_mail($message) {
+  atlas_mail_update(function (&$doc, &$result) use ($message) {
+    atlas_mail_append_to($doc, $message);
+    return true;
+  });
 }
 
 // Removes the given messages from the mailboxes of the given credential ids.
@@ -3468,52 +3504,26 @@ function append_mail($message) {
 function delete_mail_messages($messageIds, $credentialIds) {
   $wantedIds = array_flip($messageIds);
   $mailboxes = array_flip($credentialIds);
-  $file = atlas_mail_file();
-  $fh = fopen($file, 'c+');
-  if ($fh === false) return 0;
-  flock($fh, LOCK_EX);
-  $data = stream_get_contents($fh);
-  $doc = json_decode($data, true);
-  if (!is_array($doc)) $doc = ['messages' => []];
-  $before = count($doc['messages']);
-  $doc['messages'] = array_values(array_filter($doc['messages'], function ($m) use ($wantedIds, $mailboxes) {
-    return !(isset($wantedIds[$m['id'] ?? null]) && isset($mailboxes[$m['credentialId'] ?? null]));
-  }));
-  $removed = $before - count($doc['messages']);
-  if ($removed > 0) {
-    ftruncate($fh, 0);
-    rewind($fh);
-    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-    fflush($fh);
-  }
-  flock($fh, LOCK_UN);
-  fclose($fh);
-  return $removed;
+  return atlas_mail_update(function (&$doc, &$result) use ($wantedIds, $mailboxes) {
+    $before = count($doc['messages']);
+    $doc['messages'] = array_values(array_filter($doc['messages'], function ($m) use ($wantedIds, $mailboxes) {
+      return !(isset($wantedIds[$m['id'] ?? null]) && isset($mailboxes[$m['credentialId'] ?? null]));
+    }));
+    $result = $before - count($doc['messages']);
+    return $result > 0;
+  }) ?: 0;
 }
 
 // Removes every message held for one mailbox. Returns how many were removed.
 function delete_mailbox($credentialId) {
-  $file = atlas_mail_file();
-  $fh = fopen($file, 'c+');
-  if ($fh === false) return 0;
-  flock($fh, LOCK_EX);
-  $data = stream_get_contents($fh);
-  $doc = json_decode($data, true);
-  if (!is_array($doc)) $doc = ['messages' => []];
-  $before = count($doc['messages']);
-  $doc['messages'] = array_values(array_filter($doc['messages'], function ($m) use ($credentialId) {
-    return ($m['credentialId'] ?? null) !== $credentialId;
-  }));
-  $removed = $before - count($doc['messages']);
-  if ($removed > 0) {
-    ftruncate($fh, 0);
-    rewind($fh);
-    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-    fflush($fh);
-  }
-  flock($fh, LOCK_UN);
-  fclose($fh);
-  return $removed;
+  return atlas_mail_update(function (&$doc, &$result) use ($credentialId) {
+    $before = count($doc['messages']);
+    $doc['messages'] = array_values(array_filter($doc['messages'], function ($m) use ($credentialId) {
+      return ($m['credentialId'] ?? null) !== $credentialId;
+    }));
+    $result = $before - count($doc['messages']);
+    return $result > 0;
+  }) ?: 0;
 }
 
 // ---------- asset updates (same flock-guarded shape as mail above) ----------

@@ -234,6 +234,10 @@ never a silent background step.
 Mail is stored in lib/atlas-mail-store.json — deliberately next to the
 private key file, not under .well-known, so it isn't a world-readable
 static file the way atlas-revocations.json legitimately needs to be.
+Each change is written to a temporary file and renamed into place, under
+lib/atlas-mail-store.lock, so a request that is cut off never leaves a half-written
+mail file. If the file is ever damaged, mail requests answer 503 and leave it
+untouched until you restore it from a backup (they never start a fresh, empty one).
 
 Every time someone subscribes (requests an atlas.membership card), two
 things happen automatically, no action needed from you:
