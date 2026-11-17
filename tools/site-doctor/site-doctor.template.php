@@ -54,15 +54,6 @@ function doctor_is_text_name($rel) {
   return in_array(strtolower(pathinfo($rel, PATHINFO_EXTENSION)), ['php', 'html', 'htm', 'js', 'css', 'json', 'md', 'txt', 'svg', 'xml', 'example'], true);
 }
 
-// Entries that apply to the selection: the issuer's files, those of one demo site and the optional services
-// (c Call, p Presence).
-function doctor_applicable($entries, $site, $mods) {
-  $want = 'i' . ($site === 'a' ? 'a' : ($site === 'b' ? 'b' : '')) . $mods;
-  $out = [];
-  foreach ($entries as $e) if (strpbrk($e[5], $want) !== false) $out[] = $e;
-  return $out;
-}
-
 // One manifest entry against the file on disk. Never follows symlinks.
 function doctor_check_entry($root, $e) {
   $p = $e[0]; $hash = $e[1]; $n = (int)$e[2]; $flags = $e[4];
@@ -89,7 +80,7 @@ function doctor_check_entry($root, $e) {
 
 // Private state: matched by name only, never opened.
 function doctor_is_state($rel) {
-  return (bool)preg_match('#(^|/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|[^/]*-lock-[^/]*|\.salt|storage-root\.php|private-dir\.php|atlas-private-dir\.txt|studio-config\.json|[^/]*config[^/]*\.json|lib/config\.php(\.off|\.bak)?)$#i', $rel)
+  return (bool)preg_match('#(^|/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|[^/]*-lock-[^/]*|\.salt|storage-root\.php|private-dir\.php|atlas-private-dir\.txt|studio-config\.json|[^/]*\.sqlite|[^/]*config[^/]*\.json|lib/config\.php(\.off|\.bak)?)$#i', $rel)
     || (bool)preg_match('#(^|/)(replay|holdings|mint-allowance|txn|state)/#', $rel);
 }
 function doctor_is_host_file($rel) {
@@ -230,7 +221,7 @@ function doctor_env($root) {
 
   // Issuer layout and state files
   $has = function ($rel) use ($root) { return file_exists($root . '/' . $rel); };
-  foreach (['atlas/trade', 'atlas/asset', 'lib'] as $d) {
+  foreach (['atlas/asset', 'lib'] as $d) {
     if (!is_dir($root . '/' . $d)) $add('dir-' . $d, 'warn', 'Folder ' . $d . '/ is not here', 'The issuer is not (fully) uploaded to this folder.', 'Upload the missing files listed under "Files compared with the repository".');
   }
   if (is_dir($root . '/lib')) {
@@ -921,6 +912,483 @@ function doctor_health($root, $host, $trustedGroups = []) {
   return ['checks' => $checks];
 }
 
+// ---- components: which parts of Domain Atlas are installed here -----------------------------------------------
+// A component is a part a domain may or may not install (Asset Studio, Global Mail, Chain Labs, the directory, ...).
+// It counts as installed when any of its required files is on disk; from then on every file of it is expected. One
+// that has no file here and is not advertised by the manifest is "not installed" and its files are never reported
+// missing. One the manifest advertises (or the person ticked) but with no file here is reported as missing.
+
+function doctor_component_list() {
+  global $DOCTOR;
+  return isset($DOCTOR['components']) && is_array($DOCTOR['components']) ? $DOCTOR['components'] : [];
+}
+
+// Where a component whose folder may be moved (the verifier) actually sits: its default folder, or the first folder one
+// or two levels below the web root that holds all of the marker files.
+function doctor_find_mount($root, $comp) {
+  $default = trim(isset($comp['mount']) ? (string)$comp['mount'] : '', '/');
+  $marks = isset($comp['findMount']) && is_array($comp['findMount']) ? $comp['findMount'] : null;
+  if ($marks === null) return $default;
+  $has = function ($dir) use ($root, $marks) {
+    foreach ($marks as $m) if (!is_file($root . ($dir === '' ? '' : '/' . $dir) . '/' . $m)) return false;
+    return true;
+  };
+  if ($has($default)) return $default;
+  $skip = ['.well-known' => 1, 'assets' => 1, 'atlas' => 1, 'lib' => 1, 'cgi-bin' => 1, 'presence' => 1, 'node_modules' => 1, '.git' => 1, 'chain-labs' => 1];
+  $top = @scandir($root); $seen = 0;
+  foreach (is_array($top) ? $top : [] as $a) {
+    if ($a === '' || $a[0] === '.' || isset($skip[$a]) || is_link($root . '/' . $a) || !is_dir($root . '/' . $a)) continue;
+    if (++$seen > 300) break;
+    if ($has($a)) return $a;
+    $sub = @scandir($root . '/' . $a);
+    foreach (is_array($sub) ? $sub : [] as $b) {
+      if ($b === '' || $b[0] === '.' || is_link($root . '/' . $a . '/' . $b) || !is_dir($root . '/' . $a . '/' . $b)) continue;
+      if ($has($a . '/' . $b)) return $a . '/' . $b;
+    }
+  }
+  return $default;
+}
+
+// The manifest's entries with a moved component's paths rewritten to where it actually is, and the mounts found.
+function doctor_entries($root) {
+  global $DOCTOR;
+  static $cache = null;
+  if ($cache !== null) return $cache;
+  $mounts = []; $remap = [];
+  foreach (doctor_component_list() as $c) {
+    if (empty($c['findMount']) || !isset($c['id'])) continue;
+    $actual = doctor_find_mount($root, $c);
+    $def = trim(isset($c['mount']) ? (string)$c['mount'] : '', '/');
+    $mounts[$c['id']] = $actual;
+    if ($actual !== $def) $remap[$c['id']] = [$def, $actual];
+  }
+  $out = [];
+  foreach ($DOCTOR['entries'] as $e) {
+    $comp = isset($e[6]) ? $e[6] : 'core';
+    if (isset($remap[$comp])) {
+      $def = $remap[$comp][0]; $actual = $remap[$comp][1];
+      $p = (string)$e[0];
+      if ($def === '') $p = ($actual === '' ? '' : $actual . '/') . $p;
+      elseif (strpos($p, $def . '/') === 0) $p = ($actual === '' ? '' : $actual . '/') . substr($p, strlen($def) + 1);
+      $e[0] = $p;
+    }
+    $out[] = $e;
+  }
+  return $cache = ['entries' => $out, 'mounts' => $mounts];
+}
+
+function doctor_host_bare($host) {
+  return preg_replace('/^www\./', '', strtolower(preg_replace('/:\d+$/', '', (string)$host)));
+}
+
+// The services this domain's manifest advertises (SPEC 3.9): name => its address or null. A service whose address is on
+// another host is run elsewhere and does not say anything about what is installed here.
+function doctor_advertised($root, $host) {
+  $out = [];
+  $f = $root . '/.well-known/spatial.json';
+  if (!is_file($f) || is_link($f) || (int)@filesize($f) > 2097152) return $out;
+  $m = json_decode((string)@file_get_contents($f), true);
+  if (!is_array($m)) return $out;
+  foreach (['postOffice', 'mailRelay', 'chat', 'inWorldChat', 'voiceCalling', 'assetStudio', 'chainLabs', 'chainlabs', 'scanner', 'tradingStation', 'trading', 'directory', 'calendar', 'domainMembership'] as $k) {
+    if (!isset($m[$k])) continue;
+    $v = $m[$k];
+    $on = $v === true || (is_array($v) && isset($v['enabled']) && $v['enabled'] === true);
+    if (!$on) continue;
+    $url = is_array($v) && isset($v['url']) && is_string($v['url']) ? $v['url'] : null;
+    if ($url !== null) {
+      $h = parse_url($url, PHP_URL_HOST);
+      if (is_string($h) && doctor_host_bare($h) !== doctor_host_bare($host)) continue;
+    }
+    $out[$k] = $url;
+  }
+  return $out;
+}
+
+// id => [status, present, total, advertised, active] for every optional component.
+// status: installed | expected | advertised-missing | not-installed.
+function doctor_component_states($root, $host, $entries, $forced) {
+  $adv = doctor_advertised($root, $host);
+  $out = [];
+  foreach (doctor_component_list() as $c) {
+    if (!isset($c['kind']) || $c['kind'] !== 'optional') continue;
+    $total = 0; $present = 0;
+    foreach ($entries as $e) {
+      if (!isset($e[6]) || $e[6] !== $c['id'] || strpos((string)$e[4], 'o') !== false) continue;
+      $total++;
+      if (file_exists($root . '/' . $e[0])) $present++;
+    }
+    $names = [];
+    foreach (isset($c['advertisedBy']) && is_array($c['advertisedBy']) ? $c['advertisedBy'] : [] as $n) if (array_key_exists($n, $adv)) $names[] = $n;
+    $isForced = isset($c['code']) && $c['code'] !== '' && strpos((string)$forced, $c['code']) !== false;
+    if ($present > 0) $status = 'installed';
+    elseif ($isForced) $status = 'expected';
+    elseif ($names) $status = 'advertised-missing';
+    else $status = 'not-installed';
+    $out[$c['id']] = ['status' => $status, 'present' => $present, 'total' => $total, 'advertised' => $names, 'active' => $status !== 'not-installed'];
+  }
+  return $out;
+}
+
+// The entries that apply: the issuer's core files, the files of every component that is installed or expected, and
+// the pages of the demo site the person chose.
+function doctor_applicable($entries, $site, $states) {
+  $out = [];
+  foreach ($entries as $e) {
+    $tags = (string)$e[5];
+    $comp = isset($e[6]) ? $e[6] : 'core';
+    $active = $comp === 'core' || $comp === 'site' || (isset($states[$comp]) && $states[$comp]['active']);
+    $take = false;
+    if (strpos($tags, 'i') !== false) $take = $active;
+    if (!$take && ($site === 'a' || $site === 'b') && strpos($tags, $site) !== false) $take = true;
+    if (!$take && preg_match('/[cpdlv]/', $tags)) $take = $active;
+    if ($take) $out[] = $e;
+  }
+  return $out;
+}
+
+// ---- service checks ---------------------------------------------------------------------------------------------
+// Read-only. Every check is [component, id, status, title, detail, fix] with status ok | warn | fail | na | info.
+// Nothing here prints a key, token, credential or message: only counts, sizes, modes, names of files and public
+// settings. The issuer's private key is opened once, in memory, only to compare its public half with the published key.
+
+function doctor_count_dir($dir, $limit) {
+  $n = 0; $bytes = 0; $oldest = 0;
+  $names = is_dir($dir) && !is_link($dir) ? @scandir($dir) : false;
+  foreach (is_array($names) ? $names : [] as $name) {
+    if ($name === '.' || $name === '..') continue;
+    $f = $dir . '/' . $name;
+    if (is_link($f) || !is_file($f)) continue;
+    $n++;
+    $bytes += (int)@filesize($f);
+    $t = (int)@filemtime($f);
+    if ($t > 0 && ($oldest === 0 || $t < $oldest)) $oldest = $t;
+    if ($n >= $limit) break;
+  }
+  return [$n, $bytes, $oldest];
+}
+
+function doctor_pubkey_of_pem($file) {
+  if (!function_exists('openssl_pkey_get_private')) return null;
+  $pem = @file_get_contents($file);
+  if (!is_string($pem) || $pem === '') return null;
+  $priv = @openssl_pkey_get_private($pem);
+  if ($priv === false) return null;
+  $d = @openssl_pkey_get_details($priv);
+  if (!isset($d['ec']['x'], $d['ec']['y'])) return null;
+  $raw = "\x04" . str_pad($d['ec']['x'], 32, "\x00", STR_PAD_LEFT) . str_pad($d['ec']['y'], 32, "\x00", STR_PAD_LEFT);
+  return rtrim(strtr(base64_encode($raw), '+/', '-_'), '=');
+}
+
+// The owner-proof mode this server applies: the environment variable first, then lib/atlas-owner-proof-config.json.
+function doctor_owner_proof_mode($root) {
+  $env = getenv('ATLAS_OWNER_PROOF');
+  $raw = ($env !== false && $env !== '') ? $env : null; $from = 'environment variable';
+  if ($raw === null) {
+    $d = doctor_json_file($root . '/lib/atlas-owner-proof-config.json', 8192);
+    if ($d[0] === 'ok' && is_array($d[1]) && array_key_exists('mode', $d[1])) { $raw = $d[1]['mode']; $from = 'lib/atlas-owner-proof-config.json'; }
+  }
+  if ($raw === null) return ['accept', 'default', false];
+  $v = is_string($raw) ? strtolower(trim($raw)) : '';
+  if (in_array($v, ['off', 'accept', 'require'], true)) return [$v, $from, false];
+  return ['accept', $from, true];
+}
+
+// The same judgement as tools/owner-proof-readiness.js, from the counts the issuer keeps.
+function doctor_owner_proof_readiness($doc, $mode, $now, $days) {
+  $classes = is_array($doc) && isset($doc['classes']) && (is_array($doc['classes']) || is_object($doc['classes'])) ? (array)$doc['classes'] : [];
+  $win = $days * 86400; $signed = 0; $unsigned = 0; $refused = 0; $unsignedRecent = [];
+  foreach ($classes as $cls => $c) {
+    if (!is_array($c) || !preg_match('/^atlas(\.[a-z0-9-]{1,32}){1,5}$/', (string)$cls)) { unset($classes[$cls]); continue; }
+    $signed += (int)(isset($c['signed']) ? $c['signed'] : 0);
+    $unsigned += (int)(isset($c['unsigned']) ? $c['unsigned'] : 0);
+    $refused += (int)(isset($c['refused']) ? $c['refused'] : 0);
+    $t = isset($c['lastUnsignedAt']) && is_string($c['lastUnsignedAt']) ? strtotime($c['lastUnsignedAt']) : false;
+    if ($t !== false && $now - $t < $win) $unsignedRecent[] = $cls;
+  }
+  if ($mode === 'require') $state = 'enforcing';
+  elseif ($mode === 'off') $state = 'off';
+  elseif ($unsignedRecent) $state = 'not-ready';
+  elseif ($signed < 1) $state = 'no-signed-yet';
+  else $state = 'ready';
+  return ['state' => $state, 'signed' => $signed, 'unsigned' => $unsigned, 'refused' => $refused, 'unsignedRecent' => $unsignedRecent, 'classes' => $classes];
+}
+
+function doctor_json_count($path, $key, $maxParse) {
+  list($st, $doc, $size) = doctor_json_file($path, $maxParse);
+  if ($st !== 'ok') return [$st, null, $size];
+  $n = null;
+  if ($key !== null && is_array($doc) && isset($doc[$key]) && is_array($doc[$key])) $n = count($doc[$key]);
+  elseif ($key === null && is_array($doc)) $n = count($doc);
+  return ['ok', $n, $size];
+}
+
+function doctor_services($root, $host, $states, $mounts) {
+  $checks = [];
+  $add = function ($comp, $id, $status, $title, $detail = '', $fix = '') use (&$checks) {
+    $checks[] = ['component' => $comp, 'id' => $id, 'status' => $status, 'title' => $title, 'detail' => $detail, 'fix' => $fix];
+  };
+  $now = time();
+  $lib = $root . '/lib';
+  $wk = $root . '/.well-known';
+  $base = doctor_private_base($root);
+  $private = $base === '' ? $lib : $base;
+  $docReal = realpath($root);
+  $inside = function ($path) use ($docReal) {
+    $r = realpath($path);
+    if ($r === false || $docReal === false) return false;
+    $a = rtrim(str_replace('\\', '/', $r), '/'); $b = rtrim(str_replace('\\', '/', $docReal), '/');
+    return $a === $b || strpos($a . '/', $b . '/') === 0;
+  };
+
+  // -- core: signing key and the published lists
+  $keyFile = $lib . '/issuer-private-key.pem';
+  list($kst, $kdoc, $ksize) = doctor_json_file($wk . '/atlas-key.json', 262144);
+  if (!is_file($keyFile) && $kst === 'missing') {
+    $add('core', 'key', 'info', 'No issuer key yet', 'A new issuer creates its key on the first request to an issuing route.');
+  } elseif (!is_file($keyFile)) {
+    $add('core', 'key', 'fail', 'A signing key is published but lib/issuer-private-key.pem is missing', 'The issuer refuses to make a new identity while a key is published.', 'Restore lib/issuer-private-key.pem from a backup. Do not let the issuer create a new key.');
+  } elseif ($kst !== 'ok' || !is_array($kdoc) || !isset($kdoc['keys']) || !is_array($kdoc['keys'])) {
+    $add('core', 'key', 'fail', '.well-known/atlas-key.json cannot be read (' . $kst . ')', 'Wallets and other domains cannot check anything this issuer signed.', 'Restore the file from a backup.');
+  } else {
+    $pub = doctor_pubkey_of_pem($keyFile);
+    $listed = false; $valid = 0;
+    foreach ($kdoc['keys'] as $k) {
+      if (!is_array($k) || !isset($k['publicKey']) || !is_string($k['publicKey'])) continue;
+      if ($pub !== null && hash_equals($k['publicKey'], $pub)) $listed = true;
+      $from = isset($k['validFrom']) && is_string($k['validFrom']) ? strtotime($k['validFrom']) : 0;
+      $until = isset($k['validUntil']) && is_string($k['validUntil']) ? strtotime($k['validUntil']) : null;
+      if (($from === false || $from <= $now + 300) && ($until === null || $until === false || $until > $now)) $valid++;
+    }
+    if ($pub === null) $add('core', 'key', 'fail', 'The issuer private key cannot be read as an EC key by PHP', 'Signing will fail.', 'Check lib/issuer-private-key.pem is readable by this account and not damaged.');
+    elseif (!$listed) $add('core', 'key', 'fail', 'The published key list does not contain the public key of the private key file', 'Credentials this issuer signs would not verify.', 'Restore the matching atlas-key.json and issuer-private-key.pem pair from the same backup.');
+    elseif ($valid < 1) $add('core', 'key', 'fail', 'No published key is valid right now', count($kdoc['keys']) . ' key(s) listed, none within its validity window.', 'Check validFrom and validUntil in .well-known/atlas-key.json.');
+    else $add('core', 'key', 'ok', 'Signing key and published key list agree', count($kdoc['keys']) . ' key(s) published, ' . $valid . ' valid now. The private key was compared in memory only.');
+  }
+  $revFile = $wk . '/atlas-revocations.json'; $susFile = $wk . '/atlas-suspensions.json';
+  if ($kst === 'ok' && (!is_file($revFile) || !is_file($susFile))) {
+    $add('core', 'lists', is_file($revFile) ? 'warn' : 'fail', is_file($revFile) ? 'The suspension list is missing' : 'The revocation list is missing while a key is published',
+      is_file($revFile) ? 'Suspended credentials may not be enforced.' : 'The issuer refuses to run so that revoked credentials cannot come back.', 'Restore the file from a backup (an empty suspension list is {"suspended": []}).');
+  } elseif ($kst === 'ok') $add('core', 'lists', 'ok', 'Key, revocation list and suspension list are all published');
+
+  // -- core: private storage
+  if ($base === '') {
+    $add('core', 'private-location', 'warn', 'Private state is kept inside the web root (in lib/)', 'lib/.htaccess denies web access, but a server that ignores it would serve replay, holdings and journal records.', 'Create a folder outside the web root and name it in lib/atlas-private-dir.txt (move the replay, holdings, txn, mint-allowance and owner-proof folders into it first).');
+  } else {
+    $rb = realpath($base);
+    if ($rb === false || !is_dir($rb)) $add('core', 'private-location', 'fail', 'The private state folder does not exist', 'Configured: ' . $base, 'Create it, or correct lib/atlas-private-dir.txt. Until then the issuer cannot keep replay, holdings or journal records.');
+    elseif ($inside($rb)) $add('core', 'private-location', 'warn', 'The private state folder is inside the web root', 'Configured: ' . $base, 'Choose a folder outside public_html.');
+    elseif (!is_writable($rb)) $add('core', 'private-location', 'fail', 'The private state folder is not writable', 'Configured: ' . $base, 'Make it writable by your hosting account.');
+    else $add('core', 'private-location', 'ok', 'Private state is outside the web root and writable', 'Configured: ' . $base);
+  }
+  $dirs = [['replay', 'Replay records', true], ['holdings', 'Holdings records', true], ['txn', 'Transaction journal', true], ['mint-allowance', 'Mint allowance counters', false], ['owner-proof', 'Owner-proof counts', false]];
+  foreach ($dirs as $d) {
+    $dir = $private . '/' . $d[0];
+    if (!is_dir($dir)) {
+      $add('core', 'dir-' . $d[0], 'info', $d[1] . ': folder not created yet', 'The issuer creates ' . $d[0] . '/ the first time it needs it.');
+      continue;
+    }
+    if (is_link($dir)) { $add('core', 'dir-' . $d[0], 'fail', $d[1] . ': the folder is a symbolic link', '', 'Replace it with a real folder.'); continue; }
+    list($n, $bytes, $oldest) = doctor_count_dir($dir, 20000);
+    if (!is_writable($dir)) $add('core', 'dir-' . $d[0], 'fail', $d[1] . ': folder is not writable', $n . ' file(s).', 'Make ' . $d[0] . '/ writable by your hosting account (0700 is usual).');
+    elseif ($d[0] === 'txn' && $n > 0) $add('core', 'dir-txn', 'warn', $n . ' journal entr' . ($n === 1 ? 'y is' : 'ies are') . ' still pending', 'A replacement that stopped part-way is finished the next time the issuer handles a request; an entry that stays here for long is stuck' . ($oldest ? ' (oldest ' . date('Y-m-d H:i', $oldest) . ')' : '') . '.', 'Run php lib/atlas-cli.php txn-list over SSH, or ask for help; do not delete the files.');
+    else $add('core', 'dir-' . $d[0], 'ok', $d[1] . ': ' . $n . ' file(s), ' . doctor_size($bytes), 'Writable' . (($inside($dir) ? ', inside the web root' : ', outside the web root')) . '.');
+  }
+
+  // -- core: membership owner proof
+  $issueText = is_file($root . '/atlas/asset/issue.php') ? (string)@file_get_contents($root . '/atlas/asset/issue.php', false, null, 0, 400000) : '';
+  $capText = is_file($root . '/atlas/capabilities.php') ? (string)@file_get_contents($root . '/atlas/capabilities.php', false, null, 0, 100000) : '';
+  $hasLib = is_file($lib . '/owner-proof.php');
+  $inIssue = strpos($issueText, 'atlas_owner_proof_verdict') !== false;
+  $inCaps = strpos($capText, 'atlas_owner_proof_mode') !== false;
+  list($opMode, $opFrom, $opBad) = doctor_owner_proof_mode($root);
+  $statsDoc = null;
+  list($sst, $sdoc, $ssize) = doctor_json_file($private . '/owner-proof/stats.json', 1048576);
+  if ($sst === 'ok') $statsDoc = $sdoc;
+  $ready = doctor_owner_proof_readiness($statsDoc, $opMode, $now, 7);
+  $parts = [];
+  foreach ([['subscribers', 'atlas-subscribers-store.json', 'subscribers'], ['Global Mail members', 'atlas-postoffice-members-store.json', 'members'], ['Trading Station members', 'atlas-tradingstation-members-store.json', 'members'], ['stored messages', 'atlas-mail-store.json', 'messages']] as $r) {
+    list($cs, $cn) = doctor_json_count($lib . '/' . $r[1], $r[2], 8388608);
+    if ($cs === 'ok' && $cn !== null) $parts[] = $cn . ' ' . $r[0];
+  }
+  $counts = [];
+  foreach ($ready['classes'] as $cls => $c) if (is_array($c)) $counts[] = $cls . ': ' . (int)(isset($c['signed']) ? $c['signed'] : 0) . ' signed, ' . (int)(isset($c['unsigned']) ? $c['unsigned'] : 0) . ' unsigned, ' . (int)(isset($c['refused']) ? $c['refused'] : 0) . ' refused';
+  $countText = $counts ? implode('; ', $counts) : 'no counts recorded yet';
+  $detailOp = 'Mode ' . $opMode . ' (' . $opFrom . '). ' . $countText . '.' . ($parts ? ' Right now: ' . implode(', ', $parts) . '.' : '');
+  if (!is_file($root . '/atlas/asset/issue.php')) {
+    $add('core', 'owner-proof', 'na', 'Membership owner proof: no issue route here', '');
+  } elseif (!$hasLib || !$inIssue || !$inCaps) {
+    $missing = [];
+    if (!$hasLib) $missing[] = 'lib/owner-proof.php';
+    if (!$inIssue) $missing[] = 'atlas/asset/issue.php (old version)';
+    if (!$inCaps) $missing[] = 'atlas/capabilities.php (old version)';
+    $add('core', 'owner-proof', 'fail', 'Membership owner proof is not fully installed', 'Missing or old: ' . implode(', ', $missing) . '. Anyone can ask this issuer for a membership card for a key they do not hold.', 'Upload lib/owner-proof.php, atlas/asset/issue.php, atlas/capabilities.php and lib/webauthn.php from the repository together.');
+  } elseif ($opBad) {
+    $add('core', 'owner-proof', 'warn', 'The owner-proof setting is not off, accept or require', 'The issuer falls back to accept. ' . $detailOp, 'Correct the value in ' . $opFrom . '.');
+  } elseif ($opMode === 'off') {
+    $add('core', 'owner-proof', 'fail', 'Membership owner proof is switched off', $detailOp, 'Set ATLAS_OWNER_PROOF (or lib/atlas-owner-proof-config.json) to accept, and to require once ready.');
+  } elseif ($opMode === 'accept') {
+    $why = ['ready' => 'Signed requests have been seen and no unsigned one in the last 7 days: it can be switched to require.', 'not-ready' => 'An unsigned request arrived in the last 7 days (' . implode(', ', $ready['unsignedRecent']) . '): switching now would turn a wallet away.', 'no-signed-yet' => 'No signed issuance has been seen yet, so the signed path is not proven on this domain.'];
+    $add('core', 'owner-proof', 'warn', 'Membership owner proof is in accept mode (temporary): not enforcing yet', (isset($why[$ready['state']]) ? $why[$ready['state']] . ' ' : '') . $detailOp, 'Switch to require when ready: set ATLAS_OWNER_PROOF=require, or put {"mode": "require"} in lib/atlas-owner-proof-config.json.');
+  } else {
+    $add('core', 'owner-proof', 'ok', 'Membership owner proof is enforcing (require)', $detailOp);
+  }
+
+  // -- stores of each installed component: valid JSON, size, counts
+  foreach (doctor_component_list() as $c) {
+    if (!isset($c['id']) || !isset($c['stores']) || !is_array($c['stores'])) continue;
+    $active = $c['id'] === 'core' || (isset($states[$c['id']]) && $states[$c['id']]['active']);
+    if (!$active) continue;
+    foreach ($c['stores'] as $s) {
+      if (!isset($s['file']) || !preg_match('/^atlas-[a-z0-9-]+\.json$/', $s['file'])) continue;
+      $key = isset($s['key']) && is_string($s['key']) ? $s['key'] : null;
+      list($st, $n, $size) = doctor_json_count($lib . '/' . $s['file'], $key, 8388608);
+      $label = isset($s['label']) ? (string)$s['label'] : $s['file'];
+      $cid = 'store-' . $s['file'];
+      if ($st === 'missing') $add($c['id'], $cid, 'info', $label . ': not created yet', 'Created the first time it is needed.');
+      elseif ($st === 'too-big') $add($c['id'], $cid, 'warn', $label . ' is very large: ' . doctor_size($size), 'Every request that touches it reads the whole file.', 'Ask before pruning it.');
+      elseif ($st !== 'ok') $add($c['id'], $cid, 'fail', $label . ' cannot be read (' . $st . ')', $s['file'] . ' is damaged or not valid JSON.', 'Restore lib/' . $s['file'] . ' from a backup.');
+      elseif ($size >= 5242880) $add($c['id'], $cid, 'warn', $label . ' is large: ' . doctor_size($size), 'Every request that touches it reads the whole file.', 'Ask before pruning it.');
+      else $add($c['id'], $cid, 'ok', $label . ': valid' . ($n !== null ? ', ' . $n . ' entries' : ''), doctor_size($size) . '.');
+    }
+  }
+
+  // -- membership classes the manifest asks for
+  $m = null;
+  if (is_file($wk . '/spatial.json') && (int)@filesize($wk . '/spatial.json') <= 2097152) $m = json_decode((string)@file_get_contents($wk . '/spatial.json'), true);
+  if (is_array($m)) {
+    foreach (['postOffice' => 'atlas.postoffice.membership', 'tradingStation' => 'atlas.tradingstation.membership', 'domainMembership' => 'atlas.membership'] as $svc => $cls) {
+      if (!isset($m[$svc]) || !is_array($m[$svc]) || empty($m[$svc]['requiresCredential'])) continue;
+      $got = isset($m[$svc]['credentialClass']) ? $m[$svc]['credentialClass'] : null;
+      $comp = $svc === 'postOffice' ? 'postoffice' : ($svc === 'tradingStation' ? 'trade' : 'core');
+      if ($got !== $cls) $add($comp, 'class-' . $svc, 'warn', 'The manifest asks for a different card than the wallet uses for ' . $svc, 'credentialClass is ' . (is_string($got) ? $got : 'not set') . '; the wallet uses ' . $cls . ' for this service and ignores another class.', 'Set "credentialClass" to ' . $cls . ' in .well-known/spatial.json, or remove the field.');
+      else $add($comp, 'class-' . $svc, 'ok', 'The manifest asks for the ' . $svc . ' card the wallet issues (' . $cls . ')');
+    }
+  }
+
+  // -- Global Mail / domain mail: the code the wallet's mail check needs
+  if (isset($states['mail']) && $states['mail']['active'] && isset($states['postoffice']) && !$states['postoffice']['active']) {
+    $add('mail', 'mail-pair', 'warn', 'Domain mail is installed without the Post Office routes', 'Wallets can check mail here but cannot send person-to-person mail.', 'Upload atlas/postoffice/ if this domain offers Global Mail.');
+  }
+  if (isset($states['postoffice']) && $states['postoffice']['active'] && isset($states['mail']) && !$states['mail']['active']) {
+    $add('postoffice', 'mail-pair', 'fail', 'Global Mail is installed without the mail routes', 'Wallets cannot check for mail on this domain.', 'Upload atlas/mail/ (check.php, send.php, delete.php).');
+  }
+
+  // -- Presence
+  if (isset($states['presence']) && $states['presence']['active']) {
+    list($st, $n, $size) = doctor_json_count($root . '/presence/lib/atlas-presence-store.json', null, 8388608);
+    $plib = $root . '/presence/lib';
+    if (!is_dir($plib) || !is_writable($plib)) $add('presence', 'presence-writable', 'fail', 'presence/lib/ is not writable', 'Room state cannot be saved.', 'Make presence/lib/ writable by your hosting account.');
+    elseif ($st === 'missing') $add('presence', 'presence-store', 'info', 'No presence state yet', 'Created when the first visitor joins a room.');
+    elseif ($st !== 'ok') $add('presence', 'presence-store', 'fail', 'The presence store cannot be read (' . $st . ')', '', 'Restore presence/lib/atlas-presence-store.json or delete it to start with empty rooms.');
+    else $add('presence', 'presence-store', 'ok', 'Presence state is valid', doctor_size($size) . '.');
+  }
+
+  // -- Call
+  if (isset($states['call']) && $states['call']['active']) {
+    $cl = $root . '/atlas/call/lib';
+    if (is_file($cl . '/config.php')) {
+      $add('call', 'call-config', 'ok', 'Call service settings file is in place', 'Its contents are never read.');
+      if (!is_writable($cl)) $add('call', 'call-state', 'fail', 'atlas/call/lib/ is not writable', 'The call service keeps its state in a folder there.', 'Make atlas/call/lib/ writable by your hosting account.');
+    } elseif (is_file($cl . '/config.php.off')) $add('call', 'call-config', 'info', 'The call service is installed but switched off', 'The settings file is renamed config.php.off.', 'Rename it to config.php to switch the service on.');
+    else $add('call', 'call-config', 'warn', 'The call service has no settings file', 'It stays off until atlas/call/lib/config.php exists.', 'Copy atlas/call/lib/config.example.php to config.php and fill it in (or leave it off).');
+  }
+
+  // -- Directory
+  if (isset($states['directory']) && $states['directory']['active']) {
+    if (!extension_loaded('pdo_sqlite')) $add('directory', 'dir-sqlite', 'fail', 'The directory needs the pdo_sqlite extension', 'This PHP has none.', 'Enable pdo_sqlite for this domain.');
+    $data = null; $how = '';
+    $env = getenv('DIRECTORY_DATA_DIR');
+    if (is_string($env) && $env !== '') { $data = $env; $how = 'environment variable'; }
+    if ($data === null) {
+      $d = doctor_json_file($root . '/atlas/directory/lib/atlas-directory-config.json', 8192);
+      if ($d[0] === 'ok' && is_array($d[1]) && isset($d[1]['dataDir']) && is_string($d[1]['dataDir']) && $d[1]['dataDir'] !== '') { $data = $d[1]['dataDir']; $how = 'atlas-directory-config.json'; }
+    }
+    if ($data === null) {
+      for ($up = $root . '/atlas/directory/lib'; ; $up = dirname($up)) {
+        if (is_dir($up . '/atlas-directory-private')) { $data = $up . '/atlas-directory-private'; $how = 'found beside the web root'; break; }
+        if (dirname($up) === $up) break;
+      }
+    }
+    if ($data === null) $add('directory', 'dir-data', 'fail', 'The directory has no data folder', 'It refuses to run without one outside the web root.', 'Create atlas-directory-private beside the web root (or set dataDir in atlas/directory/lib/atlas-directory-config.json).');
+    else {
+      $rd = realpath($data);
+      if ($rd === false || !is_dir($rd)) $add('directory', 'dir-data', 'fail', 'The directory data folder does not exist', 'Configured: ' . $data, 'Create it.');
+      elseif ($inside($rd)) $add('directory', 'dir-data', 'fail', 'The directory data folder is inside the web root', 'The directory refuses to run with its database where it could be downloaded.', 'Move it outside public_html.');
+      elseif (!is_writable($rd)) $add('directory', 'dir-data', 'fail', 'The directory data folder is not writable', '', 'Make it writable by your hosting account.');
+      else {
+        $db = $rd . '/atlas-directory.sqlite';
+        if (!is_file($db)) $add('directory', 'dir-data', 'info', 'The directory database is not created yet', 'Data folder (' . $how . ') is outside the web root and writable. The database appears with the first submission.');
+        else {
+          $t = (int)@filemtime($db);
+          $stale = $t > 0 && $now - $t > 3 * 86400;
+          $add('directory', 'dir-data', $stale ? 'warn' : 'ok', 'Directory database in place, ' . doctor_size((int)@filesize($db)), 'Last changed ' . ($t ? date('Y-m-d H:i', $t) : 'unknown') . ' (server time).' . ($stale ? ' The crawl job (cron.php) may not be scheduled.' : ''), $stale ? 'Schedule atlas/directory/cron.php to run every few hours.' : '');
+        }
+      }
+    }
+  }
+
+  // -- Chain Labs
+  if (isset($states['chainlabs']) && $states['chainlabs']['active']) {
+    $miss = [];
+    foreach (['openssl', 'pdo_sqlite'] as $x) if (!extension_loaded($x)) $miss[] = $x;
+    if ($miss) $add('chainlabs', 'cl-ext', 'fail', 'Chain Labs needs PHP extension(s): ' . implode(', ', $miss), 'Its pages answer 503 without them.', 'Enable them for this domain.');
+    else $add('chainlabs', 'cl-ext', 'ok', 'Chain Labs PHP extensions are present (openssl, pdo_sqlite)');
+    $cfgPath = getenv('CHAINLABS_CONFIG');
+    $cfgPath = is_string($cfgPath) && $cfgPath !== '' ? $cfgPath : null;
+    $priv = realpath(dirname($root) . '/chainblock-labs-private');
+    if ($cfgPath !== null && $priv === false) $priv = realpath(dirname($cfgPath));
+    if ($priv === false) $add('chainlabs', 'cl-private', 'fail', 'The Chain Labs private folder does not exist', 'Expected beside the web root: chainblock-labs-private. The ledgers and registries are kept there, never inside the web root.', 'Create it beside public_html, writable by your hosting account.');
+    elseif ($inside($priv)) $add('chainlabs', 'cl-private', 'fail', 'The Chain Labs private folder is inside the web root', '', 'Move it outside public_html.');
+    elseif (!is_writable($priv)) $add('chainlabs', 'cl-private', 'fail', 'The Chain Labs private folder is not writable', '', 'Make it writable by your hosting account.');
+    else {
+      $have = []; $none = [];
+      foreach (['coin26.sqlite', 'chain34.sqlite', 'ledger29.sqlite'] as $f) { if (is_file($priv . '/' . $f)) $have[] = $f . ' (' . doctor_size((int)@filesize($priv . '/' . $f)) . ')'; else $none[] = $f; }
+      $add('chainlabs', 'cl-private', 'ok', 'The Chain Labs private folder is outside the web root and writable', ($have ? 'Databases: ' . implode(', ', $have) . '.' : 'No database yet.') . ($none ? ' Not created yet: ' . implode(', ', $none) . '.' : ''));
+      $mode = doctor_mode($priv);
+      if ($mode !== null && ($mode & 0002)) $add('chainlabs', 'cl-mode', 'fail', 'The Chain Labs private folder can be changed by any account', 'Mode ' . doctor_modestr($mode) . '.', 'Set it to 0700 or 0750.');
+      elseif ($mode !== null && ($mode & 0004)) $add('chainlabs', 'cl-mode', 'warn', 'The Chain Labs private folder can be read by other accounts', 'Mode ' . doctor_modestr($mode) . '.', 'Set it to 0700 or 0750.');
+    }
+    $cfg = $cfgPath !== null ? $cfgPath : ($priv !== false ? $priv . '/chainlabs-config.json' : '');
+    $hostsHere = null;
+    if ($cfg !== '' && is_file($cfg)) {
+      $d = doctor_json_file($cfg, 8192);
+      $hosts = $d[0] === 'ok' && is_array($d[1]) && isset($d[1]['hosts']) && is_array($d[1]['hosts']) ? $d[1]['hosts'] : null;
+      if ($hosts === null || !$hosts || count($hosts) > 5) $add('chainlabs', 'cl-hosts', 'fail', 'chainlabs-config.json is not usable', 'A configuration file that exists but is invalid leaves no domain at all, so every lab refuses every request.', 'Fix it: {"hosts": ["a.example", "b.example"], "peers": {...}} with one to five host names.');
+      else {
+        $hostsHere = array_map('strtolower', array_filter($hosts, 'is_string'));
+        $add('chainlabs', 'cl-hosts', in_array(strtolower(doctor_host_bare($host)), $hostsHere, true) ? 'ok' : 'fail', in_array(strtolower(doctor_host_bare($host)), $hostsHere, true) ? 'Chain Labs names this domain: ' . implode(', ', $hostsHere) : 'Chain Labs does not list this domain', 'Configured hosts: ' . implode(', ', $hostsHere) . '.', in_array(strtolower(doctor_host_bare($host)), $hostsHere, true) ? '' : 'Add ' . doctor_host_bare($host) . ' to "hosts" in chainlabs-config.json.');
+      }
+    } else {
+      $hp = $root . '/chain-labs/lib/hosts.php';
+      $txt = is_file($hp) ? (string)@file_get_contents($hp, false, null, 0, 60000) : '';
+      if (preg_match("/CHAINLABS_DEFAULT_HOSTS\\s*=\\s*\\[([^\\]]*)\\]/", $txt, $mm) && preg_match_all("/'([a-z0-9.-]+)'/i", $mm[1], $hh)) {
+        $names = array_map('strtolower', $hh[1]);
+        $okHere = in_array(strtolower(doctor_host_bare($host)), $names, true);
+        $add('chainlabs', 'cl-hosts', $okHere ? 'info' : 'fail', $okHere ? 'Chain Labs uses its built-in domain list' : 'Chain Labs refuses this domain: it is not in the built-in list and there is no chainlabs-config.json', 'Built-in hosts: ' . implode(', ', $names) . '.', $okHere ? '' : 'Create chainlabs-config.json in the Chain Labs private folder naming this domain and its peer.');
+      }
+    }
+    if ($priv !== false && is_file($priv . '/gold-adapter.php')) $add('chainlabs', 'cl-gold', 'info', 'The gold purchase adapter is installed', 'Its contents are never read.');
+  }
+
+  // -- Verifier
+  if (isset($states['verifier']) && $states['verifier']['active']) {
+    $mv = isset($mounts['verifier']) ? $mounts['verifier'] : 'atlas-verify';
+    $dirv = $root . ($mv === '' ? '' : '/' . $mv);
+    $miss = [];
+    foreach (['openssl', 'json'] as $x) if (!extension_loaded($x)) $miss[] = $x;
+    if ($miss) $add('verifier', 'vf-ext', 'fail', 'The verifier needs PHP extension(s): ' . implode(', ', $miss), '', 'Enable them for this domain.');
+    if (!function_exists('curl_init') && !ini_get('allow_url_fopen')) $add('verifier', 'vf-net', 'fail', 'The verifier cannot make outbound requests', 'It needs the curl extension or allow_url_fopen to reach the issuers it trusts.', 'Enable one of them.');
+    if (!is_file($dirv . '/config.php')) $add('verifier', 'vf-config', 'warn', 'The verifier is installed but not configured', 'verify.php reports configured: false until config.php exists.', 'Copy config.example.php to config.php and list the issuer origins you trust.');
+    else {
+      $txt = (string)@file_get_contents($dirv . '/config.php', false, null, 0, 65536);
+      $n = preg_match_all("#https://[A-Za-z0-9.-]+#", $txt);
+      $add('verifier', 'vf-config', $n > 0 ? 'ok' : 'warn', $n > 0 ? 'The verifier is configured (' . $n . ' https origin(s) in its settings)' : 'The verifier settings name no https issuer origin', 'The file itself is never shown.', $n > 0 ? '' : 'List at least one trusted issuer origin in config.php.');
+    }
+    $add('verifier', 'vf-where', 'info', 'The verifier is in ' . ($mv === '' ? 'the web root' : $mv . '/'));
+  }
+  return ['checks' => $checks];
+}
+
 // ---- request handling --------------------------------------------------------------------------------------
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -941,7 +1409,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   if ($action === 'env') {
     $env = doctor_env($DOCTOR_ROOT);
     $env['ok'] = true;
-    $env['meta'] = ['commit' => $DOCTOR['commit'], 'built' => $DOCTOR['built'], 'clean' => !empty($DOCTOR['clean']), 'entries' => count($DOCTOR['entries'])];
+    $env['meta'] = ['commit' => $DOCTOR['commit'], 'built' => $DOCTOR['built'], 'clean' => !empty($DOCTOR['clean']), 'entries' => count($DOCTOR['entries']), 'format' => isset($DOCTOR['v']) ? (int)$DOCTOR['v'] : 1];
     doctor_json($env);
   }
   if ($action === 'features') {
@@ -958,10 +1426,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
     doctor_json(['ok' => true, 'manifest' => doctor_manifest($DOCTOR_ROOT, $host)]);
   }
+  if ($action === 'components') {
+    $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
+    $forced = preg_replace('/[^a-z]/', '', isset($_POST['mods']) ? (string)$_POST['mods'] : '');
+    $ents = doctor_entries($DOCTOR_ROOT);
+    $states = doctor_component_states($DOCTOR_ROOT, $host, $ents['entries'], $forced);
+    $core = ['total' => 0, 'present' => 0];
+    foreach ($ents['entries'] as $e) {
+      if ((isset($e[6]) ? $e[6] : 'core') !== 'core' || strpos((string)$e[4], 'o') !== false) continue;
+      $core['total']++;
+      if (file_exists($DOCTOR_ROOT . '/' . $e[0])) $core['present']++;
+    }
+    $list = [['id' => 'core', 'label' => 'Core PHP issuer and libraries', 'kind' => 'core', 'code' => '', 'status' => $core['present'] === 0 ? 'missing' : 'installed', 'present' => $core['present'], 'total' => $core['total'], 'advertised' => [], 'mount' => '']];
+    foreach (doctor_component_list() as $c) {
+      if (!isset($c['kind']) || $c['kind'] !== 'optional' || !isset($states[$c['id']])) continue;
+      $st = $states[$c['id']];
+      $list[] = ['id' => $c['id'], 'label' => $c['label'], 'kind' => 'optional', 'code' => $c['code'], 'status' => $st['status'], 'present' => $st['present'], 'total' => $st['total'], 'advertised' => $st['advertised'], 'mount' => isset($ents['mounts'][$c['id']]) ? $ents['mounts'][$c['id']] : ''];
+    }
+    doctor_json(['ok' => true, 'components' => $list, 'advertisedAll' => array_keys(doctor_advertised($DOCTOR_ROOT, $host))]);
+  }
+  if ($action === 'services') {
+    $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
+    $forced = preg_replace('/[^a-z]/', '', isset($_POST['mods']) ? (string)$_POST['mods'] : '');
+    $ents = doctor_entries($DOCTOR_ROOT);
+    $states = doctor_component_states($DOCTOR_ROOT, $host, $ents['entries'], $forced);
+    $r = doctor_services($DOCTOR_ROOT, $host, $states, $ents['mounts']);
+    $r['ok'] = true;
+    $r['opMode'] = doctor_owner_proof_mode($DOCTOR_ROOT)[0];
+    doctor_json($r);
+  }
   if ($action === 'scan') {
+    $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
     $site = isset($_POST['site']) && in_array($_POST['site'], ['a', 'b'], true) ? $_POST['site'] : 'none';
-    $mods = preg_replace('/[^cp]/', '', isset($_POST['mods']) ? (string)$_POST['mods'] : '');
-    $list = doctor_applicable($DOCTOR['entries'], $site, $mods);
+    $forced = preg_replace('/[^a-z]/', '', isset($_POST['mods']) ? (string)$_POST['mods'] : '');
+    $ents = doctor_entries($DOCTOR_ROOT);
+    $states = doctor_component_states($DOCTOR_ROOT, $host, $ents['entries'], $forced);
+    $list = doctor_applicable($ents['entries'], $site, $states);
     $cursor = max(0, (int)(isset($_POST['cursor']) ? $_POST['cursor'] : 0));
     $t0 = microtime(true);
     $results = []; $counts = [];
@@ -971,14 +1471,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       $counts[$st] = (isset($counts[$st]) ? $counts[$st] : 0) + 1;
       if ($st !== 'ok' && $st !== 'absent-optional') {
         $sz = $st === 'differs' || $st === 'expected-differs' ? @filesize($DOCTOR_ROOT . '/' . $list[$i][0]) : false;
-        $results[] = [$list[$i][0], $st, $list[$i][3], $sz === false ? null : $sz, (int)$list[$i][2]];
+        $results[] = [$list[$i][0], $st, $list[$i][3], $sz === false ? null : $sz, (int)$list[$i][2], isset($list[$i][6]) ? $list[$i][6] : 'core'];
       }
     }
     doctor_json(['ok' => true, 'total' => count($list), 'next' => $i < count($list) ? $i : null, 'results' => $results, 'counts' => $counts]);
   }
   if ($action === 'extras') {
     $known = []; $byBase = [];
-    foreach ($DOCTOR['entries'] as $e) { $known[$e[0]] = true; $byBase[basename($e[0])][] = $e; }
+    $ents = doctor_entries($DOCTOR_ROOT);
+    foreach ($ents['entries'] as $e) { $known[$e[0]] = true; $byBase[basename($e[0])][] = $e; }
     $r = doctor_extras($DOCTOR_ROOT, $known, $DOCTOR_SELF, 10.0, $byBase);
     $r['ok'] = true;
     doctor_json($r);
@@ -1020,7 +1521,7 @@ button.secondary { background:transparent; color:var(--accent); }
 button.danger { background:var(--fail); border-color:var(--fail); }
 button:disabled { opacity:.5; cursor:default; }
 .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px; }
-.pill { display:inline-block; min-width:2.2em; padding:1px 9px; border-radius:99px; font-size:13px; text-align:center; color:#fff; }
+.pill { display:inline-block; min-width:2.2em; padding:1px 9px; border-radius:99px; font-size:12px; letter-spacing:.02em; text-align:center; color:#fff; white-space:nowrap; }
 .pill.ok { background:var(--ok); } .pill.warn { background:var(--warn); } .pill.fail { background:var(--fail); } .pill.info { background:var(--info); }
 .pill.off { background:var(--muted); } .pill.na { background:transparent; color:var(--muted); border:1px solid var(--line); }
 .feat { padding:8px 0; border-top:1px solid var(--line); } .feat:first-child { border-top:0; }
@@ -1037,6 +1538,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
 .banner { font-size:17px; font-weight:600; }
 .muted { color:var(--muted); } .hidden { display:none !important; }
 .notice { border-left:4px solid var(--warn); padding:6px 12px; background:var(--bg); border-radius:4px; margin:10px 0; }
+label.modlabel { display:inline-block; margin-right:14px; }
 </style>
 </head>
 <body>
@@ -1061,12 +1563,12 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
       <label><input type="radio" name="site" value="a"> Demo site A</label>
       <label><input type="radio" name="site" value="b"> Demo site B</label>
     </div>
-    <div class="row">
-      <span>Also installed here:</span>
-      <label><input type="checkbox" name="mod" value="c"> Call service</label>
-      <label><input type="checkbox" name="mod" value="p"> Presence service</label>
-      <button class="secondary" id="rerun">Check again</button>
+    <div class="muted" id="tally"></div>
+    <div class="row" id="modRow">
+      <span>Expect these even if no file of them is here yet:</span>
+      <span id="modBoxes" class="muted">(listed after the first check)</span>
     </div>
+    <div class="row"><button class="secondary" id="rerun">Check again</button></div>
   </div>
   <div id="sections"></div>
   <div class="card">
@@ -1097,7 +1599,13 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     ['/lib/.htaccess', 'lib access rules'], ['/atlas/studio/inc/studio-mint.php', 'Studio helper'], ['/atlas/studio/inc/storage.php', 'Studio helper'],
     ['/atlas/studio/inc/storage-root.php', 'Studio storage setting'], ['/atlas/demo/txlab/inc/private-dir.php', 'Transaction Lab setting'],
     ['/atlas/call/lib/config.php', 'Call service settings'], ['/atlas/call/lib/config.php.off', 'Call service settings (disabled copy)'],
-    ['/atlas/call/lib/state/meta.json', 'Call service state'], ['/presence/lib/store.php', 'Presence library']
+    ['/atlas/call/lib/state/meta.json', 'Call service state'], ['/presence/lib/store.php', 'Presence library'],
+    ['/lib/owner-proof.php', 'owner-proof library'], ['/lib/atlas-owner-proof-config.json', 'owner-proof setting', 'data'], ['/lib/owner-proof/stats.json', 'owner-proof counts', 'data'],
+    ['/lib/replay/', 'replay records', 'data'], ['/lib/holdings/', 'holdings records', 'data'], ['/lib/txn/', 'transaction journal', 'data'], ['/lib/mint-allowance/', 'mint allowance counters', 'data'],
+    ['/lib/atlas-mail-store.json', 'mail store', 'data'], ['/lib/atlas-subscribers-store.json', 'subscriber list', 'data'], ['/lib/atlas-postoffice-members-store.json', 'Global Mail members', 'data'],
+    ['/lib/atlas-tradingstation-members-store.json', 'Trading Station members', 'data'], ['/lib/atlas-admin-keys-store.json', 'administrator key list', 'data'],
+    ['/chain-labs/lib/ledger.php', 'Chain Labs ledger library'], ['/chain-labs/lib/hosts.php', 'Chain Labs host list'], ['/atlas/directory/lib/store.php', 'directory library'],
+    ['/atlas/directory/lib/atlas-directory-config.json', 'directory setting', 'data'], ['/presence/lib/atlas-presence-store.json', 'presence state', 'data']
   ];
 
   function el(tag, attrs, kids) {
@@ -1106,7 +1614,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     (kids || []).forEach(function (c) { if (c) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
     return n;
   }
-  function pill(s, t) { return el('span', { 'class': 'pill ' + s, text: t || ({ ok: 'OK', warn: '!', fail: 'X', info: 'i' })[s] }); }
+  function pill(s, t) { return el('span', { 'class': 'pill ' + s, text: t || ({ ok: 'PASS', warn: 'WARNING', fail: 'FAIL', info: 'INFO', na: 'NOT INSTALLED', off: 'off' })[s] || s }); }
 
   function fmt(ts) { return new Date(ts * 1000).toLocaleString(); }
   $('sub').textContent = 'Read-only comparison of this domain with Domain Atlas commit ' + META.commit + ' (built ' + META.built.slice(0, 10) + '). ' +
@@ -1129,20 +1637,37 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
 
   function currentSite() { var r = document.querySelector('input[name=site]:checked'); return r ? r.value : 'none'; }
   function currentMods() { return Array.prototype.map.call(document.querySelectorAll('input[name=mod]:checked'), function (c) { return c.value; }).join(''); }
+  // One tick box per optional component. Ticking one makes the doctor expect all of its files even when none is here.
+  function buildModBoxes(list) {
+    var box = $('modBoxes');
+    if (box.getAttribute('data-built')) return;
+    box.setAttribute('data-built', '1'); box.textContent = '';
+    list.forEach(function (c) {
+      if (c.kind !== 'optional') return;
+      var inp = el('input', { type: 'checkbox', name: 'mod', value: c.code });
+      inp.addEventListener('change', function () { full(false); });
+      box.appendChild(el('label', { 'class': 'modlabel' }, [inp, ' ' + c.label]));
+    });
+  }
 
   var envCache = null;
   function full(first) {
     $('rerun').disabled = true; $('verdict').textContent = 'Checking…';
-    var st = { missing: [], differs: [], expected: [], odd: [], counts: {}, total: 0, extras: null, probes: [], adminProbes: [], health: [], features: [], manifest: null, env: envCache };
+    var st = { missing: [], differs: [], expected: [], odd: [], counts: {}, total: 0, extras: null, probes: [], adminProbes: [], health: [], features: [], manifest: null, env: envCache, components: [], services: [], endpoints: [], opMode: null };
     var chain = Promise.resolve();
     if (first) {
       chain = chain.then(function () { step('Checking the server…'); return call('env'); }).then(function (env) {
         if (!env.ok) { var e = new Error(env.error || 'failed'); e.status = env.httpStatus; throw e; }
         envCache = env; st.env = env;
         var r = document.querySelector('input[name=site][value=' + env.detected + ']'); if (r) r.checked = true;
-        Array.prototype.forEach.call(document.querySelectorAll('input[name=mod]'), function (c) { c.checked = env.detectedMods.indexOf(c.value) >= 0; });
       });
     }
+    chain = chain.then(function () { step('Working out what is installed…'); return call('components', { mods: currentMods() }); })
+      .then(function (cj) {
+        if (!cj.ok) throw new Error(cj.error || 'components-failed');
+        st.components = cj.components;
+        buildModBoxes(cj.components);
+      });
     chain = chain.then(function () {
       var site = currentSite();
       function more(cursor) {
@@ -1151,7 +1676,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
           st.total = j.total;
           Object.keys(j.counts).forEach(function (k) { st.counts[k] = (st.counts[k] || 0) + j.counts[k]; });
           j.results.forEach(function (r) {
-            var o = { path: r[0], group: r[2], size: r[3], n: r[4] };
+            var o = { path: r[0], group: r[2], size: r[3], n: r[4], comp: r[5] };
             if (r[1] === 'missing') st.missing.push(o);
             else if (r[1] === 'differs') st.differs.push(o);
             else if (r[1] === 'expected-differs') st.expected.push(o);
@@ -1165,7 +1690,9 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
       return more(0);
     }).then(function () { step('Looking for unexpected files…'); return call('extras'); })
       .then(function (x) { if (!x.ok) throw new Error(x.error || 'extras-failed'); st.extras = x; step('Checking what the web can read…'); return probes(); })
-      .then(function (pr) { st.probes = pr; step('Reading the feature switches…'); return call('features'); })
+      .then(function (pr) { st.probes = pr; step('Checking each installed service…'); return call('services', { mods: currentMods() }); })
+      .then(function (sv) { if (!sv.ok) throw new Error(sv.error || 'services-failed'); st.services = sv.checks; st.opMode = sv.opMode; step('Asking each service whether it answers…'); return endpointProbes(st.components); })
+      .then(function (ep) { st.endpoints = ep; step('Reading the feature switches…'); return call('features'); })
       .then(function (f) { if (!f.ok) throw new Error(f.error || 'features-failed'); st.features = f.features; step('Checking housekeeping, permissions and administrator state…'); return call('health'); })
       .then(function (h) { if (!h.ok) throw new Error(h.error || 'health-failed'); st.health = h.checks; step('Checking that administrator routes refuse strangers…'); return adminProbes(); })
       .then(function (ap) { st.adminProbes = ap; step('Reading the manifest…'); return call('manifest'); })
@@ -1176,12 +1703,19 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     }).then(function () { $('rerun').disabled = false; });
   }
 
+  // A file that must stay private counts as exposed only when what came back is that data, not a custom "not found" page.
+  function looksLikeData(path, text) {
+    if (!text.length) return false;
+    if (/\.json$/.test(path)) { try { JSON.parse(text); return true; } catch (e) { return false; } }
+    return /Index of|Parent Directory|\.json/.test(text.slice(0, 4000)) && !/<title>[^<]*(not found|404)/i.test(text.slice(0, 2000));
+  }
+
   function probes() {
     return Promise.all(PROBES.map(function (p) {
       return fetch(p[0], { cache: 'no-store', redirect: 'manual', credentials: 'omit' }).then(function (r) {
         if (r.status !== 200) return { path: p[0], what: p[1], exposed: false, status: r.status };
         return r.text().then(function (t) {
-          var leak = /<\?php|PRIVATE KEY|\/home\//.test(t.slice(0, 4000));
+          var leak = /<\?php|PRIVATE KEY|\/home\//.test(t.slice(0, 4000)) || (p[2] === 'data' && looksLikeData(p[0], t));
           return { path: p[0], what: p[1], exposed: leak, status: 200, empty: t.length === 0 };
         });
       }).catch(function () { return { path: p[0], what: p[1], exposed: false, status: 0 }; });
@@ -1197,6 +1731,62 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
       return fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', cache: 'no-store', redirect: 'manual', credentials: 'omit' }).then(function (r) {
         return { path: p, status: r.status, open: r.status >= 200 && r.status < 300, broken: r.status >= 500 };
       }).catch(function () { return { path: p, status: 0, open: false, broken: false }; });
+    }));
+  }
+
+  // Each installed service is asked one safe question: a read that is public by design (GET), or an empty request that
+  // must be refused (POST {} with no credentials). Nothing here changes anything: a refused request is decided before any
+  // credential is minted, any state written or any mail sent. [component, method, path, accepted statuses, what comes back]
+  var ENDPOINTS = [
+    ['core', 'GET', '/atlas/capabilities', [200], 'json:requestIds'],
+    ['core', 'GET', '/.well-known/atlas-key.json', [200], 'json:keys'],
+    ['core', 'GET', '/.well-known/atlas-revocations.json', [200], 'json:revoked'],
+    ['core', 'GET', '/.well-known/spatial.json', [200], 'json'],
+    ['core', 'GET', '/atlas/calendar', [200], 'json'],
+    ['core', 'POST', '/atlas/asset/issue', [400, 401, 403, 422], 'refuse'],
+    ['mail', 'POST', '/atlas/mail/check', [400, 401, 403, 422], 'refuse'],
+    ['trade', 'GET', '/atlas/trade/catalog', [200], 'json'],
+    ['trade', 'GET', '/atlas/trade/listings', [200], 'json'],
+    ['drops', 'GET', '/atlas/world/drops', [200, 400], 'json'],
+    ['studio', 'GET', '/atlas/studio/', [200], 'html'],
+    ['directory', 'GET', '/atlas/directory/stats.php', [200], 'json'],
+    ['directory', 'GET', '/atlas/directory/search.php', [200, 400], 'json'],
+    ['chainlabs', 'GET', '/chain-labs/index.html', [200], 'html'],
+    ['chainlabs', 'GET', '/chain-labs/spend34.php?action=coins', [200, 503], 'json'],
+    ['verifier', 'GET', '@verifier/verify.php', [200], 'json:configured'],
+    ['presence', 'GET', '/presence/status.php', [200], 'json'],
+    ['call', 'GET', '/atlas/call/info.php', [200], 'json']
+  ];
+  function endpointProbes(components) {
+    var active = {}, mount = {};
+    components.forEach(function (c) { active[c.id] = c.kind === 'core' || c.status !== 'not-installed'; mount[c.id] = c.mount; });
+    var jobs = ENDPOINTS.filter(function (e) { return active[e[0]]; });
+    return Promise.all(jobs.map(function (e) {
+      var path = e[2].indexOf('@verifier/') === 0 ? '/' + (mount.verifier ? mount.verifier + '/' : '') + e[2].slice(10) : e[2];
+      var opts = { method: e[1], cache: 'no-store', redirect: 'manual', credentials: 'omit' };
+      if (e[1] === 'POST') { opts.headers = { 'Content-Type': 'application/json' }; opts.body = '{}'; }
+      var out = { component: e[0], method: e[1], path: path, accept: e[3], kind: e[4], status: 0, state: 'fail', note: 'no response', json: null };
+      return fetch(path, opts).then(function (r) {
+        out.status = r.status;
+        return r.text().then(function (t) {
+          if (/<\?php/.test(t.slice(0, 4000))) { out.note = 'answered with PHP source code'; return out; }
+          var json = null; try { json = JSON.parse(t); } catch (x) { json = null; }
+          if (e[3].indexOf(r.status) < 0) {
+            if (r.status >= 500) { out.state = 'fail'; out.note = 'server error (HTTP ' + r.status + ')'; }
+            else if (r.status === 404) { out.state = 'fail'; out.note = 'not found (HTTP 404): the file is missing or not served'; }
+            else if (e[4] === 'refuse' && r.status >= 200 && r.status < 300) { out.state = 'fail'; out.note = 'accepted an empty request (HTTP ' + r.status + ')'; }
+            else { out.state = 'warn'; out.note = 'unexpected answer (HTTP ' + r.status + ')'; }
+            return out;
+          }
+          var want = e[4].indexOf('json:') === 0 ? e[4].slice(5) : (e[4] === 'json' ? '' : null);
+          if (want !== null && r.status === 200 && (json === null || typeof json !== 'object' || (want && !(want in json)))) { out.state = 'warn'; out.note = 'HTTP 200 but not the expected JSON' + (want ? ' (no "' + want + '")' : ''); return out; }
+          if (e[4] === 'refuse') { out.state = 'ok'; out.note = 'refuses an empty request (HTTP ' + r.status + ')'; return out; }
+          if (r.status === 503) { out.state = 'warn'; out.note = 'answers 503: installed but not set up yet'; return out; }
+          if (e[4] === 'json:configured' && json && json.configured === false) { out.state = 'warn'; out.note = 'answers, but reports it is not configured'; return out; }
+          out.state = 'ok'; out.note = 'answers (HTTP ' + r.status + ')'; out.json = json;
+          return out;
+        });
+      }).catch(function () { return out; });
     }));
   }
 
@@ -1217,7 +1807,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     ['c', 'p', 'a'].forEach(function (g) {
       var sub = list.filter(function (x) { return x.group === g; });
       if (!sub.length) return;
-      out.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: label + ' - ' + GROUP[g] + ' (' + sub.length + ')' }), pathList(sub.map(function (x) { return x.path + (x.what ? '  [' + x.what + ']' : '') + (x.size !== null && x.size !== undefined ? '  [' + x.size + ' bytes here, ' + x.n + ' in the repository]' : ''); }))]));
+      out.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: label + ' - ' + GROUP[g] + ' (' + sub.length + ')' }), pathList(sub.map(function (x) { return x.path + (x.comp && x.comp !== 'core' && x.comp !== 'site' ? '  <' + x.comp + '>' : '') + (x.what ? '  [' + x.what + ']' : '') + (x.size !== null && x.size !== undefined ? '  [' + x.size + ' bytes here, ' + x.n + ' in the repository]' : ''); }))]));
     });
     return out;
   }
@@ -1238,6 +1828,13 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     (state.health || []).forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, c.group === 'permissions' ? 4 : 5]); });
     (state.env ? state.env.checks : []).forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, 5]); });
     state.adminProbes.forEach(function (p) { if (p.broken) t.push(['warn', 'Administrator route fails with a server error: ' + p.path + ' (HTTP ' + p.status + ')', 'Look at the PHP error log; the file is probably an old or damaged copy.', 5]); });
+    compRows().forEach(function (r) { if (r.status === 'fail' && r.kind !== 'files') t.push(['fail', r.title, r.fix || r.detail, 2]); });
+    state.services.forEach(function (c) { if (c.status === 'fail') t.push(['fail', c.title, c.fix || c.detail, 3]); });
+    state.endpoints.forEach(function (e) { if (e.state === 'fail') t.push(['fail', 'Service does not answer properly: ' + e.method + ' ' + e.path + ' - ' + e.note, 'Upload the missing or old file, or look at the PHP error log.', 3]); });
+    serviceExtra().forEach(function (c) { if (c.status === 'fail') t.push(['fail', c.title, c.fix || c.detail, 3]); });
+    state.services.forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, 5]); });
+    state.endpoints.forEach(function (e) { if (e.state === 'warn') t.push(['warn', 'Service answer to look at: ' + e.method + ' ' + e.path + ' - ' + e.note, '', 5]); });
+    serviceExtra().forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, 5]); });
     state.features.forEach(function (f) { if (f.state === 'problem') t.push(['warn', 'Feature needs attention: ' + f.label, f.reasons.join('; '), 6]); });
     if (state.manifest) state.manifest.problems.forEach(function (p) { t.push([p[0], 'Manifest: ' + p[1], '', p[0] === 'fail' ? 3 : 6]); });
     if (pageMissing.length) t.push(['warn', 'Upload ' + pageMissing.length + ' missing page/config file(s).', '', 7]);
@@ -1250,6 +1847,48 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
       return fa - fb || a[0][3] - b[0][3] || a[1] - b[1];
     }).map(function (x) { return x[0]; });
   }
+
+  // One row per component for the Components section.
+  var CSTATE = { installed: 'ok', expected: 'fail', 'advertised-missing': 'fail', 'not-installed': 'na', missing: 'fail' };
+  function compRows() {
+    return state.components.map(function (c) {
+      var st = CSTATE[c.status] || 'warn', title = c.label, detail, fix = '';
+      if (c.status === 'not-installed') detail = 'Not installed here, so none of its files are expected.';
+      else if (c.status === 'advertised-missing') { st = 'fail'; title = c.label + ' is advertised but not installed'; detail = 'The manifest advertises ' + c.advertised.join(', ') + ', but none of its ' + c.total + ' files are here.'; fix = 'Upload it, or take the service out of .well-known/spatial.json.'; }
+      else if (c.status === 'expected') { st = 'fail'; title = c.label + ' is expected but not installed'; detail = 'You ticked it, but none of its ' + c.total + ' files are here.'; fix = 'Upload it, or untick it.'; }
+      else if (c.status === 'missing') { title = c.label + ' is missing'; detail = 'None of its ' + c.total + ' files are here.'; fix = 'Upload the issuer.'; }
+      else if (c.present < c.total) { st = 'fail'; detail = c.present + ' of ' + c.total + ' files are present; the missing ones are listed under "Files compared with the repository".'; fix = 'Upload the missing files.'; }
+      else detail = 'Installed: all ' + c.total + ' files present' + (c.mount ? ' (in ' + c.mount + '/)' : '') + '.';
+      return { status: st, title: title, detail: detail, fix: fix, kind: c.present < c.total && c.status === 'installed' ? 'files' : 'component', id: c.id };
+    });
+  }
+  // Checks the browser makes from what the services answered: what the issuer advertises against what the server applies.
+  function serviceExtra() {
+    var out = [];
+    var cap = state.endpoints.filter(function (e) { return e.path === '/atlas/capabilities' && e.state === 'ok'; })[0];
+    if (cap && state.opMode) {
+      var adv = cap.json && cap.json.ownerProof ? cap.json.ownerProof.mode : null;
+      if (state.opMode === 'off') { if (adv !== null) out.push({ status: 'fail', title: 'Owner-proof mode advertised as ' + adv + ' but the server setting is off', detail: '', fix: 'Check the setting and upload capabilities.php together with issue.php.' }); }
+      else if (adv === null) out.push({ status: 'fail', title: 'The issuer does not advertise the owner-proof check', detail: 'The server applies mode ' + state.opMode + ' but /atlas/capabilities has no ownerProof record, so wallets will not sign membership requests.', fix: 'Upload atlas/capabilities.php, atlas/asset/issue.php and lib/owner-proof.php together.' });
+      else if (adv !== state.opMode) out.push({ status: 'fail', title: 'Advertised owner-proof mode (' + adv + ') differs from the server setting (' + state.opMode + ')', detail: 'The web server and this page see different settings.', fix: 'Set the mode where the web server reads it (environment variable or lib/atlas-owner-proof-config.json).' });
+      else out.push({ status: 'ok', title: 'The advertised owner-proof mode matches the server setting (' + adv + ')', detail: 'Membership classes: ' + (cap.json.ownerProof.classes || []).join(', ') + '.' });
+    }
+    return out;
+  }
+  var LABEL = { ok: 'PASS', warn: 'WARNING', fail: 'FAIL', na: 'NOT INSTALLED', info: 'INFO' };
+  function tally() {
+    var n = { ok: 0, warn: 0, fail: 0, na: 0 };
+    var add = function (s) { if (n[s] !== undefined) n[s]++; };
+    state.env.checks.forEach(function (c) { add(c.status); });
+    state.health.forEach(function (c) { add(c.status); });
+    state.services.forEach(function (c) { add(c.status); });
+    serviceExtra().forEach(function (c) { add(c.status); });
+    state.endpoints.forEach(function (e) { add(e.state); });
+    compRows().forEach(function (c) { add(c.status); });
+    state.probes.forEach(function (p) { add(p.exposed ? 'fail' : 'ok'); });
+    return n;
+  }
+  function tallyText() { var n = tally(); return n.ok + ' PASS, ' + n.warn + ' WARNING, ' + n.fail + ' FAIL, ' + n.na + ' NOT INSTALLED'; }
 
   function render() {
     $('sections').textContent = '';
@@ -1268,6 +1907,29 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     problems.forEach(function (x, i) { kids.push(item(x[0], (i + 1) + '. ' + x[1], x[2])); });
     if (problems.length) kids.push(el('div', { 'class': 'row' }, [(function () { var b = el('button', { 'class': 'secondary', id: 'saveReportInline', text: 'Save this report as a file' }); b.addEventListener('click', saveReport); return b; })()]));
     section('To do - fix-it checklist', fails ? 'fail' : (warns ? 'warn' : 'ok'), problems.length ? problems.length + ' item(s)' : 'all clear', problems.length > 0, kids);
+
+    $('tally').textContent = tallyText();
+    var cr = compRows();
+    var installed = cr.filter(function (r) { return r.status !== 'na'; }).length;
+    section('Components (what is installed here)', worstOf(cr), installed + ' installed, ' + (cr.length - installed) + ' not installed', cr.some(function (r) { return r.status === 'fail'; }),
+      [el('p', { 'class': 'muted', text: 'A part counts as installed when any of its files is here; then every one of its files is expected. A part with no file here that the manifest does not advertise is simply not installed and is never reported as missing.' })].concat(cr.map(function (r) { return item(r.status, r.title, r.detail, r.fix); })));
+    var svc = state.services.concat(serviceExtra());
+    var epItems = state.endpoints.map(function (e) { return item(e.state, e.method + ' ' + e.path, e.note); });
+    var byComp = {}; state.services.forEach(function (c) { (byComp[c.component] = byComp[c.component] || []).push(c); });
+    var svcBody = [el('p', { 'class': 'muted', text: 'Read-only: counts, sizes, modes and public settings only. Keys, messages and credentials are never opened or shown.' })];
+    state.components.forEach(function (comp) {
+      var rows = (byComp[comp.id] || []).concat(comp.id === 'core' ? serviceExtra() : []);
+      if (!rows.length || comp.status === 'not-installed') return;
+      svcBody.push(el('div', { 'class': 'gh', text: comp.label }));
+      rows.forEach(function (c) { svcBody.push(item(c.status, c.title, c.detail, c.fix)); });
+    });
+    svcBody.push(el('div', { 'class': 'gh', text: 'Do the installed services answer?' }));
+    if (epItems.length) epItems.forEach(function (x) { svcBody.push(x); }); else svcBody.push(el('p', { text: 'Nothing was asked.' }));
+    state.components.filter(function (c) { return c.kind === 'optional' && c.status === 'not-installed'; }).forEach(function (c) {
+      svcBody.push(item('na', c.label, 'Not installed here.'));
+    });
+    var svcAll = svc.map(function (c) { return { status: c.status }; }).concat(state.endpoints.map(function (e) { return { status: e.state }; }));
+    section('Services and deployment checks', worstOf(svcAll), svc.length + ' check(s), ' + epItems.length + ' endpoint(s) asked', worstOf(svcAll) !== 'ok', svcBody);
 
     var checks = env.checks.map(function (x) { return item(x.status, x.title, x.detail, x.fix); });
     var worst = env.checks.some(function (x) { return x.status === 'fail'; }) ? 'fail' : (env.checks.some(function (x) { return x.status === 'warn'; }) ? 'warn' : 'ok');
@@ -1407,6 +2069,11 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     lines.push($('verdict').textContent + '. ' + $('progress').textContent, '');
     var t = todo();
     lines.push('TO DO (most urgent first)'); if (!t.length) lines.push('  nothing'); t.forEach(function (x, i) { lines.push('  ' + (i + 1) + '. [' + x[0] + '] ' + x[1] + (x[2] ? ' - ' + x[2] : '')); });
+    lines.push('', 'SUMMARY  ' + tallyText());
+    lines.push('', 'COMPONENTS'); compRows().forEach(function (r) { lines.push('  [' + (LABEL[r.status] || r.status) + '] ' + r.title + ' - ' + r.detail); });
+    lines.push('', 'SERVICES AND DEPLOYMENT');
+    state.services.concat(serviceExtra()).forEach(function (c) { lines.push('  [' + (LABEL[c.status] || c.status) + '] ' + c.title + (c.detail ? ' - ' + c.detail : '')); });
+    state.endpoints.forEach(function (e) { lines.push('  [' + (LABEL[e.state] || e.state) + '] ' + e.method + ' ' + e.path + ' - ' + e.note); });
     lines.push('', 'SERVER'); env.checks.forEach(function (x) { lines.push('  [' + x.status + '] ' + x.title + (x.detail ? ' - ' + x.detail : '')); });
     lines.push('', 'MISSING (' + state.missing.length + ')'); state.missing.forEach(function (x) { lines.push('  ' + x.path); });
     lines.push('', 'DIFFERENT (' + state.differs.length + ')'); state.differs.forEach(function (x) { lines.push('  ' + x.path + (x.size !== null && x.size !== undefined ? '  [' + x.size + ' bytes here, ' + x.n + ' in the repository]' : '')); });
@@ -1470,7 +2137,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
   $('go').addEventListener('click', start);
   $('token').addEventListener('keydown', function (e) { if (e.key === 'Enter') start(); });
   $('rerun').addEventListener('click', function () { full(false); });
-  Array.prototype.forEach.call(document.querySelectorAll('input[name=site], input[name=mod]'), function (r) { r.addEventListener('change', function () { full(false); }); });
+  Array.prototype.forEach.call(document.querySelectorAll('input[name=site]'), function (r) { r.addEventListener('change', function () { full(false); }); });
   $('saveReport').addEventListener('click', saveReport);
   $('copy').addEventListener('click', function () { if (state) copy(report(), function (ok) { said(ok, 'Report'); }); });
   $('copyMissing').addEventListener('click', function () {

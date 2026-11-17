@@ -64,8 +64,10 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
   const page = await ctx.newPage();
   const problems = [];
   // The exposure probes request private files on purpose; the browser logs each 404/403 as a resource error.
-  page.on('console', (m) => { if (['error', 'warning'].includes(m.type()) && !/Failed to load resource: the server responded with a status of (401|403|404)/.test(m.text())) problems.push(m.type() + ': ' + m.text()); });
+  page.on('console', (m) => { if (['error', 'warning'].includes(m.type()) && !/Failed to load resource: the server responded with a status of (400|401|403|404|500)/.test(m.text())) problems.push(m.type() + ': ' + m.text()); });
   page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
+  // The endpoint probes post an empty request to a few routes; this fixture's planted unusable key makes them answer 500, which the report must show, so only a 5xx anywhere else is a problem.
+  page.on('response', (r) => { if (r.status() >= 400 && ![401, 403, 404].includes(r.status()) && !/\/atlas\/(asset\/issue|mail\/check|world\/drops)$/.test(new URL(r.url()).pathname)) problems.push('HTTP ' + r.status() + ' ' + r.url()); });
   let dialogText = null;
   page.on('dialog', async (d) => { dialogText = d.message(); await d.accept(); });
 
@@ -108,6 +110,16 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
     assert.ok(!/can be read over the web/.test(text.replace('private helper files must not be served', '')), 'nothing flagged as exposed except the planted key, which the dev server serves');
   });
 
+  await check('the Components section names what is installed and marks the rest NOT INSTALLED, with no false missing files', async () => {
+    const sec = page.locator('details:has(> summary:has-text("Components (what is installed here)"))');
+    const text = await sec.textContent();
+    assert.ok(/Chain Labs/.test(text) && /Credential verifier/.test(text) && /Domain services directory/.test(text), text.slice(0, 300));
+    assert.ok(/NOT INSTALLED/.test(text), 'uninstalled optional parts are labelled');
+    const missing = await page.locator('details:has(> summary:has-text("Files compared with the repository"))').first().textContent();
+    assert.ok(!/chain-labs\//.test(missing), 'Chain Labs is not installed here, so none of its files is listed');
+    assert.ok(await page.locator('#modBoxes label.modlabel').count() >= 5, 'one tick box per optional component');
+  });
+
   await check('the Worlds and manifest section lists worlds and policy, and shows broken references', async () => {
     const sec = page.locator('details', { hasText: 'Worlds and manifest' });
     assert.ok(await sec.getAttribute('open') !== null, 'opens by itself when there are problems');
@@ -144,8 +156,8 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
     const open = idx(/Administrator route answers without a sign-in: \/atlas\/admin\/visits/), missing = idx(/missing code file/);
     assert.ok(open >= 0 && missing >= 0 && open < missing, 'open route at ' + open + ', missing code at ' + missing);
     const levels = await todo.locator('.item .pill').allTextContents();
-    const firstWarn = levels.findIndex((l) => l === '!');
-    assert.ok(firstWarn < 0 || levels.slice(firstWarn).every((l) => l !== 'X'), 'every failure comes before every warning: ' + levels.join(''));
+    const firstWarn = levels.findIndex((l) => l === 'WARNING');
+    assert.ok(firstWarn < 0 || levels.slice(firstWarn).every((l) => l !== 'FAIL'), 'every failure comes before every warning: ' + levels.join(''));
   });
 
   await check('the Housekeeping, Permissions and Administrator sections report what the fixtures planted', async () => {
@@ -168,7 +180,7 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
   });
 
   await check('lock files are one line, not 64', async () => {
-    const un = await page.locator('details', { hasText: 'Unexpected files' }).first().textContent();
+    const un = await page.locator('details:has(> summary:has-text("Unexpected files"))').first().textContent();
     assert.ok(/lib\/\*\.lock {2}\[64 lock files, all empty/.test(un), un.slice(0, 500));
     assert.ok(!/atlas-rid-lock-3\.lock/.test(un));
   });

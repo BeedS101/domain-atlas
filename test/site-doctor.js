@@ -208,7 +208,7 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
 
   await check('site selection: issuer-only skips demo pages, site B expects its own pages', async () => {
     const none = await call('scan', { site: 'none' });
-    assert.ok(none.json.total < 220 && none.json.total > 100);
+    assert.ok(none.json.total < 300 && none.json.total > 100);
     assert.deepStrictEqual(issue(none), []);
     const b = await call('scan', { site: 'b' });
     const missing = issue(b);
@@ -1118,14 +1118,43 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
   });
 
   // ---- the original incident: a site from before Studio ---------------------------------------------------
-  await check('a pre-Studio site is reported with every missing Studio file and the old shared libraries', async () => {
+  await check('a site from before Studio: Studio is not installed and its files are not reported missing; the old shared libraries still differ', async () => {
     const old = await serve((() => { const r = baselineLayout(); fs.copyFileSync(built.php, path.join(r, 'site-doctor.php')); return r; })());
-    const r = await old.call(built.token)('scan', { site: 'a' });
+    const c = old.call(built.token);
+    const r = await c('scan', { site: 'a' });
+    const comps = await c('components', {});
     old.stop();
     const found = issue(r);
-    for (const p of ['atlas/studio/inc/studio-mint.php', 'atlas/studio/inc/challenges.php', 'atlas/studio/api.php', 'assets/studio/trophy.glb']) assert.ok(found.includes(p + ' missing'), p);
+    assert.ok(!found.some((x) => /^atlas\/studio\//.test(x)), 'no Studio file is reported: ' + found.filter((x) => /studio/.test(x)).slice(0, 3));
+    assert.strictEqual(comps.json.components.find((x) => x.id === 'studio').status, 'not-installed');
     assert.ok(found.includes('lib/bootstrap.php differs') || found.includes('lib/store.php differs'), 'old shared libraries differ');
     assert.ok(!found.some((x) => /^(bank-demo|index)\.html missing/.test(x)));
+  });
+
+  await check('ticking Studio, or advertising it in the manifest, makes every Studio file expected', async () => {
+    const root2 = baselineLayout(); fs.copyFileSync(built.php, path.join(root2, 'site-doctor.php'));
+    const old = await serve(root2);
+    const c = old.call(built.token);
+    const ticked = issue(await c('scan', { site: 'a', mods: 's' }));
+    for (const p of ['atlas/studio/inc/studio-mint.php', 'atlas/studio/inc/challenges.php', 'atlas/studio/api.php']) assert.ok(ticked.includes(p + ' missing'), p);
+    assert.strictEqual((await c('components', { mods: 's' })).json.components.find((x) => x.id === 'studio').status, 'expected');
+    const manifestFile = path.join(root2, '.well-known', 'spatial.json');
+    const m = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); m.assetStudio = true; fs.writeFileSync(manifestFile, JSON.stringify(m));
+    const adv = await c('components', {});
+    assert.strictEqual(adv.json.components.find((x) => x.id === 'studio').status, 'advertised-missing');
+    assert.ok(issue(await c('scan', { site: 'a' })).includes('atlas/studio/inc/studio-mint.php missing'));
+    old.stop();
+  });
+
+  await check('the original incident: Studio uploaded without studio-mint.php is reported with that one file', async () => {
+    const root2 = baselineLayout(); fs.copyFileSync(built.php, path.join(root2, 'site-doctor.php'));
+    fs.mkdirSync(path.join(root2, 'atlas/studio'), { recursive: true });
+    fs.copyFileSync(path.join(REPO, 'issuer-php/atlas/studio/api.php'), path.join(root2, 'atlas/studio/api.php'));
+    const old = await serve(root2);
+    const c = old.call(built.token);
+    const found = issue(await c('scan', { site: 'a' }));
+    old.stop();
+    assert.ok(found.includes('atlas/studio/inc/studio-mint.php missing'), found.filter((x) => /studio/.test(x)).join(' | '));
   });
 
   // ---- expiry and self-delete -----------------------------------------------------------------------------

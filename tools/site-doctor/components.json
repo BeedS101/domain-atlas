@@ -1,0 +1,42 @@
+{
+  "sources": [
+    { "dir": "issuer-php", "tag": "i", "mount": "" },
+    { "dir": "demo-domain-a", "tag": "a", "mount": "" },
+    { "dir": "demo-domain-b", "tag": "b", "mount": "" },
+    { "dir": "call-php", "tag": "c", "mount": "" },
+    { "dir": "presence-php", "tag": "p", "mount": "" },
+    { "dir": "directory-php", "tag": "d", "mount": "" },
+    { "dir": "chain-labs", "tag": "l", "mount": "chain-labs/" },
+    { "dir": "verifier-php", "tag": "v", "mount": "atlas-verify/" }
+  ],
+  "components": [
+    { "id": "core", "label": "Core PHP issuer and libraries", "kind": "core" },
+    { "id": "site", "label": "Demo site pages, scripts and assets", "kind": "site" },
+    { "id": "studio", "label": "Asset Studio", "kind": "optional", "code": "s", "source": "i", "prefixes": ["atlas/studio/", "assets/studio/"], "advertisedBy": ["assetStudio"] },
+    { "id": "postoffice", "label": "Global Mail / Post Office", "kind": "optional", "code": "o", "source": "i", "prefixes": ["atlas/postoffice/"], "advertisedBy": ["postOffice", "mailRelay"],
+      "stores": [{ "file": "atlas-postoffice-members-store.json", "key": "members", "label": "Global Mail members" }] },
+    { "id": "mail", "label": "Domain mail (subscriber mail and wallet mail check)", "kind": "optional", "code": "m", "source": "i", "prefixes": ["atlas/mail/"], "advertisedBy": ["postOffice"],
+      "stores": [
+        { "file": "atlas-mail-store.json", "key": "messages", "label": "Stored messages" },
+        { "file": "atlas-subscribers-store.json", "key": "subscribers", "label": "Subscribers" },
+        { "file": "atlas-mail-nonces-store.json", "key": null, "label": "Mail request nonces" }
+      ] },
+    { "id": "trade", "label": "Trading Station", "kind": "optional", "code": "t", "source": "i", "prefixes": ["atlas/trade/", "atlas/admin/trusted-trade-peers/"], "advertisedBy": ["tradingStation", "trading"],
+      "stores": [
+        { "file": "atlas-tradingstation-members-store.json", "key": "members", "label": "Trading Station members" },
+        { "file": "atlas-pending-trades-store.json", "key": null, "label": "Pending trades" },
+        { "file": "atlas-trusted-trade-peers-store.json", "key": null, "label": "Trusted trade peers" }
+      ] },
+    { "id": "ledger", "label": "Ledger credential routes", "kind": "optional", "code": "g", "source": "i", "prefixes": ["atlas/ledger/"], "advertisedBy": [] },
+    { "id": "moderation", "label": "Moderation (issuer side)", "kind": "optional", "code": "r", "source": "i", "prefixes": ["atlas/moderation/", "atlas/admin/moderation/"], "advertisedBy": [],
+      "stores": [{ "file": "atlas-moderation-grants-store.json", "key": null, "label": "Moderation grants" }] },
+    { "id": "drops", "label": "World drops", "kind": "optional", "code": "w", "source": "i", "prefixes": ["atlas/world/"], "advertisedBy": [],
+      "stores": [{ "file": "atlas-world-drops-store.json", "key": null, "label": "World drops" }] },
+    { "id": "demos", "label": "Demo and lab routes (issuer side)", "kind": "optional", "code": "e", "source": "i", "prefixes": ["atlas/demo/", "atlas/login/", "atlas/attestation/", "txlab/"], "advertisedBy": [] },
+    { "id": "call", "label": "Call service", "kind": "optional", "code": "c", "source": "c", "advertisedBy": ["voiceCalling"] },
+    { "id": "presence", "label": "Presence service", "kind": "optional", "code": "p", "source": "p", "advertisedBy": [] },
+    { "id": "directory", "label": "Domain services directory", "kind": "optional", "code": "d", "source": "d", "advertisedBy": ["directory"] },
+    { "id": "chainlabs", "label": "Chain Labs (ledger pages and scanner)", "kind": "optional", "code": "l", "source": "l", "advertisedBy": ["chainLabs", "chainlabs", "scanner"] },
+    { "id": "verifier", "label": "Credential verifier", "kind": "optional", "code": "v", "source": "v", "advertisedBy": [], "findMount": ["verify.php", "lib/atlas-verify.php"] }
+  ]
+}

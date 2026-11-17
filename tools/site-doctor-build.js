@@ -9,10 +9,11 @@
 // off the server). Only a SHA-256 of the token is embedded in the PHP file. Run from a clean checkout so the
 // manifest describes committed files; --allow-dirty overrides that.
 //
-// Manifest: every tracked file of issuer-php/ (tag i), demo-domain-a/ (tag a), demo-domain-b/ (tag b) and the
-// optional Call (call-php/, tag c) and Presence (presence-php/, tag p) services,
-// as paths relative to a web root, with a SHA-256 of the content (text files with CRLF folded to LF, so a
-// Windows checkout compares equal) and a group: c code, p page/config, a asset. State is never listed.
+// Manifest: every tracked file of the deployable folders listed in tools/site-doctor/components.json (issuer-php/,
+// the two demo sites, the Call, Presence and directory services, Chain Labs and the verifier), as paths relative to a
+// web root, with a SHA-256 of the content (text files with CRLF folded to LF, so a Windows checkout compares equal),
+// a group (c code, p page/config, a asset) and the component the file belongs to. A component is a part a domain may
+// or may not install: the doctor expects all of its files once any of them is there. State is never listed.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -27,7 +28,9 @@ const FEATURE_READERS = path.join(ROOT, 'issuer-php', 'lib', 'site-features.php'
 const FEATURE_TYPES = ['studio-config', 'json-enabled', 'email-tickets', 'manifest-field', 'moderation-issuer', 'presence-moderation', 'private-config-php', 'rename', 'private-dir-txt'];
 const MARKER = '/*@@DOCTOR_CONFIG@@*/';
 const READERS_MARKER = '/*@@SITE_FEATURES@@*/';
-const SOURCES = [['issuer-php', 'i'], ['demo-domain-a', 'a'], ['demo-domain-b', 'b'], ['call-php', 'c'], ['presence-php', 'p']];
+const REGISTRY = JSON.parse(fs.readFileSync(path.join(__dirname, 'site-doctor', 'components.json'), 'utf8'));
+const SOURCES = REGISTRY.sources.map((s) => [s.dir, s.tag, s.mount || '']);
+const COMPONENTS = REGISTRY.components;
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(n);
@@ -76,7 +79,7 @@ let commit = 'unknown', dirty = [];
 let gitOk = true;
 try {
   commit = git('rev-parse', '--short=12', 'HEAD').trim();
-  dirty = git('status', '--porcelain', '--', ...SOURCES.map((s) => s[0])).split('\n').filter(Boolean);
+  dirty = git('status', '--porcelain', '--', ...SOURCES.map((s) => s[0]), 'tools/site-doctor').split('\n').filter(Boolean);
 } catch (e) { gitOk = false; }
 if (!gitOk) console.warn('note: git is not available here; the manifest is built from the working tree and cannot be checked against a commit.');
 else if (dirty.length && !flag('--allow-dirty')) {
@@ -89,31 +92,44 @@ else if (dirty.length && !flag('--allow-dirty')) {
 // Group: c code (a wrong or missing file breaks the issuer), p page or configuration, a asset.
 const groupOf = (rel) => (/(^|\/)\.htaccess$/.test(rel) || /\.(php|example)$/.test(rel) ? 'c' : (rel.startsWith('assets/') || /\.(glb|png|jpg|jpeg|gif|ico|woff2?)$/i.test(rel) ? 'a' : 'p'));
 // Present on a typical deployment only sometimes: absence is not a problem.
-const isOptional = (rel) => rel === 'README.txt' || rel === 'test-router.php' || rel === 'lib/atlas-cli.php' || rel.startsWith('txlab/') || rel.startsWith('tools/') || /\.example$/.test(rel)
+const isOptional = (rel) => rel === 'README.txt' || rel === 'test-router.php' || rel === 'chain-labs/README.md' || rel === 'chain-labs/SOURCE.sha256' || rel === 'atlas-verify/README.md' || rel === 'lib/atlas-cli.php' || rel.startsWith('txlab/') || rel.startsWith('tools/') || /\.example$/.test(rel)
   || (rel.startsWith('assets/') && !rel.startsWith('assets/studio/'));
 // Site-specific by design (each live site's manifest differs from the repository's development one).
 const expectDiffers = (rel) => rel === '.well-known/spatial.json';
 
+// The component a file belongs to. Issuer files are split by folder; the other sources are one component each; the demo
+// sites' own pages are 'site'.
+const bySource = new Map(COMPONENTS.filter((c) => c.source && c.source !== 'i').map((c) => [c.source, c.id]));
+const issuerParts = COMPONENTS.filter((c) => c.source === 'i');
+function componentOf(rel, tag) {
+  if (tag === 'i') {
+    const part = issuerParts.find((c) => c.prefixes.some((p) => rel.startsWith(p)));
+    return part ? part.id : 'core';
+  }
+  return bySource.get(tag) || 'site';
+}
+
 const entries = new Map(); // path + '\0' + sha -> entry
-const sizes = { i: 0, a: 0, b: 0, c: 0, p: 0 };
+const sizes = {};
 function add(rel, tag, buf) {
   const text = isText(rel, buf);
   const data = text ? Buffer.from(buf.toString('utf8').replace(/\r\n/g, '\n'), 'utf8') : buf;
   const sha = crypto.createHash('sha256').update(data).digest('hex');
   const key = rel + '\0' + sha;
   const e = entries.get(key);
-  if (e) { if (!e.tags.includes(tag)) e.tags += tag; return; }
-  entries.set(key, { p: rel, h: sha, n: data.length, g: groupOf(rel), f: (isOptional(rel) ? 'o' : '') + (expectDiffers(rel) ? 'x' : ''), tags: tag });
-  sizes[tag] += data.length;
+  if (e) { if (!e.tags.includes(tag)) e.tags += tag; if (tag === 'i') e.c = componentOf(rel, 'i'); return; }
+  entries.set(key, { p: rel, h: sha, n: data.length, g: groupOf(rel), f: (isOptional(rel) ? 'o' : '') + (expectDiffers(rel) ? 'x' : ''), tags: tag, c: componentOf(rel, tag) });
+  sizes[tag] = (sizes[tag] || 0) + data.length;
 }
 
 let viaGitAll = true;
-for (const [dir, tag] of SOURCES) {
+for (const [dir, tag, mount] of SOURCES) {
   const { files, viaGit } = listFiles(dir);
   viaGitAll = viaGitAll && viaGit;
   for (const rel of files) {
     if (STATE.test(rel)) continue; // defence in depth; tracked lists never include these
-    add(rel, tag, fs.readFileSync(path.join(ROOT, dir, rel)));
+    if (rel === 'README.txt' || rel === 'test-router.php') continue; // per-source documentation and a local test helper: several sources share the name, and none of it runs on a site
+    add(mount + rel, tag, fs.readFileSync(path.join(ROOT, dir, rel)));
   }
 }
 // Studio's own models are needed on every issuer domain, whichever demo site it serves.
@@ -138,12 +154,30 @@ const features = JSON.parse(fs.readFileSync(FEATURES, 'utf8')).features;
   }
 }
 
+// The component registry: validated here so a typo cannot ship in a built file.
+{
+  const ids = new Set(); const codes = new Set();
+  for (const c of COMPONENTS) {
+    if (!/^[a-z0-9-]+$/.test(c.id) || ids.has(c.id)) { console.error('bad or duplicate component id: ' + c.id); process.exit(1); }
+    ids.add(c.id);
+    if (c.kind === 'optional') {
+      if (!/^[a-z]$/.test(c.code || '') || codes.has(c.code)) { console.error('bad or duplicate component code: ' + c.id); process.exit(1); }
+      codes.add(c.code);
+      if (!c.source || !SOURCES.some((s) => s[1] === c.source)) { console.error('component has no known source: ' + c.id); process.exit(1); }
+      if (c.source === 'i' && !(Array.isArray(c.prefixes) && c.prefixes.length)) { console.error('issuer component needs prefixes: ' + c.id); process.exit(1); }
+      if (!list.some((e) => e.c === c.id)) { console.error('component has no files in the manifest: ' + c.id); process.exit(1); }
+    }
+  }
+}
+
 // The access token is shown once and only its hash is embedded.
 const rawToken = crypto.randomBytes(16).toString('hex');
 const token = rawToken.match(/.{4}/g).join('-');
 const expires = Math.floor(Date.now() / 1000) + Math.round(hours * 3600);
-const header = { v: 1, built: new Date().toISOString(), commit, clean: gitOk && !dirty.length, expires, tokenSha256: crypto.createHash('sha256').update(rawToken).digest('hex'), features, trustedGroups };
-const json = JSON.stringify(header).slice(0, -1) + ',"entries":[\n' + list.map((e) => JSON.stringify([e.p, e.h, e.n, e.g, e.f, e.tags])).join(',\n') + '\n]}';
+const publicComponents = COMPONENTS.map((c) => ({ id: c.id, label: c.label, kind: c.kind, code: c.code || '', source: c.source || '', advertisedBy: c.advertisedBy || [], stores: c.stores || [], findMount: c.findMount || null,
+  mount: (SOURCES.find((s) => s[1] === c.source) || [0, 0, ''])[2] }));
+const header = { v: 2, components: publicComponents, built: new Date().toISOString(), commit, clean: gitOk && !dirty.length, expires, tokenSha256: crypto.createHash('sha256').update(rawToken).digest('hex'), features, trustedGroups };
+const json = JSON.stringify(header).slice(0, -1) + ',"entries":[\n' + list.map((e) => JSON.stringify([e.p, e.h, e.n, e.g, e.f, e.tags, e.c])).join(',\n') + '\n]}';
 if (json.includes('ATLAS_DOCTOR_JSON')) { console.error('manifest contains the heredoc marker'); process.exit(1); }
 
 const template = fs.readFileSync(TEMPLATE, 'utf8');
@@ -173,7 +207,7 @@ fs.writeFileSync(path.join(path.resolve(out), 'ACCESS.txt'), [
 ].join('\r\n'));
 
 const count = (t) => list.filter((e) => e.tags.includes(t)).length;
-console.log('site-doctor.php written: ' + list.length + ' manifest entries (issuer ' + count('i') + ', site A ' + count('a') + ', site B ' + count('b') + ', call ' + count('c') + ', presence ' + count('p') + '), commit ' + commit);
+console.log('site-doctor.php written: ' + list.length + ' manifest entries (' + SOURCES.map((s) => s[0] + ' ' + count(s[1])).join(', ') + '), commit ' + commit);
 console.log('output: ' + phpFile);
 console.log('token:  ' + token);
 console.log('valid until ' + until);
