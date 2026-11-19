@@ -70,19 +70,37 @@ Where it can happen: a partner outage that begins while an entry is being approv
 that partner (always, for a full roster). Below a full roster the authority may reach the threshold without the absent partner.
 `test/chain-labs-approvals.php` has the case.
 
-### Options, none built yet
+### Decision: the stall stays
 
-1. **Leave it.** The coin stays stopped until the partner that is missing approves E in time or the operators agree out of band. It is the
-   safest and the least code; the cost is a stopped coin and an operator decision for each stall.
-2. **Release by witness.** The way a sale is closed (`peer_on_close_sale`): the authority asks the other domains for signed statements that
-   they never approved E, and a domain that approved E releases it once enough domains have signed that they did not, so that E could not reach
-   the threshold. The approvals for E stay as evidence, E is marked void, and the index can then take another entry. This keeps the property that
-   no two entries for an index can both be committed, but it needs a new peer action, a threshold rule for how many witnesses are enough (for
-   a full roster, one domain that never approved E), and a decision about what a domain does when it has approved E and the witnesses cannot be
-   reached.
-3. **Operator supersede.** An operator on each approving domain records, with a note, that E is void for the index. It needs no new protocol,
-   but it puts the safety of the rule on the operators' care: voiding E on a domain that has since seen E written would let that domain sign a
-   second entry.
+The stall is accepted for now as the safe behavior. No release mechanism is built, and none should be added until the project has a protocol
+that is formally safe. Revisit before any production use that involves real monetary value.
+
+What a release has to be, and why the two ideas considered so far are not enough:
+
+- A signed statement from a domain that it never approved E is not proof that it did not. Only the positive claim, an approval signature,
+  is cryptographic evidence. A domain can have approved E and lost the record (a restored database together with its checkpoint folder, see
+  `docs/chain-labs-rollback-protection.md`, section 9), can be dishonest, or can be mistaken. Nothing in the statement ties it to the
+  signatures that exist. If E is released on such statements and one of them is wrong, E can still reach its threshold and be written next to
+  the entry that replaced it for the index, which is the fork this rule exists to prevent.
+- Releasing a domain's own approval is safe only if E can then never be committed anywhere. That needs an argument about which sets of
+  domains can still produce E's threshold, and a way for the authority to be bound by the outcome, since the authority is the party that
+  could write E late. The same applies to an operator marking E void by hand: it moves the safety of the rule onto an unverifiable human step.
+- Therefore a release has to be specified and reviewed as a protocol before it is built: who may ask, what evidence a domain accepts, how the
+  authority is stopped from writing E afterwards, and what is kept. Until then the coin waits for E to be written.
+
+### What an indefinitely pending approved entry means for owners
+
+- **Authorization expiry does not bound execution.** The owner's `expiresAt` is checked when the entry is prepared. Once the entry has been
+  put to the partners, it is written at the time it was prepared for, even after the authorization has expired, and the proposal holding it
+  is not expired by `spend_expire`. An owner cannot treat expiry as a cancellation after the authority has asked the partners.
+- **There is no cancellation.** A pending proposal cannot be withdrawn by its owner once its entry has been approved by any partner. A sale
+  cannot be closed either, because a domain that approved an entry for it witnesses nothing about it (`peer_on_close_sale`).
+- **The sender's slot stays locked.** A sender has one pending proposal at a time (`pending-exists`), so the owner cannot submit another
+  spend while the entry waits.
+- **Every other sender waits too.** The coin takes no new entry (`busy`) while the entry for the next index waits, so one stalled entry holds
+  up the whole coin, not only its sender.
+- **The entry is still correct when it is written.** It extends the head it was prepared on, so no other entry can have changed the sender's
+  balance or `seq` in between. A late write is valid, only late.
 
 ## 6. Checks
 

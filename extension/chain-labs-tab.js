@@ -235,7 +235,7 @@
       const actions = el('div', { className: 'item-actions' });
       actions.appendChild(button('Check now', () => act(async () => {
         const done = await chain().checkPending();
-        notice = done.length ? done.map((x) => (x.outcome === 'done' ? 'A waiting transfer was made.' : 'A waiting transfer ended: ' + x.outcome + '.')).join(' ') : 'Still waiting.';
+        notice = done.length ? done.map((x) => (x.outcome === 'done' ? 'A waiting transfer was made.' : x.outcome === 'bad-receipt' ? 'A waiting transfer was reported as made, but its receipt could not be verified' + (x.reason ? ' (' + x.reason + ')' : '') + ', so it is not counted. Refresh to see the balance the domain signs.' : 'A waiting transfer ended: ' + x.outcome + '.')).join(' ') : 'Still waiting.';
       })));
       card.appendChild(actions);
       wrap.appendChild(card);

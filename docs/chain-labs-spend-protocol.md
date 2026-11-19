@@ -525,10 +525,11 @@ Each stage ships separately, with tests, on its own branch.
      still refuses all `atlas.ledger.*` messages.
    - Send checks the recipient, the amount (exact decimal parsing against the coin's decimals, never rounded) and the balance
      before signing, describes the transfer in words, signs against the balance and head the domain just reported, signs again
-     once if the base moved, and accepts the receipt only if it matches what was signed (for a private coin, whose entries name
-     accounts by reference, the coin and amount). A transfer through a partner is pointed at the authority. A transfer waiting
+     once if the base moved, and accepts the receipt only if it verifies (entry hash, authority signature, roster approvals up to the
+     threshold, and the domain's own head at that index, all against the pinned genesis) and matches what was signed (for a private coin, whose entries name
+     accounts by reference, the coin and amount). `docs/chain-labs-wallet-verification.md` has the checks and what first contact leaves open. A transfer through a partner is pointed at the authority. A transfer waiting
      for approvals is kept and checked later.
-   - Buy with Gold reads the offer from the coin's public genesis on its authority, which must be on the list, checks price
+   - Buy with Gold reads the offer from the coin's verified, pinned genesis on its authority, which must be on the list, checks price
      against the minimum and the credential, signs an intent (`atlas.ledger.purchase.intent`, version 2: coin, issuing domain, genesis digest, credential id, price,
      recipient, request id, expiry) and sends it with the credential. An unfinished purchase is kept with its request id and
      resumed by signing a new intent for the same request. The Gold credentials come from the wallet's own items of class

@@ -5,6 +5,16 @@
 // when the domain was added, and a cache of the last answers; the balances stay the domains' statements, shown with their
 // time and never stored as the wallet's own.
 //
+// What the wallet checks itself, and does not take on a domain's word:
+//   - a coin's genesis: its digest is worked out here, the keys in it must be the keys pinned for the domains the wallet knows, and the
+//     coin's first entry must show that the authority signed it and every roster domain signed the genesis. The digest is then pinned
+//     with the domain's record, and a different genesis under the same coin id is refused.
+//   - a receipt: the entry's hash, the authority's signature over it and, for a multi coin, enough approvals from distinct roster
+//     domains, all against the keys of the pinned genesis. A receipt that does not verify is refused, never read as it stands.
+//   - purchase terms: read from that verified genesis, not from the plain answer of the domain.
+// First contact: the first genesis seen for a coin is pinned as it is. The keys of roster domains that are not on the wallet's list are
+// those the genesis names, so they are as trustworthy as that first sight; a domain added to the list later is held to the genesis from then on.
+//
 // Nothing here touches the page, extension storage or the network by itself: everything it needs is passed to create(), so
 // the same code runs in the wallet page and in the tests, against the real endpoint.
 //   env.fetch(url, init)            like fetch
@@ -36,6 +46,7 @@
   const STALE_AFTER_MS = 30 * 60 * 1000;
   const MAX_UNITS_DIGITS = 13;
   const MAX_PENDING = 20;
+  const GENESIS_KEPT = 200;
   const TRANSFER_WINDOW_S = 200;
   const INTENT_WINDOW_S = 300;
 
@@ -130,6 +141,38 @@
     return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', spki))).slice(0, 16);
   }
 
+  async function sha256Hex(text) {
+    return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))));
+  }
+
+  // Two spellings of one P-256 key.
+  function sameKey(a, b) {
+    const x = spkiOfPem(a), y = spkiOfPem(b);
+    return !!x && !!y && toHex(x) === toHex(y);
+  }
+
+  // The bytes a roster domain signs to approve an entry (the same text as ledger_approval_bytes in the PHP ledger).
+  function approvalText(coinId, index, hash) {
+    return canonical({ type: 'atlas.ledger.entry.approval', v: 1, coinId, index, hash });
+  }
+
+  // A genesis in the form the ledger writes: one to five distinct domains with P-256 keys, the authority first, and a threshold that fits the mode.
+  // Returns { authority, threshold, keys: {domain: pem}, domains: [domain] } or null.
+  function readGenesis(g, coinId) {
+    if (!isObject(g) || g.type !== 'atlas.ledger.genesis' || g.v !== 1 || g.coinId !== coinId || !MODES.includes(g.mode)) return null;
+    if (!Array.isArray(g.roster) || g.roster.length < 1 || g.roster.length > 5) return null;
+    const keys = {};
+    const domains = [];
+    for (const m of g.roster) {
+      if (!isObject(m) || typeof m.domain !== 'string' || normalizeDomain(m.domain) !== m.domain || keys[m.domain] !== undefined || !spkiOfPem(m.key)) return null;
+      keys[m.domain] = m.key;
+      domains.push(m.domain);
+    }
+    if (g.authority !== domains[0]) return null;
+    if (g.mode === 'single' ? (domains.length !== 1 || g.threshold !== 1) : (domains.length < 2 || !Number.isInteger(g.threshold) || g.threshold < 2 || g.threshold > domains.length)) return null;
+    return { authority: g.authority, threshold: g.threshold, keys, domains };
+  }
+
   // ---------- amounts ----------
 
   // 1250 units of a coin with 2 decimals is "12.5"; units are whole numbers of the smallest part.
@@ -213,6 +256,8 @@
     'coin-missing': 'This domain no longer lists a coin it listed before. Its database may have been restored from an older backup. Nothing is sent or bought on this coin until the domain recovers or you decide to trust the new state.',
     'history-unproven': 'This domain reports newer entries for this coin but does not show that they continue the history it reported before, so they are not trusted yet. Nothing is sent or bought on this coin until it does.',
     'proof-unsupported': 'This identity cannot sign for a ledger, so only public coins are shown.',
+    'genesis-changed': 'This domain now describes this coin differently from the first time the wallet saw it, so nothing was signed.',
+    'wrong-genesis': 'The domain\'s description of this coin could not be verified, so nothing was signed.',
     'not-listed': 'That domain is not on your list.'
   };
 
@@ -597,20 +642,79 @@
       };
     }
 
-    // What a signature must name besides the coin id, which another domain can reuse: the domain that issues the coin and the digest of its
-    // genesis. Both are read from the coin's genesis on the domain the wallet is asking, and the digest is worked out here, never taken
-    // on the domain's word. A domain that is neither the coin's authority nor on its roster has no business taking the signature.
-    async function coinBinding(record, coinId) {
+    // The genesis of a coin as a domain shows it, checked before anything depends on it. The digest is worked out here; the key in the genesis
+    // for this domain is the key pinned for it, and the keys of other domains on the list are theirs. The first time a coin is seen, its
+    // first entry must show that the authority signed it and that every roster domain signed this genesis; the digest is then pinned with
+    // the domain's record. Afterwards a genesis with another digest under the same coin id is refused. Returns what the receipts and the
+    // purchase terms are checked against.
+    async function verifiedGenesis(listed, coinId) {
+      // The record as it is now, with the pins made since the caller read it.
+      const record = await recordFor(listed.domain);
       const r = await request(record.domain, 'GET', 'action=coin&coin=' + coinId);
       if (r.status === 0) throw Object.assign(new Error(PROBLEMS.network), { code: 'network' });
       const g = r.json && r.json.ok ? r.json.genesis : null;
       if (!isObject(g) || g.coinId !== coinId || typeof g.authority !== 'string' || !g.authority) throw Object.assign(new Error(SEND_PROBLEMS['unknown-coin']), { code: 'unknown-coin' });
       let digest;
-      try { digest = toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical(g))))); } catch (err) { digest = ''; }
+      try { digest = await sha256Hex(canonical(g)); } catch (err) { digest = ''; }
       if (!HASH_RE.test(digest) || digest !== r.json.genesisDigest) throw Object.assign(new Error('The domain\'s description of this coin does not match its digest, so nothing was signed.'), { code: 'wrong-genesis' });
-      const roster = Array.isArray(g.roster) ? g.roster.map((m) => (isObject(m) ? m.domain : null)) : [];
-      if (g.authority !== record.domain && !roster.includes(record.domain)) throw Object.assign(new Error(SEND_PROBLEMS['wrong-authority']), { code: 'wrong-authority' });
-      return { authority: g.authority, genesis: digest };
+      const named = Array.isArray(g.roster) ? g.roster.map((m) => (isObject(m) ? m.domain : null)) : [];
+      if (g.authority !== record.domain && !named.includes(record.domain)) throw Object.assign(new Error(SEND_PROBLEMS['wrong-authority']), { code: 'wrong-authority' });
+      const read = readGenesis(g, coinId);
+      if (!read) throw Object.assign(new Error(PROBLEMS['wrong-genesis']), { code: 'wrong-genesis' });
+      const pin = isObject(record.genesis) && isObject(record.genesis[coinId]) ? record.genesis[coinId] : null;
+      if (pin && pin.digest !== digest) throw Object.assign(new Error(PROBLEMS['genesis-changed']), { code: 'genesis-changed' });
+      // A key in the genesis for a domain the wallet has pinned a key for must be that key.
+      const list = await domains();
+      for (const d of read.domains) {
+        const known = list.find((x) => x.domain === d);
+        if (known && !sameKey(known.key, read.keys[d])) throw Object.assign(new Error('The genesis names another key for ' + d + ' than the one pinned for it, so nothing was signed.'), { code: 'wrong-genesis' });
+      }
+      if (!pin) {
+        await checkGenesisEntry(record, g, digest, read);
+        await pinGenesis(record.domain, coinId, { digest, authority: read.authority, threshold: read.threshold, roster: read.domains, unpinned: read.domains.filter((d) => d !== record.domain && !list.some((x) => x.domain === d)), pinnedAt: iso(nowMs()) });
+      }
+      return { genesis: g, digest, authority: read.authority, threshold: read.threshold, keys: read.keys, raw: r.json };
+    }
+
+    // The coin's first entry, from the domain: the authority signed it, and every roster domain signed this genesis digest. It is what
+    // shows that the domains of the roster, and not only the one being asked, agreed on the coin and its terms.
+    async function checkGenesisEntry(record, g, digest, read) {
+      const bad = () => Object.assign(new Error('The coin\'s first entry does not show that its domains signed this description, so nothing was signed.'), { code: 'wrong-genesis' });
+      const r = await request(record.domain, 'GET', 'action=receipt&coin=' + g.coinId + '&index=0');
+      if (r.status === 0) throw Object.assign(new Error(PROBLEMS.network), { code: 'network' });
+      const rc = r.json && r.json.ok ? r.json.receipt : null;
+      const e = isObject(rc) ? rc.entry : null;
+      if (!isObject(e) || e.type !== 'genesis' || e.index !== 0 || e.coinId !== g.coinId || e.prevHash !== digest || !HASH_RE.test(rc.hash || '')) throw bad();
+      let hash;
+      try { hash = await sha256Hex(canonical(e)); } catch (err) { throw bad(); }
+      if (hash !== rc.hash || !await verifyDomainSignature(read.keys[read.authority], rc.hash, rc.authoritySignature)) throw bad();
+      const signed = new Set();
+      for (const a of Array.isArray(rc.approvals) ? rc.approvals : []) {
+        if (!isObject(a) || typeof a.domain !== 'string' || read.keys[a.domain] === undefined || signed.has(a.domain) || !await verifyDomainSignature(read.keys[a.domain], digest, a.signature)) throw bad();
+        signed.add(a.domain);
+      }
+      if (read.domains.some((d) => !signed.has(d))) throw bad();
+    }
+
+    function pinGenesis(domain, coinId, pin) {
+      return serial(async () => {
+        const list = await domains();
+        const entry = list.find((d) => d.domain === domain);
+        if (!entry) return;
+        const kept = isObject(entry.genesis) ? Object.assign({}, entry.genesis) : {};
+        if (isObject(kept[coinId])) return;
+        kept[coinId] = pin;
+        const ids = Object.keys(kept);
+        if (ids.length > GENESIS_KEPT) for (const id of ids.slice(0, ids.length - GENESIS_KEPT)) delete kept[id];
+        await env.saveDomains(list.map((d) => (d.domain === domain ? Object.assign({}, d, { genesis: kept }) : d)));
+      });
+    }
+
+    // What a signature must name besides the coin id, which another domain can reuse: the domain that issues the coin and the digest of its
+    // genesis, from the verified genesis. A domain that is neither the coin's authority nor on its roster has no business taking the signature.
+    async function coinBinding(record, coinId) {
+      const v = await verifiedGenesis(record, coinId);
+      return { authority: v.authority, genesis: v.digest };
     }
 
     async function signTransfer(record, prepared) {
@@ -631,6 +735,42 @@
     return !!(isObject(e) && e.coinId === expect.coinId && parties && e.amount === expect.amount && (!expect.purchase || (isObject(e.purchase) && e.purchase.requestId === expect.purchase.requestId && e.purchase.price === expect.purchase.price)));
     }
 
+    const unverified = (why) => Object.assign(new Error('The domain\'s receipt could not be verified (' + why + '), so it was not accepted.'), { code: 'bad-receipt', reason: why });
+
+    // The receipt of an entry against the coin's verified genesis: the entry is the one the hash names, the authority signed that hash, and
+    // enough distinct roster domains (the authority counting once) approved it. Throws bad-receipt, with the reason, when any part is missing
+    // or does not verify; nothing is read as it stands.
+    async function verifyReceipt(record, coinId, receipt) {
+      let v;
+      try { v = await verifiedGenesis(record, coinId); } catch (err) { throw Object.assign(unverified('the coin\'s genesis could not be verified: ' + (err && err.message ? err.message : 'unknown')), { cause: err }); }
+      const e = isObject(receipt) ? receipt.entry : null;
+      if (!isObject(e) || e.coinId !== coinId || receipt.coinId !== coinId || e.type !== 'transfer' || !Number.isInteger(e.index) || e.index < 1) throw unverified('it is not an entry of this coin');
+      if (!HASH_RE.test(receipt.hash || '') || !Array.isArray(receipt.approvals) || receipt.approvals.length > 5) throw unverified('it is missing a part');
+      let hash;
+      try { hash = await sha256Hex(canonical(e)); } catch (err) { throw unverified('the entry cannot be hashed'); }
+      if (hash !== receipt.hash) throw unverified('the hash is not the hash of the entry');
+      if (!await verifyDomainSignature(v.keys[v.authority], receipt.hash, receipt.authoritySignature)) throw unverified(v.authority + ' did not sign it');
+      const signers = new Set([v.authority]);
+      const text = approvalText(coinId, e.index, receipt.hash);
+      for (const a of receipt.approvals) {
+        if (!isObject(a) || typeof a.domain !== 'string' || v.keys[a.domain] === undefined || signers.has(a.domain)) throw unverified('an approval is not from a distinct domain of the roster');
+        if (!await verifyDomainSignature(v.keys[a.domain], text, a.signature)) throw unverified('the approval of ' + a.domain + ' does not verify');
+        signers.add(a.domain);
+      }
+      if (signers.size < v.threshold) throw unverified('it has ' + signers.size + ' of the ' + v.threshold + ' approvals the coin needs');
+      // The domain must also show that entry at that place in its own history, in a head statement it signs: an authority can sign any
+      // text, but not an entry that is not the one it attests at that index without contradicting itself.
+      const shown = await headAt(record, coinId, e.index, receipt.hash);
+      if (shown === false) throw unverified('the domain\'s own history holds another entry there');
+      if (shown !== true) throw Object.assign(unverified('the domain does not show it in its history'), { cause: { code: 'unavailable' } });
+    }
+
+    // A receipt is accepted when it verifies and is for what was asked. Anything else is refused with bad-receipt.
+    async function acceptReceipt(record, coinId, receipt, expect) {
+      await verifyReceipt(record, coinId, receipt);
+      if (!receiptMatches(receipt, expect)) throw Object.assign(new Error('The domain\'s receipt does not match what you signed, so it was not accepted.'), { code: 'bad-receipt', reason: 'it does not match what was signed' });
+    }
+
     // Signs and sends a prepared transfer to the domain. A stale base is made again once.
     async function send(prepared) {
       const record = await recordFor(prepared.domain);
@@ -638,7 +778,8 @@
         const authorization = await signTransfer(record, prepared);
         const r = await request(record.domain, 'POST', 'action=propose', { authorization });
         const j = r.json || {};
-        if (r.status === 201 && j.ok && receiptMatches(j.receipt, { coinId: prepared.coinId, to: prepared.to, amount: prepared.amount, from: prepared.from, private: prepared.private })) {
+        if (r.status === 201 && j.ok) {
+          await acceptReceipt(record, prepared.coinId, j.receipt, { coinId: prepared.coinId, to: prepared.to, amount: prepared.amount, from: prepared.from, private: prepared.private });
           await lookup(record.domain).catch(() => null);
           return { status: 'done', receipt: j.receipt };
         }
@@ -661,8 +802,15 @@
       for (const p of c.pendingSends) {
         const r = await request(p.domain, 'GET', 'action=proposal&coin=' + p.coinId + '&digest=' + p.digest);
         const proposal = r.json && r.json.proposal;
-        if (r.status === 200 && proposal && proposal.status === 'executed' && receiptMatches(proposal.receipt, p)) done.push(Object.assign({}, p, { outcome: 'done' }));
-        else if (r.status === 200 && proposal && (proposal.status === 'expired' || proposal.status === 'rejected')) done.push(Object.assign({}, p, { outcome: proposal.status }));
+        if (r.status === 200 && proposal && proposal.status === 'executed') {
+          // An executed transfer is believed only with a receipt that verifies; one that does not is reported, and one that cannot be checked now is asked about again.
+          try {
+            await acceptReceipt(await recordFor(p.domain), p.coinId, proposal.receipt, p);
+            done.push(Object.assign({}, p, { outcome: 'done' }));
+          } catch (err) {
+            if (err && err.code === 'bad-receipt' && !(err.cause && ['network', 'unknown-coin', 'unavailable'].includes(err.cause.code))) done.push(Object.assign({}, p, { outcome: 'bad-receipt', reason: err.reason || '' }));
+          }
+        } else if (r.status === 200 && proposal && (proposal.status === 'expired' || proposal.status === 'rejected')) done.push(Object.assign({}, p, { outcome: proposal.status }));
       }
       await mutateCache((latest) => { latest.pendingSends = latest.pendingSends.filter((p) => !done.some((d) => d.digest === p.digest)); });
       return done;
@@ -670,15 +818,20 @@
 
     // ---------- buying with Gold ----------
 
-    // What a coin sells for, read from the coin's public genesis on its authority domain, which must be on the list.
+    // What a coin sells for, read from the coin's verified genesis on its authority domain, which must be on the list. The terms are the
+    // ones in the genesis the wallet pinned and the coin's domains signed, not whatever the domain's plain answer says now.
     async function offer(domain, coinId) {
       const record = await recordFor(domain);
-      const r = await request(record.domain, 'GET', 'action=coin&coin=' + coinId);
-      const g = r.json && r.json.ok ? r.json.genesis : null;
-      if (!g || !isObject(g.purchase)) throw Object.assign(new Error(BUY_PROBLEMS['no-purchase-policy']), { code: 'no-purchase-policy' });
-      if (r.json.state !== 'active') throw Object.assign(new Error(BUY_PROBLEMS['not-active']), { code: 'not-active' });
+      let v;
+      try { v = await verifiedGenesis(record, coinId); } catch (err) {
+        if (err && err.code === 'unknown-coin') throw Object.assign(new Error(BUY_PROBLEMS['no-purchase-policy']), { code: 'no-purchase-policy' });
+        throw err;
+      }
+      const g = v.genesis;
+      if (!isObject(g.purchase)) throw Object.assign(new Error(BUY_PROBLEMS['no-purchase-policy']), { code: 'no-purchase-policy' });
+      if (v.raw.state !== 'active') throw Object.assign(new Error(BUY_PROBLEMS['not-active']), { code: 'not-active' });
       // The authority says whether it has the code that takes the Gold; a coin whose genesis has terms but whose domain cannot take payment is not for sale.
-      if (r.json.purchasesEnabled !== true) throw Object.assign(new Error(BUY_PROBLEMS['purchases-off']), { code: 'purchases-off' });
+      if (v.raw.purchasesEnabled !== true) throw Object.assign(new Error(BUY_PROBLEMS['purchases-off']), { code: 'purchases-off' });
       if (g.authority !== record.domain) throw Object.assign(new Error(BUY_PROBLEMS['not-authority'] + ' That is ' + g.authority + '.'), { code: 'not-authority', authority: g.authority });
       const p = g.purchase;
       if (!Number.isInteger(p.unitsPerPrice) || !Number.isInteger(p.minPrice) || p.unitsPerPrice < 1 || p.minPrice < 1) throw Object.assign(new Error('The coin\'s purchase terms are not readable.'), { code: 'unreadable' });
@@ -744,7 +897,8 @@
       });
       const r = await request(record.domain, 'POST', 'action=purchase', { coinId: prepared.coinId, intent, credential: prepared.credential });
       const j = r.json || {};
-      if (r.status === 201 && j.ok && j.requestId === prepared.requestId && receiptMatches(j.receipt, { coinId: prepared.coinId, to: prepared.recipient, amount: prepared.units, private: prepared.private, purchase: { requestId: prepared.requestId, price: prepared.price } })) {
+      if (r.status === 201 && j.ok && j.requestId === prepared.requestId) {
+        await acceptReceipt(record, prepared.coinId, j.receipt, { coinId: prepared.coinId, to: prepared.recipient, amount: prepared.units, private: prepared.private, purchase: { requestId: prepared.requestId, price: prepared.price } });
         await dropBuy(prepared.requestId);
         // The wallet takes the Gold the issuer returned in place of the credential it spent.
         if (typeof env.afterPurchase === 'function') await Promise.resolve(env.afterPurchase(prepared, j.balance || null)).catch(() => null);
