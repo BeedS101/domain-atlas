@@ -1,5 +1,5 @@
-// Wallet > Identity "Copy public key", and Wallet > Activity log: clicking a mint or pick-up entry opens the Inventory on
-// that item. Runs the real extension against the demo issuer on localhost:8001.
+// Wallet > Identity "Copy public key", and Wallet > Activity log: opening a mint or pick-up entry and following its
+// "Show in inventory" link opens the Inventory on that item. Runs the real extension against the demo issuer on localhost:8001.
 //
 // Start it first: PORT=8001 ATLAS_DOMAIN=localhost:8001 ATLAS_DOCROOT=demo-domain-a ATLAS_STATE_DIR=<dir> ATLAS_MINT_LIMITS=off node issuer-server/server.js
 // Run: xvfb-run -a node test/manual-wallet-identity-activity.js
@@ -36,7 +36,9 @@ const { check } = L;
     check('the mint entry records the item', entry && entry.meta && entry.meta.assetClass === 'atlas.element.iron' && entry.meta.domain === minted.issuer.domain, entry);
     await page.evaluate(() => { const c = [...document.querySelectorAll('#mainWalletScreen .settings-category')].find((x) => /Activity log/.test(x.querySelector('.settings-category-toggle').textContent)); c.classList.add('open'); });
     await page.evaluate(() => showInventorySubtab('servicesSubscreen'));
-    await page.click('#activityLogList .activity-link');
+    // The card opens on its own; the link inside it is what takes you to the item.
+    await page.click('#activityLogList .activity-link .activity-head');
+    await page.click('#activityLogList .activity-link .activity-go');
     await page.waitForSelector('.wallet-item.jump-flash', { timeout: 5000 });
     const opened = await page.evaluate(() => {
       const sub = document.querySelector('#collectiblesSubscreen.active, #servicesSubscreen.active');

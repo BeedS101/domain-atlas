@@ -1991,6 +1991,9 @@ const recentWorldsListEl = document.getElementById('recentWorldsList');
 const activityLogListEl = document.getElementById('activityLogList');
 const clearActivityLogBtn = document.getElementById('clearActivityLogBtn');
 const clearActivityLogStatusEl = document.getElementById('clearActivityLogStatus');
+const activityLogHeadingEl = document.getElementById('activityLogHeading');
+const activityLogRetentionSelect = document.getElementById('activityLogRetentionSelect');
+const activityLogRetentionStatusEl = document.getElementById('activityLogRetentionStatus');
 const cacheTotalLineEl = document.getElementById('cacheTotalLine');
 const cacheSitesListEl = document.getElementById('cacheSitesList');
 const exportCacheBtn = document.getElementById('exportCacheBtn');
@@ -7376,8 +7379,12 @@ recentWorldsListEl && recentWorldsListEl.addEventListener('click', async (e) => 
 // ---------- activity log (Wallet -> "Activity log") ----------
 //
 // A read-only, most-recent-first feed; see wallet.js's own "wallet
-// activity log" section for what is and isn't logged and why. A mint or
-// pick-up entry can be clicked to jump to that item in the Inventory.
+// activity log" section for what is and isn't logged and why. Each entry is a
+// card collapsed to its title, a compact time and a chevron; selecting the card
+// shows everything recorded for it, and any number of cards can stay open. A
+// mint or pick-up entry also has a "Show in inventory" link in its details,
+// which is separate from the card's own toggle so opening or closing a card
+// never follows it.
 function activityAssetRef(entry) {
   const meta = entry.meta || {};
   if (entry.type !== 'asset' && !meta.movement) return null;
@@ -7475,29 +7482,74 @@ function movementDetailsHtml(meta) {
   return html + technical;
 }
 
+// Entries whose cards are open, by entry id. Kept across re-renders (the list is rebuilt whenever the wallet refreshes)
+// and pruned to the entries still shown, so it never outgrows the log.
+const activityExpandedIds = new Set();
+let activityCardSeq = 0;
+
+// "14:32" for today, "Oct 6, 14:32" for earlier this year, "Oct 6, 2025, 14:32" before that. The full date and time
+// are in the expanded card and on the time's tooltip.
+function compactActivityTime(iso, now) {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return '';
+  const ref = now || new Date();
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  if (d.toDateString() === ref.toDateString()) return time;
+  const day = d.toLocaleDateString([], d.getFullYear() === ref.getFullYear() ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' });
+  return day + ', ' + time;
+}
+
+function activityEntryKey(entry) {
+  return entry.id || (entry.at + '|' + entry.text);
+}
+
+function setActivityCardExpanded(card, expanded) {
+  const head = card.querySelector('.activity-head');
+  const body = card.querySelector('.activity-body');
+  card.classList.toggle('expanded', expanded);
+  head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  body.hidden = !expanded;
+  if (expanded) activityExpandedIds.add(card.dataset.key); else activityExpandedIds.delete(card.dataset.key);
+}
+
 function renderActivityLogEntry(entry, container) {
   const el = document.createElement('div');
-  el.className = 'info-card';
-  el.innerHTML =
-    '<div class="name">' + escapeHtml(entry.text) + '</div>' +
+  el.className = 'info-card activity-card';
+  el.dataset.key = activityEntryKey(entry);
+  const bodyId = 'activityCardBody' + (++activityCardSeq);
+  const fullTime = new Date(entry.at).toLocaleString();
+
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'activity-head';
+  head.setAttribute('aria-controls', bodyId);
+  head.innerHTML =
+    '<span class="name">' + escapeHtml(entry.text) + '</span>' +
+    '<time class="activity-time" datetime="' + escapeHtml(entry.at) + '" title="' + escapeHtml(fullTime) + '">' + escapeHtml(compactActivityTime(entry.at)) + '</time>' +
+    '<span class="activity-chevron" aria-hidden="true">\u25b8</span>';
+
+  const body = document.createElement('div');
+  body.className = 'activity-body';
+  body.id = bodyId;
+  body.innerHTML =
     (entry.meta && (entry.meta.movement || entry.meta.kind === 'mail-claim') ? movementDetailsHtml(entry.meta) : '') +
-    '<div class="meta">' + new Date(entry.at).toLocaleString() + '</div>';
+    '<div class="meta">' + escapeHtml(fullTime) + '</div>';
+
+  el.append(head, body);
   const ref = activityAssetRef(entry);
   if (ref) {
     el.classList.add('activity-link');
-    el.tabIndex = 0;
-    el.setAttribute('role', 'button');
-    el.title = 'Show this item in your inventory';
-    const go = document.createElement('div');
+    const go = document.createElement('button');
+    go.type = 'button';
     go.className = 'activity-go';
     go.textContent = 'Show in inventory \u2192';
     go.dataset.hint = go.textContent;
-    el.appendChild(go);
-    const open = () => showAssetInInventory(ref, go);
-    // The Details section is read, not a jump to the inventory: clicks and keys inside it stay with it.
-    el.addEventListener('click', (e) => { if (!e.target.closest('details')) open(); });
-    el.addEventListener('keydown', (e) => { if (!e.target.closest('details') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); open(); } });
+    go.title = 'Show this item in your inventory';
+    go.addEventListener('click', () => showAssetInInventory(ref, go));
+    body.appendChild(go);
   }
+  head.addEventListener('click', () => setActivityCardExpanded(el, !el.classList.contains('expanded')));
+  setActivityCardExpanded(el, activityExpandedIds.has(el.dataset.key));
   container.appendChild(el);
 }
 
@@ -7546,13 +7598,85 @@ async function showAssetInInventory(ref, noteEl) {
 async function refreshActivityLogDisplay() {
   if (!activityLogListEl) return;
   const list = await AtlasWallet.getActivityLog();
+  if (activityLogHeadingEl) activityLogHeadingEl.textContent = 'Activity log (' + list.length + ')';
+  // The list is rebuilt from scratch, so the control that had keyboard focus is found again afterwards.
+  const focused = document.activeElement && activityLogListEl.contains(document.activeElement) ? document.activeElement : null;
+  const focusedCard = focused && focused.closest('.activity-card');
+  const focusKey = focusedCard ? focusedCard.dataset.key : null;
+  const focusClass = focused ? (focused.classList.contains('activity-go') ? 'activity-go' : focused.classList.contains('activity-head') ? 'activity-head' : null) : null;
+  const keys = new Set(list.map(activityEntryKey));
+  for (const k of Array.from(activityExpandedIds)) if (!keys.has(k)) activityExpandedIds.delete(k);
   activityLogListEl.innerHTML = '';
   if (list.length === 0) {
     activityLogListEl.innerHTML = '<div class="empty-note">Nothing logged yet.</div>';
     return;
   }
   list.forEach((entry) => renderActivityLogEntry(entry, activityLogListEl));
+  if (focusKey && focusClass) {
+    const card = Array.from(activityLogListEl.querySelectorAll('.activity-card')).find((c) => c.dataset.key === focusKey);
+    const again = card && card.querySelector('.' + focusClass);
+    if (again) again.focus({ preventScroll: true });
+  }
 }
+
+// Settings -> Profile: how many entries this identity's Activity log keeps. See wallet.js "retention" for what the
+// limit means before one has been chosen.
+async function refreshActivityLogRetentionControl() {
+  if (!activityLogRetentionSelect) return;
+  const info = await AtlasWallet.getActivityLogRetention();
+  const standard = info.options.find((o) => o.label === 'Standard').limit;
+  const unchosenAndLarger = info.chosen === null && info.count > standard;
+  activityLogRetentionSelect.innerHTML = '';
+  if (unchosenAndLarger) {
+    const keep = document.createElement('option');
+    keep.value = '';
+    keep.textContent = 'Not chosen yet \u2014 keeping all ' + info.count + ' entries';
+    activityLogRetentionSelect.appendChild(keep);
+  }
+  for (const o of info.options) {
+    const opt = document.createElement('option');
+    opt.value = String(o.limit);
+    opt.textContent = o.limit + ' entries \u2014 ' + o.label + (o.limit === standard ? ' (recommended)' : '');
+    activityLogRetentionSelect.appendChild(opt);
+  }
+  activityLogRetentionSelect.value = info.chosen !== null ? String(info.chosen) : (unchosenAndLarger ? '' : String(standard));
+}
+
+activityLogRetentionSelect && activityLogRetentionSelect.addEventListener('change', async () => {
+  const want = Number(activityLogRetentionSelect.value);
+  if (!want) return;
+  activityLogRetentionStatusEl.textContent = '';
+  try {
+    const info = await AtlasWallet.getActivityLogRetention();
+    const removing = Math.max(0, info.count - want);
+    if (removing > 0 && !confirm('Keep only the newest ' + want + ' Activity log entries? The ' + removing + ' oldest ' + (removing === 1 ? 'entry' : 'entries') + ' will be removed. Your items, credentials and history at issuers are not affected.')) {
+      await refreshActivityLogRetentionControl();
+      return;
+    }
+    const result = await AtlasWallet.setActivityLogRetention(want);
+    await refreshActivityLogRetentionControl();
+    await refreshActivityLogDisplay();
+    activityLogRetentionStatusEl.textContent = result.removed
+      ? 'Saved. The newest ' + result.count + ' entries are kept; the ' + result.removed + ' oldest ' + (result.removed === 1 ? 'was' : 'were') + ' removed.'
+      : 'Saved.';
+  } catch (err) {
+    activityLogRetentionStatusEl.textContent = err.message;
+    await refreshActivityLogRetentionControl().catch(() => {});
+  }
+});
+
+// The count in the heading and the list follow the stored log: a new entry, a recycled one and a lowered limit all
+// change it, from whichever page wrote it.
+let activityLogRefreshTimer = null;
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !(changes.atlasActivityLog || changes.atlasActivityLogRetention)) return;
+  clearTimeout(activityLogRefreshTimer);
+  activityLogRefreshTimer = setTimeout(() => {
+    refreshActivityLogDisplay().catch(() => {});
+    const settingsOpen = document.getElementById('settingsScreen');
+    if (settingsOpen && settingsOpen.classList.contains('active')) refreshActivityLogRetentionControl().catch(() => {});
+  }, 100);
+});
 
 clearActivityLogBtn && clearActivityLogBtn.addEventListener('click', async () => {
   const identity = await AtlasWallet.getIdentity();
@@ -8122,6 +8246,8 @@ async function openSettings() {
   await refreshIdentitySyncDisplay();
   await refreshCharacterScaleControl();
   if (autoLockMinutesInput) autoLockMinutesInput.value = String(await AtlasWallet.getAutoLockMinutes());
+  await refreshActivityLogRetentionControl();
+  if (activityLogRetentionStatusEl) activityLogRetentionStatusEl.textContent = '';
   if (walletSoundEnabledInputEl) walletSoundEnabledInputEl.checked = await AtlasWallet.getWalletSoundEnabled();
   showWalletScreen('settingsScreen');
   // A live view of the character this identity's own equipped look/hat/
@@ -8171,6 +8297,18 @@ backFromSettingsBtn.addEventListener('click', routeWalletScreen);
 // button above, just reachable without the extra hop.
 walletTabBtn && walletTabBtn.addEventListener('click', routeWalletScreen);
 settingsTabBtn && settingsTabBtn.addEventListener('click', openSettings);
+
+// Selecting the tab that is already showing scrolls the panel's own content back to the top (the bar itself is sticky,
+// so it stays put). The panel, not the page behind it, is what scrolls. This runs ahead of the tab's own handler and
+// leaves it alone, so the tab and its open sections stay as they were and a repeat click still refreshes as before.
+// Motion is skipped when the person has asked their system for less of it.
+const MAIN_TAB_BUTTON_IDS = ['walletTabBtn', 'socialTabBtn', 'tradeTabBtn', 'characterTabBtn', 'settingsTabBtn'];
+walletTabBar && walletTabBar.addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn || !MAIN_TAB_BUTTON_IDS.includes(btn.id) || !btn.classList.contains('active-tab')) return;
+  const reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  walletPanel.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
+}, true);
 
 // ---------- character window (Wallet -> Character tab, or the C key) ----------
 //

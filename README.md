@@ -801,6 +801,23 @@ passwords and request bodies are replaced before a message is stored. While the 
 messages are shown only until the page is closed. Tests: `test/wallet-status-history.js` (storage) and
 `test/wallet-status-history-ui.js` (`xvfb-run -a`, the dropdown).
 
+**Activity Log cards, how long it keeps entries, and the tab bar.** On the Wallet tab the accordion heading shows how many
+entries are stored ("ACTIVITY LOG (127)") and follows new and recycled entries. Each entry is a card collapsed to its
+title, a compact time and a chevron; click it, or press Enter or Space on it, to show everything recorded for it (issuer,
+identity, world, balances and the change, the technical Details, and the "Show in inventory" link where there is an
+item). Any number of cards can stay open, and opening or closing one never follows its link. Under Settings → Profile,
+"Activity log retention" sets how many entries this identity keeps: 50 (Small), 100 (Standard, recommended), 250
+(Extended) or 500 (Maximum). When the log is full the oldest entry is recycled for each new one, and lowering the limit
+asks first, then keeps the newest entries. The choice is stored per identity, encrypted like the log, and affects only the
+log: never items, credentials, holdings, ledger records or an issuer's history, and not the 20-message status history.
+Until a limit is chosen nothing is removed: an existing history is kept whole (a log of 127 entries stays at 127, the
+oldest recycled for each new one), and a log under 100 fills up to the Standard limit. A Completed operation listed under
+pending operations is read from the same log for 7 days, so on a busy wallet with a small limit it can drop off that list
+sooner. Selecting the tab that is already showing (Wallet, Social, Trade, Character or Settings) smoothly scrolls the
+wallet's own content back to the top, without jumping on a system set to reduce motion, and leaves the tab and its open
+sections as they were. Tests: `test/wallet-activity-log-retention.js` (storage, upgrade, per identity, encryption) and
+`test/wallet-activity-log-ui.js` (`xvfb-run -a`, cards, count, retention control, scroll-to-top).
+
 **Favorites bookmark a domain+world**, independent of the auto-pruned
 Recent Worlds list on the main Wallet screen (Favorites are explicit
 add/remove only, and you control their order). "Favorite this domain"

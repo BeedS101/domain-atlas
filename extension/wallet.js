@@ -8432,9 +8432,9 @@ const AtlasWallet = (() => {
   // Same encrypted-at-rest, per-identity storage shape as Friends/Recent
   // worlds above (storeName 'activityLog'), and included in
   // buildBackupPayload/applyBackupPayload like any other data family, so a
-  // restored wallet keeps its history instead of starting blank. Capped at
-  // MAX_ACTIVITY_LOG_ENTRIES (oldest entries fall off the end) so a
-  // long-lived wallet's log can't grow without bound.
+  // restored wallet keeps its history instead of starting blank. The log is
+  // capped per identity (see "retention" below) so a long-lived wallet's log
+  // can't grow without bound: the oldest entries fall off the end.
   //
   // logActivity() itself is best-effort (its own try/catch below swallows
   // everything — it can never reject), so every call site simply
@@ -8443,7 +8443,70 @@ const AtlasWallet = (() => {
   // after minting, before switching to the Activity log view), without
   // risking a logging hiccup ever surfacing as a thrown error against the
   // real action it's describing.
-  const MAX_ACTIVITY_LOG_ENTRIES = 300;
+
+  // ---- retention ----
+  //
+  // How many entries one identity's log keeps, chosen in Settings -> Profile from a short list. Applies to that
+  // identity's log only, and only to the log: nothing here reads or changes holdings, credentials, ledger records or
+  // issuer history, and the separate status-message history keeps its own fixed limit.
+  //
+  // The choice is stored per identity, encrypted like the log itself. Until one is made the log is not shortened: the
+  // limit in force is the larger of the default and the number of entries already stored, up to the cap that applied
+  // before this setting existed. So an upgrade never removes an entry, a log of 127 entries stays at 127 (the oldest
+  // is recycled for each new one), and a new or small log fills up to the default.
+  const ACTIVITY_LOG_RETENTION_OPTIONS = Object.freeze([
+    Object.freeze({ limit: 50, label: 'Small' }),
+    Object.freeze({ limit: 100, label: 'Standard' }),
+    Object.freeze({ limit: 250, label: 'Extended' }),
+    Object.freeze({ limit: 500, label: 'Maximum' })
+  ]);
+  const ACTIVITY_LOG_DEFAULT_LIMIT = 100;
+  const ACTIVITY_LOG_UNCHOSEN_CEILING = 300;
+
+  function activityLogLimitOf(chosen, storedCount) {
+    if (ACTIVITY_LOG_RETENTION_OPTIONS.some((o) => o.limit === chosen)) return chosen;
+    return Math.max(ACTIVITY_LOG_DEFAULT_LIMIT, Math.min(ACTIVITY_LOG_UNCHOSEN_CEILING, storedCount));
+  }
+
+  // The limit this identity chose, or null when it has not chosen one (or the stored value is not one of the options).
+  async function readActivityLogRetention(identity) {
+    const { atlasActivityLogRetention } = await chrome.storage.local.get('atlasActivityLogRetention');
+    const stored = perOwnerMap(atlasActivityLogRetention)[identity.publicKey];
+    const value = await decryptAtRest(identity, 'activityLogRetention', stored, null);
+    const limit = value && typeof value === 'object' ? value.limit : value;
+    return ACTIVITY_LOG_RETENTION_OPTIONS.some((o) => o.limit === limit) ? limit : null;
+  }
+
+  async function writeActivityLogRetention(identity, limit) {
+    const { atlasActivityLogRetention } = await chrome.storage.local.get('atlasActivityLogRetention');
+    const all = perOwnerMap(atlasActivityLogRetention);
+    all[identity.publicKey] = await encryptAtRestFor(identity, identity.publicKey, 'activityLogRetention', { limit });
+    await chrome.storage.local.set({ atlasActivityLogRetention: all });
+  }
+
+  // The active identity's retention: `chosen` is what it picked (null if nothing yet), `limit` the number of entries
+  // kept right now, `count` how many are stored. Empty and unchosen while locked.
+  async function getActivityLogRetention() {
+    const identity = await getIdentity();
+    const options = ACTIVITY_LOG_RETENTION_OPTIONS.map((o) => ({ ...o }));
+    if (!identity) return { chosen: null, limit: ACTIVITY_LOG_DEFAULT_LIMIT, count: 0, options };
+    const [chosen, list] = await Promise.all([readActivityLogRetention(identity), readActivityLogOf(identity)]);
+    return { chosen, limit: activityLogLimitOf(chosen, list.length), count: list.length, options };
+  }
+
+  // Saves the active identity's choice and applies it at once: entries beyond the new limit, oldest first, are
+  // recycled and the newest are kept. Returns how many were removed and how many remain.
+  async function setActivityLogRetention(limit) {
+    const n = Number(limit);
+    if (!ACTIVITY_LOG_RETENTION_OPTIONS.some((o) => o.limit === n)) throw new Error('Choose one of: ' + ACTIVITY_LOG_RETENTION_OPTIONS.map((o) => o.limit).join(', ') + ' entries.');
+    const identity = await getIdentity();
+    if (!identity) throw new Error('This requires an unlocked wallet identity.');
+    const list = await readActivityLogOf(identity);
+    await writeActivityLogRetention(identity, n);
+    const kept = list.slice(0, n);
+    if (kept.length !== list.length) await saveActivityLog(identity.publicKey, kept);
+    return { limit: n, removed: list.length - kept.length, count: kept.length };
+  }
 
   async function saveActivityLog(ownerPublicKey, list) {
     const { atlasActivityLog } = await chrome.storage.local.get('atlasActivityLog');
@@ -8495,7 +8558,7 @@ const AtlasWallet = (() => {
         at: new Date().toISOString(),
         meta: meta || null
       });
-      list = list.slice(0, MAX_ACTIVITY_LOG_ENTRIES);
+      list = list.slice(0, activityLogLimitOf(await readActivityLogRetention(identity), list.length - 1));
       await saveActivityLog(identity.publicKey, list);
     } catch (err) {
       // best-effort — see this section's own top comment
@@ -12294,7 +12357,7 @@ const AtlasWallet = (() => {
     writeAutoBackupNow, restoreFromAutoBackupFile, buildAutoBackupBlob, isAutoBackupWriterWindowOpen,
     getIdentitySyncBackupSettings, enableIdentitySyncBackup, disableIdentitySyncBackup,
     hasSyncedIdentityAvailable, restoreIdentityFromSync,
-    getActivityLog, clearActivityLog,
+    getActivityLog, clearActivityLog, getActivityLogRetention, setActivityLogRetention, ACTIVITY_LOG_RETENTION_OPTIONS,
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset, purchaseAsset, openChest, findChestKeys, chestStatus, studioUrl: (domain) => baseUrl(domain) + '/atlas/studio/', baseUrl, domainProblem, getDevelopmentHosts, approveDevelopmentHost, removeDevelopmentHost,
     autoConsolidateAssetWallet, recoverPendingOperations, retryPendingOperation, recoverAfterUnlock, getPendingOperations, getRecoveredOperations, getPendingOpsQuarantine, getConsolidationStatus,

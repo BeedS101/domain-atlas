@@ -511,10 +511,25 @@
   .wallet-item.bridge-offer-new { border-color: #8fbfe8; box-shadow: 0 0 0 1px #8fbfe8; }
   .wallet-item.bridge-offer-new .mail-subject::before { content: 'New offer \00b7 '; color: #8fbfe8; font-size: 11px; font-weight: 600; }
   @keyframes jump-flash { 0%, 40% { box-shadow: 0 0 0 2px #8fbfe8; background: #1d2f38; } 100% { box-shadow: 0 0 0 0 transparent; } }
-  @media (prefers-reduced-motion: reduce) { .wallet-item.jump-flash { animation: none; box-shadow: 0 0 0 2px #8fbfe8; } }
-  .info-card.activity-link { cursor: pointer; }
-  .info-card.activity-link:hover, .info-card.activity-link:focus-visible { border-color: #6fa8dc; outline: none; }
-  .info-card .activity-go { font-size: 11px; color: #8fbfe8; margin-top: 4px; }
+  @media (prefers-reduced-motion: reduce) { .wallet-item.jump-flash { animation: none; box-shadow: 0 0 0 2px #8fbfe8; } .activity-head .activity-chevron { transition: none; } }
+  /* Activity Log cards are collapsed to one line (title, compact time, chevron); the head is the only part that toggles. */
+  .info-card.activity-card { padding: 0; }
+  .activity-head {
+    display: flex; align-items: flex-start; gap: 8px; width: 100%; box-sizing: border-box; padding: 10px; margin: 0;
+    background: none; border: none; border-radius: 8px; color: inherit; font: inherit; text-align: left; cursor: pointer;
+  }
+  .activity-head:hover { background: rgba(255,255,255,0.04); }
+  .activity-head:focus-visible { outline: 2px solid #8fbfe8; outline-offset: -2px; }
+  .activity-head .name { flex: 1 1 auto; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+  .activity-head .activity-time { flex: none; margin-top: 1px; font-size: 11px; color: #a9b8bf; white-space: nowrap; }
+  .activity-head .activity-chevron { flex: none; margin-top: 3px; font-size: 10px; color: #6b7d85; transition: transform 0.15s ease; }
+  .activity-card.expanded .activity-chevron { transform: rotate(90deg); }
+  .activity-body { padding: 0 10px 10px; }
+  .activity-body[hidden] { display: none; }
+  .info-card .activity-go { display: inline-block; margin: 6px 0 0; padding: 0; background: none; border: none; font: inherit; font-size: 11px; color: #8fbfe8; cursor: pointer; }
+  .info-card .activity-go:hover { text-decoration: underline; }
+  .info-card .activity-go:focus-visible { outline: 2px solid #8fbfe8; outline-offset: 2px; }
+  #activityLogRetentionSelect { max-width: 100%; font-family: inherit; font-size: 12px; background: #141f26; color: #e7edef; border: 1px solid #2c3c44; border-radius: 6px; padding: 6px 8px; }
   .held-note { font-size: 11px; margin-top: 6px; font-weight: 600; }
   .wallet-item .item-actions, .info-card .item-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
   .wallet-item .item-actions button, .info-card .item-actions button { flex: 1; font-size: 11px; padding: 6px 8px; min-width: 70px; }
@@ -1872,13 +1887,15 @@
         </div>
       </div>
 
-      <!-- Task #71: auto-lock after inactivity. Only meaningful for a
+      <!-- Profile: auto-lock after inactivity, and how long the Activity log
+           keeps entries. Auto-lock is only meaningful for a
            password identity (WebAuthn has no locked state to auto-lock at
            all — see wallet.js's isUnlocked()), but the setting itself is a
            per-device preference, not identity data, same reasoning as
            Player character's size slider below — so it's its own category
            rather than nested under Identity method, and stays put across a
-           lock/unlock or an identity switch. -->
+           lock/unlock or an identity switch. The retention choice, unlike
+           auto-lock, is stored per identity. -->
       <div class="settings-category" data-category="profile">
         <button type="button" class="settings-category-toggle"><span>Profile</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
@@ -1890,6 +1907,12 @@
             <button id="saveAutoLockMinutesBtn" type="button" class="btn-secondary">Save</button>
           </div>
           <div id="autoLockMinutesStatus" class="empty-note" style="margin-top:6px;"></div>
+          <h3>Activity log retention</h3>
+          <div class="subhead">How many Activity log entries this identity keeps. When the log is full, the oldest entry is recycled for each new one; lowering the limit keeps the newest entries. This only affects the log: your items, credentials and history at an issuer are never changed.</div>
+          <div class="btn-row">
+            <select id="activityLogRetentionSelect" aria-label="Activity log retention"></select>
+          </div>
+          <div id="activityLogRetentionStatus" class="empty-note" style="margin-top:6px;" role="status" aria-live="polite"></div>
         </div>
       </div>
 
@@ -2307,9 +2330,9 @@
            second copy of any of that data. See wallet.js's own "wallet
            activity log" section for exactly what is and isn't logged. -->
       <div class="settings-category" data-category="activity-log">
-        <button type="button" class="settings-category-toggle"><span>Activity log</span><span class="chevron">▸</span></button>
+        <button type="button" class="settings-category-toggle"><span id="activityLogHeading">Activity log (0)</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
-          <div class="empty-note">What's happened in this wallet, most recent first. Purely local — nothing here is sent anywhere.</div>
+          <div class="empty-note">What's happened in this wallet, most recent first. Select an entry to see its details. Purely local — nothing here is sent anywhere. How many entries it keeps is set under Settings → Profile.</div>
           <div id="activityLogList" class="item-list" style="margin-top:8px;"></div>
           <div class="btn-col" style="margin-top:8px;">
             <button id="clearActivityLogBtn" type="button" class="btn-secondary">Clear log</button>

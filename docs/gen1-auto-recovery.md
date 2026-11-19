@@ -91,7 +91,7 @@ dashed border marks "needs attention", but nothing depends on colour.
 | **Pending** | the issuer has not confirmed the transaction | journal entry in `pending`, nobody is sending it now |
 | **Recovering** | an eligible operation is being asked about right now | some page holds the operation lock of the entry |
 | **Needs attention** | recovery cannot safely tell what happened; nothing is sent unless asked | journal entry in `needs-attention` (or an unreadable element, kept as it is) |
-| **Completed** | the issuer's answer was applied to this wallet | listed from the activity log for 7 days (at most 5), see below |
+| **Completed** | the issuer's answer was applied to this wallet | listed from the activity log for 7 days (at most 5), see below; an identity that chose a small Activity Log retention (50 entries) can see one drop off sooner once newer entries recycle it |
 
 Pending and needs-attention items show the kind and issuer, when they started, how often the issuer was asked, the last
 answer, and an "Ask the issuer again" button (`retryPendingOperation`). Its result is announced in a polite live region
