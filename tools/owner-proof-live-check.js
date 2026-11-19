@@ -5,21 +5,31 @@
 //
 // What it sends, per domain (all of it from throw-away keys that exist only for this run):
 //   1. GET /atlas/capabilities, to read the advertised ownerProof record.
-//   2. Only when that record says mode "require" and lists the class: seven refused membership requests.
-//        - no signature at all, for each of the three membership classes   -> 403 owner-authorization-required
+//   2. Only when that record says mode "require" and lists the class: ten refused membership requests.
+//        - unsigned, with no Origin header (how a native app or a script sends one), for each of the three membership classes
+//            -> 403 mint-origin-refused. The public issue route serves pages of its own domain, listed origins and wallet
+//               extensions, and an origin-less request only with a signed intent, so this is refused before the owner proof
+//               is looked at. An issuer whose origin protection is switched off (a local test issuer) answers
+//               owner-authorization-required here instead, which is accepted too.
+//        - unsigned, with the issuer's own Origin header (what a page of that domain sends), for each class
+//            -> 403 owner-authorization-required, the owner proof's own refusal
 //        - an empty signed request                                         -> 403 owner-authorization-required
 //        - a request signed by a key other than the recipient              -> 403 not-owner
 //        - a request whose signature is damaged                            -> 403 owner-signature-invalid
 //        - a request signed for a different domain                         -> 403 owner-authorization-required
+//      The four signed requests carry no Origin header, exactly as before.
 //
 // It never sends a request that could be accepted: a correctly signed request for the recipient is not among them.
 // An issuer that does not advertise "require" is not probed at all (an unsigned request there would be served and
 // would create a credential), and if an issuer ever answers a probe with success the run stops at once and says so.
 //
 // Nothing is changed on the issuer: a refusal is decided before a request id is leased, a credential minted, a roster
-// row written or a welcome mail sent. The only effect is that the issuer's refusal counters rise by seven. Read the
-// counters (Site Doctor, or tools/owner-proof-readiness.js on the server) before and after the run: refused rises by
-// the number printed at the end, and signed and unsigned stay where they were.
+// row written or a welcome mail sent. The only effect is on the refusal counters, and not every refusal is counted:
+// a request without an Origin header is refused (or, with a signed intent, judged as a native Join) before the owner-proof
+// statistics, which only count requests from a page or an extension. So on an issuer with the origin protection on, only
+// the three unsigned requests with the issuer's own Origin raise the owner-proof "refused" count, by three in all; the tool
+// prints the number to expect ("counted"). Signed and unsigned counts do not move. Read the counters (Site Doctor, or
+// tools/owner-proof-readiness.js on the server) before and after the run.
 //
 // Exit code: 0 every probed domain behaved as expected, 1 a probe got another answer or a domain is not enforcing,
 // 2 usage error. Plain http is accepted only for a loopback host (local test issuers).
@@ -59,11 +69,11 @@ async function sign(key, payload) {
 }
 const requestId = () => 'live-check-' + b64u(webcrypto.getRandomValues(new Uint8Array(12)));
 
-async function http(method, url, body) {
+async function http(method, url, body, extraHeaders) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(url, { method, redirect: 'manual', signal: ctl.signal, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+    const res = await fetch(url, { method, redirect: 'manual', signal: ctl.signal, headers: Object.assign(body ? { 'Content-Type': 'application/json' } : {}, extraHeaders || {}), body: body ? JSON.stringify(body) : undefined });
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch (e) { /* not JSON */ }
@@ -75,9 +85,10 @@ async function http(method, url, body) {
 
 async function probeDomain(arg) {
   const base = baseOf(arg);
-  const out = { target: arg, base, capabilities: null, mode: null, probed: false, rows: [], notes: [], ok: false, refusedExpected: 0, issuedByMistake: false };
+  const out = { target: arg, base, capabilities: null, mode: null, probed: false, rows: [], notes: [], ok: false, refusedExpected: 0, countedExpected: 0, issuedByMistake: false };
   if (!base) { out.notes.push('not a valid https address (plain http is only accepted for localhost)'); return out; }
   const domain = new URL(base).host;
+  const ownOrigin = new URL(base).origin;
 
   const caps = await http('GET', base + '/atlas/capabilities');
   if (caps.status !== 200 || !caps.json) { out.notes.push('GET /atlas/capabilities answered ' + (caps.status || caps.error) + '; cannot tell what this issuer enforces'); return out; }
@@ -94,30 +105,46 @@ async function probeDomain(arg) {
   const other = await newKey();
   const payloadFor = (assetClass, over) => proofLib.issuePayload(Object.assign({ assetClass, domain, issuedAt: new Date().toISOString(), ownerPublicKey: owner.publicKey, requestId: requestId() }, over || {}));
   const cases = [];
-  for (const c of classes) cases.push({ name: 'unsigned request, ' + c, assetClass: c, expect: 'owner-authorization-required', updateWallet: true, build: async () => ({ ownerPublicKey: owner.publicKey, assetClass: c, requestId: requestId() }) });
+  const unsignedBody = (c) => async () => ({ ownerPublicKey: owner.publicKey, assetClass: c, requestId: requestId() });
+  for (const c of classes) cases.push({ name: 'unsigned request, no Origin header, ' + c, group: 'originless', assetClass: c, expect: ['mint-origin-refused', 'owner-authorization-required'], updateWallet: true, build: unsignedBody(c) });
+  for (const c of classes) cases.push({ name: 'unsigned request, issuer\'s own Origin, ' + c, group: 'own-origin', assetClass: c, expect: ['owner-authorization-required'], updateWallet: true, headers: { Origin: ownOrigin }, build: unsignedBody(c) });
   const c0 = classes[0] || CLASSES[0];
-  cases.push({ name: 'empty signed request', assetClass: c0, expect: 'owner-authorization-required', build: async () => ({ ownerPublicKey: owner.publicKey, assetClass: c0, requestId: requestId(), intent: {} }) });
-  cases.push({ name: 'signed by a key other than the recipient', assetClass: c0, expect: 'not-owner', build: async () => { const p = payloadFor(c0); return { ownerPublicKey: owner.publicKey, assetClass: c0, requestId: p.requestId, intent: { payload: p, proof: await sign(other, p) } }; } });
-  cases.push({ name: 'damaged signature', assetClass: c0, expect: 'owner-signature-invalid', build: async () => {
+  cases.push({ name: 'empty signed request', group: 'signed', assetClass: c0, expect: ['owner-authorization-required'], build: async () => ({ ownerPublicKey: owner.publicKey, assetClass: c0, requestId: requestId(), intent: {} }) });
+  cases.push({ name: 'signed by a key other than the recipient', group: 'signed', assetClass: c0, expect: ['not-owner'], build: async () => { const p = payloadFor(c0); return { ownerPublicKey: owner.publicKey, assetClass: c0, requestId: p.requestId, intent: { payload: p, proof: await sign(other, p) } }; } });
+  cases.push({ name: 'damaged signature', group: 'signed', assetClass: c0, expect: ['owner-signature-invalid'], build: async () => {
     const p = payloadFor(c0); const proof = await sign(owner, p);
     const raw = Buffer.from(proof.signature, 'base64url'); raw[0] ^= 0xff; proof.signature = b64u(raw);
     return { ownerPublicKey: owner.publicKey, assetClass: c0, requestId: p.requestId, intent: { payload: p, proof } };
   } });
-  cases.push({ name: 'signed for a different domain', assetClass: c0, expect: 'owner-authorization-required', build: async () => { const p = payloadFor(c0, { domain: 'other-domain.invalid' }); return { ownerPublicKey: owner.publicKey, assetClass: c0, requestId: p.requestId, intent: { payload: p, proof: await sign(owner, p) } }; } });
+  cases.push({ name: 'signed for a different domain', group: 'signed', assetClass: c0, expect: ['owner-authorization-required'], build: async () => { const p = payloadFor(c0, { domain: 'other-domain.invalid' }); return { ownerPublicKey: owner.publicKey, assetClass: c0, requestId: p.requestId, intent: { payload: p, proof: await sign(owner, p) } }; } });
 
   out.probed = true;
   for (const c of cases) {
-    const r = await http('POST', base + '/atlas/asset/issue', await c.build());
+    const r = await http('POST', base + '/atlas/asset/issue', await c.build(), c.headers);
     const code = r.json && typeof r.json.code === 'string' ? r.json.code : null;
-    const refused = r.status === 403 && code === c.expect;
-    const wording = !c.updateWallet || (r.json && r.json.updateWallet === true && r.json.error === MESSAGE);
-    const row = { name: c.name, status: r.status, code, expected: '403 ' + c.expect, pass: refused && wording };
+    const refused = r.status === 403 && c.expect.includes(code);
+    // The wallet-update wording belongs to the owner proof's own refusal of an unsigned request.
+    const wording = !c.updateWallet || code !== 'owner-authorization-required' || (r.json && r.json.updateWallet === true && r.json.error === MESSAGE);
+    const row = { name: c.name, group: c.group, status: r.status, code, expected: '403 ' + c.expect.join(' or '), pass: refused && wording };
     if (r.error) row.error = r.error;
     if (r.status >= 200 && r.status < 300) { out.issuedByMistake = true; row.pass = false; row.note = 'the issuer answered success: a credential may have been issued to a throw-away key'; out.rows.push(row); break; }
     if (refused) out.refusedExpected++;
     out.rows.push(row);
   }
-  out.ok = !out.issuedByMistake && out.rows.length === cases.length && out.rows.every((r) => r.pass) && classes.length === CLASSES.length;
+
+  // Which refusals the owner-proof statistics count. A request without an Origin header never reaches them when the
+  // issuer's origin protection is on (it is refused as mint-origin-refused, or judged as a native Join, which is not
+  // counted); with the protection off, as on a local test issuer, every refusal is counted.
+  const originless = out.rows.filter((r) => r.group === 'originless');
+  const protectionOn = originless.length > 0 && originless.every((r) => r.code === 'mint-origin-refused');
+  const mixed = originless.length > 0 && !protectionOn && originless.some((r) => r.code === 'mint-origin-refused');
+  if (mixed) out.notes.push('the three requests without an Origin header were not all answered alike: this issuer is only partly protected, or the three classes are handled differently');
+  out.originProtection = originless.length === 0 ? 'unknown' : protectionOn ? 'on' : mixed ? 'mixed' : 'off';
+  for (const r of out.rows) {
+    r.counted = !!r.pass && (r.group === 'own-origin' || (!protectionOn && r.code !== 'mint-origin-refused'));
+    if (r.counted) out.countedExpected++;
+  }
+  out.ok = !out.issuedByMistake && !mixed && out.rows.length === cases.length && out.rows.every((r) => r.pass) && classes.length === CLASSES.length;
   return out;
 }
 
@@ -130,11 +157,14 @@ async function probeDomain(arg) {
       console.log('\n' + r.target + (r.base ? '' : '  (skipped)'));
       console.log('  advertised mode: ' + (r.mode || 'unknown'));
       for (const n of r.notes) console.log('  note: ' + n);
-      for (const row of r.rows) console.log('  ' + (row.pass ? 'PASS' : 'FAIL') + '  ' + row.name + ' -> ' + (row.status || row.error) + (row.code ? ' ' + row.code : '') + (row.pass ? '' : '   (expected ' + row.expected + ')') + (row.note ? '   ' + row.note : ''));
-      if (r.probed) console.log('  refusals that should now be counted: ' + r.refusedExpected + (r.ok ? '   result: PASS' : '   result: FAIL'));
+      for (const row of r.rows) console.log('  ' + (row.pass ? 'PASS' : 'FAIL') + '  ' + row.name + ' -> ' + (row.status || row.error) + (row.code ? ' ' + row.code : '') + (row.pass ? (row.counted ? '   (counted)' : '   (not counted)') : '   (expected ' + row.expected + ')') + (row.note ? '   ' + row.note : ''));
+      if (r.probed) {
+        console.log('  origin protection: ' + r.originProtection + '   refused as expected: ' + r.refusedExpected + ' of ' + r.rows.length);
+        console.log('  refusals that should now be counted in the owner-proof statistics: ' + r.countedExpected + (r.ok ? '   result: PASS' : '   result: FAIL'));
+      }
       else console.log('  result: ' + (r.ok ? 'PASS (read only)' : 'NOT VERIFIED'));
     }
-    console.log('\nNow read the refusal counters again: refused should have risen by the number above for each domain, and signed and unsigned should be unchanged.');
+    console.log('\nNow read the owner-proof counters again: "refused" should have risen by the "counted" number above for each domain, and signed and unsigned should be unchanged. Requests without an Origin header are refused before the statistics, so they are not part of that number.');
   }
   process.exit(results.every((r) => r.ok) ? 0 : 1);
 })();

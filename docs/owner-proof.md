@@ -81,6 +81,10 @@ on this deployment), `enforcing`, `off`. Exit code 0 for ready or enforcing, 1 o
 Suggested order: deploy the issuer update in `accept`, deploy the wallet update, join once at each class from the new wallet,
 read the report, then switch that issuer to `require` and read it again.
 
+## Checking a live issuer
+
+`node tools/owner-proof-live-check.js <domain> [<domain> ...]`, run from your PC, reads `GET /atlas/capabilities` and, only when the issuer advertises `require`, sends ten requests that must all be refused (it never sends one that could be accepted). On an issuer with the origin protection on, as a live one runs, an unsigned request with no Origin header is refused as `mint-origin-refused` before the owner proof is looked at, the same as for any caller that is not a page of the domain, a listed origin or a wallet extension. The owner proof's own refusal, `owner-authorization-required`, is what an unsigned request with the issuer's own Origin gets, so the tool sends both. Only requests that carry an Origin header reach the readiness statistics: the three unsigned requests with the issuer's own Origin raise "refused" by three, and requests with no Origin header (the other three unsigned ones and the four signed ones, which follow the native-Join path) are not counted. Read the counters before and after; the tool prints the number to expect. `node test/manual-owner-proof-live-check.js` runs it against local Node and PHP issuers with the origin protection on and off.
+
 ## Passkey identities
 
 An assertion made by a page of the wallet extension carries a relying-party hash of the extension's own origin, not of a host name.
