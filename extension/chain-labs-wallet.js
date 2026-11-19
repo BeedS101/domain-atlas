@@ -447,8 +447,9 @@
 
     // The domain's signed head for a coin (the newest entry, or the one at an index), checked against the key pinned for the domain.
     // null when the domain does not answer, answers in another form, or answers for another entry than the one asked for.
-    async function verifiedHead(record, coinId, index) {
+    async function verifiedHead(record, coinId, index, meta) {
       const r = await request(record.domain, 'GET', 'action=head&coin=' + coinId + (index === null ? '' : '&index=' + index));
+      if (meta) meta.reached = r.status > 0 && r.status < 500;
       const head = r.json && r.json.ok === true ? r.json.head : null;
       const payload = isObject(head) ? head.payload : null;
       if (!isObject(payload) || payload.type !== 'atlas.ledger.head' || payload.coinId !== coinId || payload.domain !== record.domain || !Number.isInteger(payload.index) || payload.index < 0 || (index !== null && payload.index !== index) || !HASH_RE.test(payload.hash || '') || typeof payload.issuedAt !== 'string') return null;
@@ -460,8 +461,8 @@
 
     // Asks the domain for its signed head at an index, to see whether the history that reached it passes through the kept entry.
     // true: it does. false: another hash is held there. null: the domain cannot say (an older server, or no answer).
-    async function headAt(record, coinId, index, hash) {
-      const payload = await verifiedHead(record, coinId, index);
+    async function headAt(record, coinId, index, hash, meta) {
+      const payload = await verifiedHead(record, coinId, index, meta);
       return payload === null ? null : payload.hash === hash;
     }
 
@@ -605,7 +606,7 @@
           coins: a ? a.coins.map((coin) => Object.assign({ amount: formatUnits(coin.units, coin.decimals), integrity: integrityOf(d, coin.coinId) }, coin)) : []
         });
       }
-      return { domains: out, pendingSends: c.pendingSends, pendingBuys: c.pendingBuys.map((p) => ({ domain: p.domain, coinId: p.coinId, requestId: p.requestId, price: p.price, symbol: p.symbol, decimals: p.decimals, units: p.units, note: p.note || '', createdAt: p.createdAt })) };
+      return { domains: out, pendingSends: c.pendingSends, pendingBuys: c.pendingBuys.map((p) => ({ domain: p.domain, coinId: p.coinId, requestId: p.requestId, price: p.price, symbol: p.symbol, decimals: p.decimals, units: p.units, note: p.note || '', state: p.state || 'waiting', reason: p.reason || '', createdAt: p.createdAt })) };
     }
 
     // ---------- sending ----------
@@ -728,6 +729,25 @@
       return { payload, signature: envelope.signature };
     }
 
+    // A transfer the domain has taken is kept in the cache until its outcome is verified. It is never dropped because its receipt could not be
+    // verified: it stays, with the signed authorization and the digest that names it, and is marked `unconfirmed` when the receipt failed or left
+    // waiting when the receipt could only not be checked yet. Nothing here sends a transfer again.
+    const UNCONFIRMED_NOTE = 'The wallet has not counted it as made or as failed, and will not send it again.';
+    function capPending(list) {
+      const keep = list.filter((p) => p.state === 'unconfirmed');
+      const rest = list.filter((p) => p.state !== 'unconfirmed').slice(-MAX_PENDING);
+      return list.filter((p) => keep.includes(p) || rest.includes(p));
+    }
+    function pendingSendOf(record, prepared, authorization, digest, extra) {
+      return Object.assign({ domain: record.domain, coinId: prepared.coinId, digest, to: prepared.to, amount: prepared.amount, from: prepared.from, symbol: prepared.symbol, decimals: prepared.decimals, private: prepared.private, authorization, createdAt: nowMs() }, extra || {});
+    }
+    function keepPendingSend(item, ownerKey) {
+      return mutateCache((c) => {
+        const held = c.pendingSends.find((p) => p.digest === item.digest);
+        c.pendingSends = capPending(c.pendingSends.filter((p) => p.digest !== item.digest).concat([held ? Object.assign({}, held, item, { createdAt: held.createdAt }) : item]));
+      }, ownerKey);
+    }
+
     function receiptMatches(receipt, expect) {
       const e = isObject(receipt) ? receipt.entry : null;
       // A private coin's entry names accounts by reference, which only the domains can compute, so only the coin, the amount and the purchase are compared.
@@ -742,7 +762,9 @@
     // or does not verify; nothing is read as it stands.
     async function verifyReceipt(record, coinId, receipt) {
       let v;
-      try { v = await verifiedGenesis(record, coinId); } catch (err) { throw Object.assign(unverified('the coin\'s genesis could not be verified: ' + (err && err.message ? err.message : 'unknown')), { cause: err }); }
+      try { v = await verifiedGenesis(record, coinId); } catch (err) {
+        throw Object.assign(unverified('the coin\'s genesis could not be verified: ' + (err && err.message ? err.message : 'unknown')), { cause: err, unchecked: !!err && err.code === 'network' });
+      }
       const e = isObject(receipt) ? receipt.entry : null;
       if (!isObject(e) || e.coinId !== coinId || receipt.coinId !== coinId || e.type !== 'transfer' || !Number.isInteger(e.index) || e.index < 1) throw unverified('it is not an entry of this coin');
       if (!HASH_RE.test(receipt.hash || '') || !Array.isArray(receipt.approvals) || receipt.approvals.length > 5) throw unverified('it is missing a part');
@@ -760,9 +782,11 @@
       if (signers.size < v.threshold) throw unverified('it has ' + signers.size + ' of the ' + v.threshold + ' approvals the coin needs');
       // The domain must also show that entry at that place in its own history, in a head statement it signs: an authority can sign any
       // text, but not an entry that is not the one it attests at that index without contradicting itself.
-      const shown = await headAt(record, coinId, e.index, receipt.hash);
+      // A domain that does not answer (no connection, or a server error) leaves the receipt unchecked; one that answers without showing the entry does not.
+      const meta = {};
+      const shown = await headAt(record, coinId, e.index, receipt.hash, meta);
       if (shown === false) throw unverified('the domain\'s own history holds another entry there');
-      if (shown !== true) throw Object.assign(unverified('the domain does not show it in its history'), { cause: { code: 'unavailable' } });
+      if (shown !== true) throw Object.assign(unverified('the domain does not show it in its history'), { unchecked: !meta.reached });
     }
 
     // A receipt is accepted when it verifies and is for what was asked. Anything else is refused with bad-receipt.
@@ -778,14 +802,27 @@
         const authorization = await signTransfer(record, prepared);
         const r = await request(record.domain, 'POST', 'action=propose', { authorization });
         const j = r.json || {};
-        if (r.status === 201 && j.ok) {
-          await acceptReceipt(record, prepared.coinId, j.receipt, { coinId: prepared.coinId, to: prepared.to, amount: prepared.amount, from: prepared.from, private: prepared.private });
+        if (r.status === 201) {
+          // The domain says the transfer was made. Whatever its receipt turns out to be, the wallet keeps the transfer until it has an outcome it can verify.
+          const digest = await sha256Hex(canonical(authorization.payload));
+          try {
+            if (!j.ok) throw unverified('the answer has no receipt');
+            await acceptReceipt(record, prepared.coinId, j.receipt, { coinId: prepared.coinId, to: prepared.to, amount: prepared.amount, from: prepared.from, private: prepared.private });
+          } catch (err) {
+            if (!err || err.code !== 'bad-receipt') throw err;
+            const reason = String(err.reason || '').slice(0, 200);
+            if (err.unchecked) {
+              await keepPendingSend(pendingSendOf(record, prepared, authorization, digest, { note: 'The domain says the transfer was made, but its receipt could not be checked yet.' }), prepared.from);
+              return { status: 'waiting', digest, note: 'The domain says the transfer was made, but the wallet could not check its receipt yet (' + reason + '). It keeps the transfer and checks again.' };
+            }
+            await keepPendingSend(pendingSendOf(record, prepared, authorization, digest, { state: 'unconfirmed', reason, since: nowMs() }), prepared.from);
+            throw Object.assign(new Error('The domain says the transfer was made, but its receipt could not be verified (' + reason + '), so the outcome is unconfirmed. ' + UNCONFIRMED_NOTE), { code: 'bad-receipt', reason, unconfirmed: true, digest });
+          }
           await lookup(record.domain).catch(() => null);
           return { status: 'done', receipt: j.receipt };
         }
-        if (r.status === 201) throw Object.assign(new Error('The domain\'s receipt does not match what you signed, so it was not accepted.'), { code: 'bad-receipt' });
         if (r.status === 202 && j.proposal && HASH_RE.test(j.proposal.digest || '')) {
-          await mutateCache((c) => { c.pendingSends = c.pendingSends.filter((p) => p.digest !== j.proposal.digest).concat([{ domain: record.domain, coinId: prepared.coinId, digest: j.proposal.digest, to: prepared.to, amount: prepared.amount, from: prepared.from, symbol: prepared.symbol, decimals: prepared.decimals, private: prepared.private, createdAt: nowMs() }]).slice(-MAX_PENDING); }, prepared.from);
+          await keepPendingSend(pendingSendOf(record, prepared, authorization, j.proposal.digest), prepared.from);
           return { status: 'waiting', digest: j.proposal.digest, note: j.note || '' };
         }
         if (r.status === 409 && j.code === 'stale' && attempt === 0) continue;
@@ -795,25 +832,71 @@
       throw Object.assign(new Error(SEND_PROBLEMS.stale), { code: 'stale' });
     }
 
-    // Asks the domain how each waiting transfer ended.
+    // The same receipt from another domain of the coin's roster that is on the list, for a transfer whose own domain's receipt did not verify.
+    // It is checked in full against the pinned genesis (the hash, the authority and the approvals, and that domain's own signed head at that
+    // index), so what settles the transfer is history the wallet has verified through a second domain. Only a public coin can be matched this way:
+    // a private coin's entries name accounts by references the wallet cannot compute, so its amount alone would match another transfer.
+    async function reconcileSend(p, index) {
+      if (p.private || !Number.isInteger(index) || index < 1) return null;
+      const list = await domains();
+      const own = list.find((d) => d.domain === p.domain);
+      const pin = own && isObject(own.genesis) && isObject(own.genesis[p.coinId]) ? own.genesis[p.coinId] : null;
+      if (!pin || !Array.isArray(pin.roster)) return null;
+      for (const d of list) {
+        if (d.domain === p.domain || !pin.roster.includes(d.domain)) continue;
+        const r = await request(d.domain, 'GET', 'action=receipt&coin=' + p.coinId + '&index=' + index);
+        const receipt = r.json && r.json.ok ? r.json.receipt : null;
+        try {
+          if (!isObject(receipt) || !isObject(receipt.entry) || receipt.entry.index !== index) continue;
+          await acceptReceipt(d, p.coinId, receipt, p);
+          return d.domain;
+        } catch (err) { /* this domain cannot settle it; the next one may */ }
+      }
+      return null;
+    }
+
+    // Asks the domain how each waiting transfer ended. An executed transfer is done only with a receipt that verifies, from its own domain or, for
+    // a public coin, from another domain of the roster. A receipt that fails leaves the transfer `unconfirmed` and reported; one that cannot be
+    // checked yet leaves it waiting. A transfer is removed only when a verified receipt settles it, or when the domain says it expired or was
+    // rejected and the wallet never saw it reported as made.
     async function checkPending() {
       const c = await cache();
-      const done = [];
+      const report = [];
+      const settled = [];
+      const marked = new Map();
+      const claimed = new Set(c.pendingSends.filter((x) => x.state === 'unconfirmed' && Number.isInteger(x.index)).map((x) => x.domain + '/' + x.coinId + '/' + x.index));
       for (const p of c.pendingSends) {
         const r = await request(p.domain, 'GET', 'action=proposal&coin=' + p.coinId + '&digest=' + p.digest);
         const proposal = r.json && r.json.proposal;
         if (r.status === 200 && proposal && proposal.status === 'executed') {
-          // An executed transfer is believed only with a receipt that verifies; one that does not is reported, and one that cannot be checked now is asked about again.
           try {
             await acceptReceipt(await recordFor(p.domain), p.coinId, proposal.receipt, p);
-            done.push(Object.assign({}, p, { outcome: 'done' }));
+            settled.push(p.digest);
+            report.push(Object.assign({}, p, { outcome: 'done' }));
+            continue;
           } catch (err) {
-            if (err && err.code === 'bad-receipt' && !(err.cause && ['network', 'unknown-coin', 'unavailable'].includes(err.cause.code))) done.push(Object.assign({}, p, { outcome: 'bad-receipt', reason: err.reason || '' }));
+            if (!err || err.code !== 'bad-receipt') continue;
+            if (err.unchecked) { report.push(Object.assign({}, p, { outcome: p.state === 'unconfirmed' ? 'unconfirmed' : 'waiting', reason: String(err.reason || '').slice(0, 200) })); continue; }
+            const reason = String(err.reason || '').slice(0, 200);
+            const index = Number.isInteger(proposal.index) ? proposal.index : null;
+            const spot = p.domain + '/' + p.coinId + '/' + index;
+            // Another unconfirmed transfer already points at this entry: two transfers that look alike cannot both be settled by one entry.
+            const taken = index !== null && claimed.has(spot) && !(p.state === 'unconfirmed' && p.index === index);
+            const via = taken ? null : await reconcileSend(p, index);
+            if (via) { settled.push(p.digest); report.push(Object.assign({}, p, { outcome: 'done', confirmedBy: via })); continue; }
+            if (index !== null) claimed.add(spot);
+            marked.set(p.digest, { state: 'unconfirmed', reason, index, since: p.state === 'unconfirmed' && p.since ? p.since : nowMs() });
+            report.push(Object.assign({}, p, { outcome: 'unconfirmed', reason }));
           }
-        } else if (r.status === 200 && proposal && (proposal.status === 'expired' || proposal.status === 'rejected')) done.push(Object.assign({}, p, { outcome: proposal.status }));
+        } else if (r.status === 200 && proposal && (proposal.status === 'expired' || proposal.status === 'rejected') && p.state !== 'unconfirmed') {
+          settled.push(p.digest);
+          report.push(Object.assign({}, p, { outcome: proposal.status }));
+        }
       }
-      await mutateCache((latest) => { latest.pendingSends = latest.pendingSends.filter((p) => !done.some((d) => d.digest === p.digest)); });
-      return done;
+      await mutateCache((latest) => {
+        latest.pendingSends = latest.pendingSends.filter((p) => !settled.includes(p.digest)).map((p) => (marked.has(p.digest) ? Object.assign({}, p, marked.get(p.digest)) : p));
+      });
+      return report;
     }
 
     // ---------- buying with Gold ----------
@@ -893,19 +976,32 @@
       const intent = await intentFor(prepared, await coinBinding(record, prepared.coinId));
       await mutateCache((c) => {
         if (c.pendingBuys.some((p) => p.requestId === prepared.requestId)) return;
-        c.pendingBuys = c.pendingBuys.concat([{ domain: record.domain, coinId: prepared.coinId, requestId: prepared.requestId, credential: prepared.credential, price: prepared.price, recipient: prepared.recipient, from: prepared.from, symbol: prepared.symbol, decimals: prepared.decimals, private: prepared.private, units: prepared.units, createdAt: nowMs() }]).slice(-MAX_PENDING);
+        c.pendingBuys = capPending(c.pendingBuys.concat([{ domain: record.domain, coinId: prepared.coinId, requestId: prepared.requestId, credential: prepared.credential, price: prepared.price, recipient: prepared.recipient, from: prepared.from, symbol: prepared.symbol, decimals: prepared.decimals, private: prepared.private, units: prepared.units, createdAt: nowMs() }]));
       });
       const r = await request(record.domain, 'POST', 'action=purchase', { coinId: prepared.coinId, intent, credential: prepared.credential });
       const j = r.json || {};
-      if (r.status === 201 && j.ok && j.requestId === prepared.requestId) {
-        await acceptReceipt(record, prepared.coinId, j.receipt, { coinId: prepared.coinId, to: prepared.recipient, amount: prepared.units, private: prepared.private, purchase: { requestId: prepared.requestId, price: prepared.price } });
+      if (r.status === 201) {
+        // The domain says the sale was made. The purchase stays in the cache until a receipt that verifies has settled it.
+        try {
+          if (!j.ok || j.requestId !== prepared.requestId) throw unverified('the answer is not for this purchase');
+          await acceptReceipt(record, prepared.coinId, j.receipt, { coinId: prepared.coinId, to: prepared.recipient, amount: prepared.units, private: prepared.private, purchase: { requestId: prepared.requestId, price: prepared.price } });
+        } catch (err) {
+          if (!err || err.code !== 'bad-receipt') throw err;
+          const reason = String(err.reason || '').slice(0, 200);
+          if (err.unchecked) {
+            const note = 'The domain says the sale was made, but the wallet could not check its receipt yet (' + reason + '). Try again; the same request is not delivered twice.';
+            await mutateCache((cache) => { const held = cache.pendingBuys.find((x) => x.requestId === prepared.requestId); if (held) held.note = note; });
+            return { status: 'waiting', requestId: prepared.requestId, note };
+          }
+          await mutateCache((cache) => { const held = cache.pendingBuys.find((x) => x.requestId === prepared.requestId); if (held) Object.assign(held, { state: 'unconfirmed', reason, since: held.since || nowMs() }); });
+          throw Object.assign(new Error('The domain says the sale was made, but its receipt could not be verified (' + reason + '), so the outcome is unconfirmed. The wallet keeps the purchase and its Gold request, has not counted it as made or as failed, and sends nothing new; Try again repeats the same request.'), { code: 'bad-receipt', reason, unconfirmed: true, requestId: prepared.requestId });
+        }
         await dropBuy(prepared.requestId);
         // The wallet takes the Gold the issuer returned in place of the credential it spent.
         if (typeof env.afterPurchase === 'function') await Promise.resolve(env.afterPurchase(prepared, j.balance || null)).catch(() => null);
         await lookup(record.domain).catch(() => null);
         return { status: 'done', receipt: j.receipt, balance: j.balance || null };
       }
-      if (r.status === 201) throw Object.assign(new Error('The domain\'s receipt does not match what you signed, so it was not accepted.'), { code: 'bad-receipt' });
       if (r.status === 202) {
         // What the domain is waiting for (for example which domain has not approved) is kept with the request so it can be shown again.
         const note = typeof j.note === 'string' ? j.note.replace(/[\u0000-\u001f]+/g, ' ').trim().slice(0, 300) : '';

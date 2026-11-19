@@ -16,12 +16,37 @@ coin's verified genesis (section 2):
 5. the domain's own signed head statement at that index names the same hash.
 
 Only then are the entry's fields compared with what the person signed. A receipt that fails any step is refused with `bad-receipt` and the reason;
-it is never read as it stands. This applies to a transfer's reply, to the later check of a waiting transfer (`checkPending` reports the outcome
-`bad-receipt`, and a receipt that cannot be checked because the domain is unreachable stays waiting), and to a purchase's reply.
+it is never read as it stands. This applies to a transfer's reply, to the later check of a waiting transfer, and to a purchase's reply. What happens
+to the transfer itself is in section 1.1.
 
 A dishonest authority cannot make up a receipt for a multi authority coin: it holds only its own key, so the approvals it needs are the partners'
 signatures, which it cannot produce. A single authority coin has no partners; the receipt shows that the authority signed that entry and that the
 authority's own head history holds it at that index, which is all there is to check.
+
+### 1.1 A transfer whose receipt does not verify
+
+A domain that answers 201 has committed the transfer, so a receipt that fails does not show that nothing happened. The wallet therefore never drops the
+transfer because of it. Three cases are kept apart:
+
+- **The receipt failed.** The transfer stays on the pending list as `unconfirmed`, with the signed authorization, the digest that names it, the
+  reason, the entry number the domain names and the time. `send` throws `bad-receipt` with `unconfirmed: true` and the digest. The wallet does not
+  count the transfer as made or as failed, and nothing sends it again.
+- **The receipt could not be checked yet.** When the domain, or the coin's genesis, cannot be reached (no connection, or a server error), the transfer
+  stays waiting and is asked about again. A domain that answers but does not show the entry in its history is not in this case.
+- **The domain's receipt verifies later.** `checkPending` asks for the proposal again; a receipt that verifies settles it and removes it.
+
+An unconfirmed public coin transfer can also be settled without the domain that gave the bad receipt: `checkPending` asks the other domains of the
+coin's pinned roster for the receipt of the entry number, and accepts one only if it passes every check in section 1 and matches the transfer.
+Receipts of other domains are never trusted without those checks. The limits are: a private coin is not reconciled this way, because its entries name
+accounts by reference and another domain's receipt cannot show which transfer it was; a single authority coin has no other domain; and two
+unconfirmed transfers that look alike in their public fields are not both settled by one entry, so a second claim on the same entry stays unconfirmed.
+An unconfirmed transfer is never pushed off the pending list by newer ones. The pending list shows it as unresolved, with the reason.
+
+A purchase whose receipt fails stays in the pending purchases as `unconfirmed` or waiting. Asking again repeats the same request id, which the
+domain answers with the entry it already made, so the Gold is not delivered twice.
+
+Not covered: a `propose` request that gets no answer at all (a timeout) leaves no record, because the wallet has no digest of an answer it did not
+get; the person sees the failure and checks the coin's history.
 
 ## 2. The genesis, and pinning
 
@@ -67,11 +92,13 @@ decide whether to offer Buy, and the domain refuses anything it cannot do.
 ## 5. Compatibility
 
 No endpoint or receipt format changed. The wallet's functions keep their names and results; the new outcomes are the error codes `genesis-changed` and
-`wrong-genesis`, and `bad-receipt` for a waiting transfer. Servers need no update.
+`wrong-genesis`. A pending transfer gained the states `unconfirmed` (and `index`, `reason`, `since`) and keeps its `authorization`; older pending items
+without them keep working. `checkPending` outcomes are `done`, `waiting`, `unconfirmed`, `expired` and `rejected`. Servers need no update.
 
 ## 6. Checks
 
 ```
-node test/chain-labs-wallet-verify.js   # made-up receipts, missing or forged approvals, a changed genesis, edited purchase terms, first contact
+node test/chain-labs-wallet-verify.js   # made-up receipts, missing or forged approvals, a changed genesis, edited purchase terms, first contact,
+                                        # unconfirmed transfers and purchases, reconciliation, network failures
 node test/chain-labs-wallet.js          # the wallet as before, with verified receipts
 ```

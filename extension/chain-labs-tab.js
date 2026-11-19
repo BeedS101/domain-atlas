@@ -231,18 +231,23 @@
     const wrap = el('div');
     view.pendingSends.forEach((p) => {
       const card = el('div', { className: 'info-card chain-labs-pending' });
-      card.appendChild(el('div', { textContent: 'Waiting at ' + p.domain + ': sending ' + (AtlasChainLabs.formatUnits(p.amount, p.decimals) || p.amount) + ' ' + p.symbol + '.' }));
+      const sum = (AtlasChainLabs.formatUnits(p.amount, p.decimals) || p.amount) + ' ' + p.symbol;
+      card.appendChild(el('div', { textContent: p.state === 'unconfirmed'
+        ? 'Unconfirmed at ' + p.domain + ': sending ' + sum + '. The domain says it made this transfer, but its receipt could not be verified' + (p.reason ? ' (' + p.reason + ')' : '') + '. The wallet has not counted it as made or as failed, and will not send it again. Check now asks again, and for a public coin asks the coin\'s other domains too.'
+        : 'Waiting at ' + p.domain + ': sending ' + sum + '.' }));
       const actions = el('div', { className: 'item-actions' });
       actions.appendChild(button('Check now', () => act(async () => {
         const done = await chain().checkPending();
-        notice = done.length ? done.map((x) => (x.outcome === 'done' ? 'A waiting transfer was made.' : x.outcome === 'bad-receipt' ? 'A waiting transfer was reported as made, but its receipt could not be verified' + (x.reason ? ' (' + x.reason + ')' : '') + ', so it is not counted. Refresh to see the balance the domain signs.' : 'A waiting transfer ended: ' + x.outcome + '.')).join(' ') : 'Still waiting.';
+        notice = done.length ? done.map((x) => (x.outcome === 'done' ? 'A waiting transfer was made' + (x.confirmedBy ? ' (confirmed through ' + x.confirmedBy + ')' : '') + '.' : x.outcome === 'unconfirmed' ? 'A transfer is unconfirmed: the domain says it was made, but its receipt could not be verified' + (x.reason ? ' (' + x.reason + ')' : '') + '. It is kept, not counted as made or failed, and not sent again.' : x.outcome === 'waiting' ? 'Still waiting.' : 'A waiting transfer ended: ' + x.outcome + '.')).join(' ') : 'Still waiting.';
       })));
       card.appendChild(actions);
       wrap.appendChild(card);
     });
     view.pendingBuys.forEach((p) => {
       const card = el('div', { className: 'info-card chain-labs-pending' });
-      card.appendChild(el('div', { textContent: 'Waiting at ' + p.domain + ': a purchase for ' + p.price + ' Gold.' + (p.note ? ' The domain says: ' + p.note : '') }));
+      card.appendChild(el('div', { textContent: p.state === 'unconfirmed'
+        ? 'Unconfirmed at ' + p.domain + ': a purchase for ' + p.price + ' Gold. The domain says it made the sale, but its receipt could not be verified' + (p.reason ? ' (' + p.reason + ')' : '') + '. The wallet has not counted it as made or as failed. Try again repeats the same request; it is not delivered twice.'
+        : 'Waiting at ' + p.domain + ': a purchase for ' + p.price + ' Gold.' + (p.note ? ' The domain says: ' + p.note : '') }));
       const actions = el('div', { className: 'item-actions' });
       actions.appendChild(button('Try again', () => act(async () => {
         const r = await chain().resumeBuy(p.requestId);

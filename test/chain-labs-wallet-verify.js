@@ -156,26 +156,156 @@ const both = (...hooks) => async (url, init, forward) => { for (const h of hooks
     const wholly = through(alice, st, edit('action=propose', (j) => ({ status: 201, json: { ok: true, receipt: fabricate(allOf.id, { amount: '100', from: alice.key, to: bob.key }, 99, a) } })));
     line(await refusal(wholly.send(await wholly.prepareSend(A, allOf.id, bob.key, '1'))) === 'bad-receipt', 'an entry the authority signed alone, matching what was asked, is not a receipt');
 
+    const keptBad = (await honest.rows()).pendingSends;
+    line(keptBad.length === 14 && keptBad.every((x) => x.state === 'unconfirmed' && x.authorization && x.digest), 'every transfer above, whose receipt was refused, is still on the list as unconfirmed', keptBad.length);
+    st.cache.pendingSends = [];
+
     console.log('\n== a waiting transfer is judged the same way');
     await stop(c);
     const waiting = await honest.send(await honest.prepareSend(A, allOf.id, bob.key, '2'));
     line(waiting.status === 'waiting', 'with a partner down the transfer waits', waiting);
     await start(c);
     await op(a, 'recover', { coinId: allOf.id });
-    const swapped = through(alice, st, edit('action=proposal', (j) => { if (j.proposal && j.proposal.receipt) j.proposal.receipt.approvals = []; }));
+    const noApprovals = (j) => { if (j.receipt && j.receipt.entry && j.receipt.entry.index > 0) j.receipt.approvals = []; };
+    const swapped = through(alice, st, both(
+      edit('action=proposal', (j) => { if (j.proposal && j.proposal.receipt) j.proposal.receipt.approvals = []; }),
+      edit('action=receipt&coin=', noApprovals)
+    ));
     const judged = await swapped.checkPending();
-    line(judged.length === 1 && judged[0].outcome !== 'done', 'a receipt with no approvals is not taken for the transfer finishing', judged);
-    line(judged[0] && judged[0].outcome === 'bad-receipt', 'and the person is told the receipt could not be verified', judged);
-    line((await honest.rows()).pendingSends.length === 0, 'and it is not kept waiting for an answer it will not believe');
+    line(judged.length === 1 && judged[0].outcome !== 'done', 'a receipt with no approvals, from the domain and from the partners, is not taken for the transfer finishing', judged);
+    line(judged[0] && judged[0].outcome === 'unconfirmed', 'and the person is told the outcome is unconfirmed', judged);
+    const keptWaiting = (await honest.rows()).pendingSends;
+    line(keptWaiting.length === 1 && keptWaiting[0].state === 'unconfirmed' && keptWaiting[0].authorization && keptWaiting[0].digest === judged[0].digest, 'and the transfer stays on the list with its authorization and digest, marked unconfirmed', keptWaiting);
+    const lateHonest = await honest.checkPending();
+    line(lateHonest.length === 1 && lateHonest[0].outcome === 'done' && (await honest.rows()).pendingSends.length === 0, 'and the honest answer, when it comes, settles it', lateHonest);
     await stop(c);
     const slow = await honest.send(await honest.prepareSend(A, allOf.id, bob.key, '2'));
     await start(c);
     await op(a, 'recover', { coinId: allOf.id });
     const unreachable = through(alice, st, async (url) => (url.includes('action=head') ? { status: 503, json: { ok: false } } : null));
     const unsure = await unreachable.checkPending();
-    line(slow.status === 'waiting' && unsure.length === 0 && (await honest.rows()).pendingSends.length === 1, 'a receipt that cannot be checked because the domain does not answer yet is asked about again, not judged', unsure);
+    const unsureRows = (await honest.rows()).pendingSends;
+    line(slow.status === 'waiting' && unsure.length === 1 && unsure[0].outcome === 'waiting' && unsureRows.length === 1 && unsureRows[0].state !== 'unconfirmed', 'a receipt that cannot be checked because the domain does not answer yet is asked about again, not judged', unsure);
     const settled = await honest.checkPending();
     line(settled.length === 1 && settled[0].outcome === 'done' && (await honest.rows()).pendingSends.length === 0, 'and the honest answer finishes it', settled);
+
+    console.log('\n== a receipt that fails does not lose the transfer');
+    const ust = Object.assign(freshState(), { domains: JSON.parse(JSON.stringify(st.domains)) });
+    const calm = Chain.create(envFor(alice, ust));
+    const pending = async (w) => (await w.rows()).pendingSends;
+    const onlyA = (hook) => async (url, init, forward) => (url.startsWith('http://' + A + '/') ? hook(url, init, forward) : null);
+    const notA = (hook) => async (url, init, forward) => (url.startsWith('http://' + A + '/') ? null : hook(url, init, forward));
+    const badSig = (r) => { if (r && r.entry && r.entry.index > 0) r.authoritySignature = 'AAAA'; };
+    const failing = () => both(
+      edit('action=propose', (j) => badSig(j.receipt)),
+      edit('action=proposal', (j) => badSig(j.proposal && j.proposal.receipt)),
+      edit('action=receipt&coin=', (j) => badSig(j.receipt))
+    );
+    const lyingA = through(alice, ust, onlyA(failing()));
+    const liars = through(alice, ust, failing());
+
+    // The domain committed the transfer and answers with a receipt that does not verify.
+    const mark = sent;
+    const p1 = await lyingA.prepareSend(A, sgl.id, bob.key, '3');
+    const e1 = await lyingA.send(p1).catch((e) => e);
+    line(e1.code === 'bad-receipt' && e1.unconfirmed === true && /^[0-9a-f]{64}$/.test(e1.digest || ''), 'a transfer the domain says it made, with a receipt that does not verify, is reported as unconfirmed', e1.code || e1);
+    line(sent === mark + 1, 'and it is sent once');
+    const committed = (await S.get(a, 'action=proposal&coin=' + sgl.id + '&digest=' + e1.digest)).json;
+    line(committed.proposal && committed.proposal.status === 'executed', 'the domain did make that transfer, so a wallet that forgot it would have lost a real one', committed.proposal && committed.proposal.status);
+    const k1 = await pending(calm);
+    line(k1.length === 1 && k1[0].state === 'unconfirmed' && k1[0].digest === e1.digest && k1[0].authorization && k1[0].authorization.payload && k1[0].authorization.payload.amount === '300' && typeof k1[0].authorization.signature === 'string' && sha(canon(k1[0].authorization.payload)) === k1[0].digest, 'the wallet keeps the signed authorization and the digest that names it', k1);
+    line(typeof k1[0].reason === 'string' && k1[0].reason.length > 0 && typeof k1[0].since === 'number', 'with the reason the receipt failed and when', k1[0]);
+
+    // Asked again while the domain still gives a receipt that fails.
+    const r1 = await lyingA.checkPending();
+    const k2 = await pending(calm);
+    line(r1.length === 1 && r1[0].outcome === 'unconfirmed' && k2.length === 1 && k2[0].state === 'unconfirmed' && Number.isInteger(k2[0].index) && k2[0].digest === e1.digest && !!k2[0].authorization, 'asked again, a receipt that still fails keeps it unconfirmed, with the entry the domain names', r1);
+    line(sent === mark + 1, 'and nothing is sent again');
+    const r1b = await liars.checkPending();
+    line(r1b.length === 1 && r1b[0].outcome === 'unconfirmed' && (await pending(calm)).length === 1, 'a single authority coin has no other domain to ask, so it stays unconfirmed');
+    const s1 = await calm.checkPending();
+    line(s1.length === 1 && s1[0].outcome === 'done' && (await pending(calm)).length === 0 && sent === mark + 1, 'the domain\'s receipt, when it verifies, settles it, still without a second transfer', s1);
+
+    // A public multi authority coin can be settled by the other domains of its roster.
+    const p2 = await lyingA.prepareSend(A, allOf.id, bob.key, '4');
+    const e2 = await lyingA.send(p2).catch((e) => e);
+    line(e2.code === 'bad-receipt' && e2.unconfirmed === true && (await pending(calm)).length === 1, 'a full roster transfer with a receipt that fails is kept unconfirmed too', e2.code);
+    const r2 = await lyingA.checkPending();
+    line(r2.length === 1 && r2[0].outcome === 'done' && [B, C].includes(r2[0].confirmedBy) && (await pending(calm)).length === 0, 'and is settled by a receipt of a partner domain that verifies against the pinned roster', r2);
+    const p3 = await lyingA.prepareSend(A, allOf.id, bob.key, '5');
+    await lyingA.send(p3).catch(() => null);
+    const r3 = await liars.checkPending();
+    line(r3.length === 1 && r3[0].outcome === 'unconfirmed' && (await pending(calm)).length === 1, 'when the partners\' receipts fail as well it stays unconfirmed', r3);
+    const wrongEntry = through(alice, ust, both(onlyA(failing()), notA(edit('action=receipt&coin=', (j) => { j.receipt = ok2.receipt; }))));
+    const r3b = await wrongEntry.checkPending();
+    line(r3b.length === 1 && r3b[0].outcome === 'unconfirmed', 'a partner that shows another real entry of the coin does not settle it', r3b);
+    const r3c = await calm.checkPending();
+    line(r3c.length === 1 && r3c[0].outcome === 'done' && (await pending(calm)).length === 0, 'the honest answer settles it', r3c);
+
+    // A private coin names its accounts by reference, so another domain's receipt cannot show which transfer it was.
+    const pmv = (await createCoin(a, 'PMV', { mode: 'multi', partners: [B, C], visibility: 'private' })).json;
+    await op(a, 'open', { coinId: pmv.id });
+    await op(a, 'grant', { coinId: pmv.id, to: alice.key, amount: '5000' });
+    const p4 = await lyingA.prepareSend(A, pmv.id, bob.key, '1');
+    const e4 = await lyingA.send(p4).catch((e) => e);
+    const r4 = await lyingA.checkPending();
+    line(e4.code === 'bad-receipt' && e4.unconfirmed === true && r4.length === 1 && r4[0].outcome === 'unconfirmed' && (await pending(calm)).length === 1, 'a private coin\'s transfer is not settled through other domains, and stays unconfirmed', r4);
+    const r4b = await calm.checkPending();
+    line(r4b.length === 1 && r4b[0].outcome === 'done' && (await pending(calm)).length === 0, 'until its own domain\'s receipt verifies', r4b);
+
+    // The domain cannot be asked yet: nothing is judged.
+    let afterPropose = false;
+    const flaky = (fails) => async (url) => {
+      if (url.includes('action=propose') || url.includes('action=purchase')) { afterPropose = true; return null; }
+      return afterPropose ? fails(url) : null;
+    };
+    const mark2 = sent;
+    afterPropose = false;
+    const headDown = through(alice, ust, flaky((url) => (url.includes('action=head') ? { status: 503, json: { ok: false } } : null)));
+    const w1 = await headDown.send(await headDown.prepareSend(A, sgl.id, bob.key, '1')).catch((e) => e);
+    const kw1 = await pending(calm);
+    line(w1.status === 'waiting' && kw1.length === 1 && kw1[0].state !== 'unconfirmed' && kw1[0].authorization && kw1[0].digest === w1.digest && sent === mark2 + 1, 'a domain whose history cannot be reached right after a transfer leaves it waiting, not failed or unconfirmed', w1.status || w1.code || w1);
+    const gone = through(alice, ust, async (url) => { if (url.includes('action=head') || url.includes('action=proposal')) throw new Error('offline'); return null; });
+    const wr = await gone.checkPending();
+    line(wr.length === 0 || (wr[0].outcome !== 'done' && wr[0].outcome !== 'unconfirmed'), 'asked while the network is down, it is neither settled nor judged', wr);
+    const kw2 = await pending(calm);
+    line(kw2.length === 1 && kw2[0].state !== 'unconfirmed' && sent === mark2 + 1, 'and stays on the list, with nothing sent again', kw2);
+    const w1done = await calm.checkPending();
+    line(w1done.length === 1 && w1done[0].outcome === 'done' && (await pending(calm)).length === 0, 'when the domain answers, the transfer is settled', w1done);
+    afterPropose = false;
+    const coinDown = through(alice, ust, flaky((url) => { if (url.includes('action=coin&coin=')) throw new Error('offline'); return null; }));
+    const w2 = await coinDown.send(await coinDown.prepareSend(A, sgl.id, bob.key, '1')).catch((e) => e);
+    line(w2.status === 'waiting' && (await pending(calm)).length === 1 && (await pending(calm))[0].state !== 'unconfirmed', 'a coin\'s genesis that cannot be fetched right after a transfer leaves it waiting', w2.status || w2.code || w2);
+    const w2done = await calm.checkPending();
+    line(w2done.length === 1 && w2done[0].outcome === 'done' && (await pending(calm)).length === 0, 'and the honest answer settles it', w2done);
+
+    // A purchase whose receipt fails.
+    let boughtAt = null;
+    const badBuy = through(alice, ust, edit('action=purchase', (j) => { boughtAt = j.receipt.entry.index; j.receipt.authoritySignature = 'AAAA'; }));
+    const pb = await badBuy.prepareBuy(A, sgl.id, credential(100, alice), 100, '20');
+    const eb = await badBuy.buy(pb).catch((e) => e);
+    const kb = (await calm.rows()).pendingBuys;
+    line(eb.code === 'bad-receipt' && eb.unconfirmed === true && eb.requestId === pb.requestId && kb.length === 1 && kb[0].state === 'unconfirmed' && kb[0].requestId === pb.requestId && kb[0].reason.length > 0, 'a purchase the domain says it made, with a receipt that does not verify, is kept unconfirmed under its request', eb.code || eb);
+    const resumed = await calm.resumeBuy(pb.requestId);
+    line(resumed.status === 'done' && resumed.receipt.entry.index === boughtAt && (await calm.rows()).pendingBuys.length === 0, 'the same request asked again is answered with the entry already made, so it is delivered once', resumed.receipt && resumed.receipt.entry);
+    afterPropose = false;
+    const buyDown = through(alice, ust, flaky((url) => (url.includes('action=head') ? { status: 503, json: { ok: false } } : null)));
+    const pb2 = await buyDown.prepareBuy(A, sgl.id, credential(100, alice), 100, '20');
+    const eb2 = await buyDown.buy(pb2).catch((e) => e);
+    const kb2 = (await calm.rows()).pendingBuys;
+    line(eb2.status === 'waiting' && kb2.length === 1 && kb2[0].state !== 'unconfirmed', 'a purchase whose receipt cannot be checked yet waits under its request, not judged', eb2.status || eb2.code || eb2);
+    const resumed2 = await calm.resumeBuy(pb2.requestId);
+    line(resumed2.status === 'done' && (await calm.rows()).pendingBuys.length === 0, 'and finishes when the domain answers', resumed2.status);
+
+    // The list of waiting transfers is capped, but never at the cost of an unconfirmed one.
+    const capped = Object.assign(freshState(), { domains: JSON.parse(JSON.stringify(st.domains)) });
+    const stale = (i, state) => Object.assign({ domain: A, coinId: sgl.id, digest: String(i).padStart(64, '0'), to: bob.key, amount: '100', from: alice.key, symbol: 'SGL', decimals: 2, createdAt: 1000 + i }, state ? { state, reason: 'x', since: 1 } : {});
+    capped.cache = { pendingSends: [stale(1, 'unconfirmed')].concat(Array.from({ length: 25 }, (_, i) => stale(100 + i))) };
+    const wcap = Chain.create(envFor(alice, capped));
+    const lyingCap = through(alice, capped, onlyA(failing()));
+    await lyingCap.send(await lyingCap.prepareSend(A, sgl.id, bob.key, '1')).catch(() => null);
+    const kept = (await wcap.rows()).pendingSends;
+    line(kept.filter((p) => p.state === 'unconfirmed').length === 2 && kept.some((p) => p.digest === stale(1).digest) && kept.length === 22, 'an unconfirmed transfer is not pushed off the list by newer ones', kept.map((p) => p.state || 'waiting'));
 
     console.log('\n== the coin\'s genesis is pinned');
     const pinned = JSON.stringify((await honest.domains()).find((d) => d.domain === A));
