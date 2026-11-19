@@ -66,8 +66,10 @@ function request(array $ctx, array $buyer, int $quantity, int $price, array $ove
     global $ISSUER, $NOW;
     $credential = $over['credential'] ?? stand_in_credential($ISSUER, $buyer['key'], $quantity);
     $rid = $over['requestId'] ?? bin2hex(random_bytes(16));
+    $coinId = $over['coinId'] ?? $ctx['coin'];
+    try { $binding = $over['binding'] ?? ledger_binding($ctx['db'], $coinId); } catch (Throwable $e) { $binding = []; }
     return ['credential' => $credential, 'requestId' => $rid, 'buyer' => $buyer,
-        'intent' => stand_in_intent($buyer, $over['coinId'] ?? $ctx['coin'], $credential, $price, $rid, $over['recipient'] ?? null, $over['expiresAt'] ?? $NOW + 300)];
+        'intent' => stand_in_intent($buyer, $coinId, $credential, $price, $rid, $over['recipient'] ?? null, $over['expiresAt'] ?? $NOW + 300, $binding)];
 }
 function sell(array $ctx, array $request): array
 {
@@ -165,11 +167,31 @@ $forged = stand_in_credential($stranger, $buyer['key'], 100);
 $r = request($ctx, $buyer, 100, 20, ['credential' => $forged]);
 t(refuses(fn() => sell($ctx, $r), 'bad-purchase') && untouched($ctx, $r, $head), 'refused and untouched: a credential another issuer signed');
 $notMine = request($ctx, owner(), 100, 20);
-$notMine['intent'] = stand_in_intent($buyer, $ctx['coin'], $notMine['credential'], 20, $notMine['requestId']);
+$notMine['intent'] = stand_in_intent($buyer, $ctx['coin'], $notMine['credential'], 20, $notMine['requestId'], null, null, ledger_binding($ctx['db'], $ctx['coin']));
 t(refuses(fn() => sell($ctx, $notMine), 'bad-purchase') && untouched($ctx, $notMine, $head), 'refused and untouched: an intent signed by someone who does not own the credential');
 $tampered = request($ctx, $buyer, 100, 20);
 $tampered['intent']['payload']['price'] = 90;
 t(refuses(fn() => sell($ctx, $tampered), 'bad-purchase') && untouched($ctx, $tampered, $head), 'refused and untouched: an intent changed after it was signed');
+$bind = ledger_binding($ctx['db'], $ctx['coin']);
+$otherDomain = request($ctx, $buyer, 100, 20, ['binding' => ['authority' => 'other.example'] + $bind]);
+t(refuses(fn() => sell($ctx, $otherDomain), 'wrong-authority') && untouched($ctx, $otherDomain, $head), 'refused and untouched: an intent signed for another domain\'s coin of the same id');
+$otherGenesis = request($ctx, $buyer, 100, 20, ['binding' => ['genesis' => hash('sha256', 'another genesis')] + $bind]);
+t(refuses(fn() => sell($ctx, $otherGenesis), 'wrong-genesis') && untouched($ctx, $otherGenesis, $head), 'refused and untouched: an intent signed for another genesis of the same id');
+$noBinding = request($ctx, $buyer, 100, 20);
+$noBinding['intent']['payload'] = array_diff_key($noBinding['intent']['payload'], ['authority' => 1, 'genesis' => 1]);
+$noBinding['intent']['payload']['v'] = 1;
+$noBinding['intent']['signature'] = ledger_owner_sign($buyer['priv'], $noBinding['intent']['payload']);
+t(refuses(fn() => sell($ctx, $noBinding), 'bad-purchase') && untouched($ctx, $noBinding, $head), 'refused and untouched: a version 1 intent that names no domain or genesis');
+// An adapter that accepts the old shape does not let it through: the ledger checks the signed payload itself.
+$lenient = $ctx['gold'];
+$lenient['verify'] = function (array $intent, array $credential, array $policy, int $now) use ($ctx, $noBinding) {
+    $p = $intent['payload'];
+    return ['requestId' => $p['requestId'], 'coinId' => $p['coinId'], 'price' => $p['price'], 'recipient' => $p['recipient'], 'credentialId' => $p['credentialId'], 'quantity' => 100, 'expiresAt' => $now + 100];
+};
+t(refuses(fn() => purchase_verify($lenient, ledger_coin($ctx['db'], $ctx['coin']), $noBinding['intent'], $noBinding['credential'], $NOW, true), 'legacy-authorization'), 'refused: a version 1 intent even when the price adapter would accept it');
+$okReq = request($ctx, $buyer, 100, 20);
+$verified = purchase_verify($ctx['gold'], ledger_coin($ctx['db'], $ctx['coin']), $okReq['intent'], $okReq['credential'], $NOW, true);
+t($verified['coinId'] === $ctx['coin'] && $verified['price'] === 20, 'the same intent signed for this domain and genesis passes the check');
 $revoked = request($ctx, $buyer, 100, 20);
 $ctx['gold']['db']->prepare('INSERT INTO revoked(credential_id) VALUES(?)')->execute([$revoked['credential']['id']]);
 t(refuses(fn() => sell($ctx, $revoked), 'revoked-credential') && untouched($ctx, $revoked, $head), 'refused and untouched: a revoked credential');
@@ -322,7 +344,7 @@ function hand_made(array $m, array $b, array $over = []): array
     $request = request($m, $b, $over['quantity'] ?? 100, $price, ['requestId' => $rid] + ($over['request'] ?? []));
     $from = $over['from'] ?? $m['treasury'];
     $account = ledger_account_row(ndb('a.example'), $m['coin'], $from['key']);
-    $payload = ['type' => 'atlas.ledger.transfer', 'v' => 1, 'coinId' => $m['coin'], 'from' => $from['key'], 'to' => $b['key'], 'amount' => (string) $amount, 'baseSeq' => (int) $account['seq'],
+    $payload = ['type' => 'atlas.ledger.transfer', 'v' => 2, 'coinId' => $m['coin'], ...ledger_binding(ndb('a.example'), $m['coin']), 'from' => $from['key'], 'to' => $b['key'], 'amount' => (string) $amount, 'baseSeq' => (int) $account['seq'],
         'baseHead' => $head['hash'], 'nonce' => bin2hex(random_bytes(16)), 'issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 5), 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW + 200),
         'purchase' => ['requestId' => $rid, 'price' => $price]];
     $public = ['type' => 'transfer', 'coinId' => $m['coin'], 'index' => $head['index'] + 1, 'prevHash' => $head['hash'], 'executedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW), 'amount' => (string) $amount,

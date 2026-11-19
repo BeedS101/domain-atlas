@@ -131,14 +131,24 @@ function registerPolicy(n, coinId, policy) {
 }
 const op = async (n, action, body) => {
   if (action === 'open' && body && body.purchase !== undefined && body.purchase !== null) { registerPolicy(n, body.coinId, body.purchase); const { purchase, ...rest } = body; body = rest; }
-  return post(n, 'action=' + action, { adminToken: n.token, ...body });
+  const res = await post(n, 'action=' + action, { adminToken: n.token, ...body });
+  if (action === 'open' && res.json && res.json.ok) {
+    const c = (await get(n, 'action=coin&coin=' + body.coinId)).json;
+    if (c && c.ok) bound[body.coinId] = { authority: c.genesis.authority, genesis: c.genesisDigest };
+  }
+  return res;
 };
+// A signed purchase intent names the domain and genesis it is for; the tests build intents without waiting, so each opened coin's binding is kept here.
+const bound = {};
+const bindingOf = (coinId) => bound[coinId] || { authority: 'unknown.invalid', genesis: '0'.repeat(64) };
 const createCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: n.token, ...extra });
 const NOW = () => Math.floor(Date.now() / 1000);
 const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
 async function transfer(w, n, coinId, to, amount, over = {}) {
   const h = (await post(n, 'action=holdings', { key: w.key })).json.statement.coins.find((c) => c.coinId === coinId);
-  const payload = { type: 'atlas.ledger.transfer', v: 1, coinId, from: w.key, to, amount, baseSeq: h ? h.seq : 0, baseHead: h ? h.headHash : '0'.repeat(64), nonce: crypto.randomBytes(16).toString('hex'), issuedAt: iso(NOW() - 5), expiresAt: iso(NOW() + 200), ...over };
+  const c = (await get(n, 'action=coin&coin=' + coinId)).json;
+  const known = c && c.ok;
+  const payload = { type: 'atlas.ledger.transfer', v: 2, coinId, authority: known ? c.genesis.authority : '', genesis: known ? c.genesisDigest : '0'.repeat(64), from: w.key, to, amount, baseSeq: h ? h.seq : 0, baseHead: h ? h.headHash : (known ? c.head.hash : '0'.repeat(64)), nonce: crypto.randomBytes(16).toString('hex'), issuedAt: iso(NOW() - 5), expiresAt: iso(NOW() + 200), ...over };
   return { payload, signature: w.sign(payload) };
 }
 const units = async (n, w, coinId) => { const h = (await post(n, 'action=holdings', { key: w.key })).json.statement.coins.find((c) => c.coinId === coinId); return h ? h.units : '0'; };
@@ -156,7 +166,7 @@ function credential(quantity, w, id) {
   return { ...payload, signature: b64u(crypto.sign('sha256', Buffer.from(canon(payload)), issuer.privateKey)) };
 }
 function intent(w, coinId, cred, price, requestId, recipient) {
-  const payload = { type: 'atlas.ledger.purchase.intent', v: 1, coinId, credentialId: cred.id, price, recipient: recipient || w.key, requestId, expiresAt: iso(NOW() + 300) };
+  const payload = { type: 'atlas.ledger.purchase.intent', v: 2, ...bindingOf(coinId), coinId, credentialId: cred.id, price, recipient: recipient || w.key, requestId, expiresAt: iso(NOW() + 300) };
   return { payload, signature: w.sign(payload) };
 }
 async function buy(n, w, coinId, quantity, price, o = {}) {
@@ -215,6 +225,14 @@ const POLICY = { priceClass: 'atlas.element.gold', issuerKey, unitsPerPrice: 10,
     for (const [name, r, status, code] of cases) line(r.status === status && r.json.code === code, 'refused: ' + name, r.json);
     const other = await post(a, 'action=purchase', { coinId: sgl.id, intent: intent(carol, closed.id, credential(100, carol), 20, hex(16)), credential: credential(100, carol) });
     line(other.status === 400 && other.json.code === 'bad-purchase', 'refused: an intent that names another coin', other.json);
+    const signFor = (binding) => { const cred = credential(100, carol); const rid = hex(16); const i = intent(carol, sgl.id, cred, 20, rid); i.payload = { ...i.payload, ...binding }; i.signature = carol.sign(i.payload); return { intent: i, credential: cred }; };
+    const wrongDomain = await post(a, 'action=purchase', { coinId: sgl.id, ...signFor({ authority: B }) });
+    line(wrongDomain.status === 409 && wrongDomain.json.code === 'wrong-authority', 'refused: an intent signed for another domain that has a coin of the same id', wrongDomain.json);
+    const wrongGenesis = await post(a, 'action=purchase', { coinId: sgl.id, ...signFor({ genesis: bindingOf(closed.id).genesis }) });
+    line(wrongGenesis.status === 409 && wrongGenesis.json.code === 'wrong-genesis', 'refused: an intent signed for another genesis', wrongGenesis.json);
+    const old = signFor({}); delete old.intent.payload.authority; delete old.intent.payload.genesis; old.intent.payload.v = 1; old.intent.signature = carol.sign(old.intent.payload);
+    const legacy = await post(a, 'action=purchase', { coinId: sgl.id, ...old });
+    line(legacy.status === 400 && legacy.json.code === 'bad-purchase' && (await headOf(a, sgl.id)) === before, 'refused and untouched: an intent in the old shape that names no domain', legacy.json);
     const noPolicy = await buy(a, carol, closed.id, 100, 20);
     line(noPolicy.status === 409 && noPolicy.json.code === 'no-purchase-policy', 'a coin with no policy is not for sale', noPolicy.json);
     const badBody = await post(a, 'action=purchase', { coinId: sgl.id, credential: s1.cred });

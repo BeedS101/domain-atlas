@@ -125,14 +125,26 @@ function registerPolicy(n, coinId, policy) {
 }
 const op = async (n, action, body) => {
   if (action === 'open' && body && body.purchase !== undefined && body.purchase !== null) { registerPolicy(n, body.coinId, body.purchase); const { purchase, ...rest } = body; body = rest; }
-  return post(n, 'action=' + action, { adminToken: n.token, ...body });
+  const res = await post(n, 'action=' + action, { adminToken: n.token, ...body });
+  if (action === 'open' && res.json && res.json.ok) await remember(n, body.coinId);
+  return res;
 };
+// A signed purchase intent names the domain and genesis it is for, which the buyer's wallet reads from the coin. The tests build intents
+// without waiting, so the binding of each opened coin is kept here when it is opened.
+const bound = {};
+async function remember(n, coinId) {
+  const c = (await get(n, 'action=coin&coin=' + coinId)).json;
+  if (c && c.ok) bound[coinId] = { authority: c.genesis.authority, genesis: c.genesisDigest };
+}
+const bindingOf = (coinId) => bound[coinId] || { authority: 'unknown.invalid', genesis: '0'.repeat(64) };
 const createCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: n.token, ...extra });
 const NOW = () => Math.floor(Date.now() / 1000);
 const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
 async function transfer(w, n, coinId, to, amount, over = {}) {
   const h = (await post(n, 'action=holdings', { key: w.key })).json.statement.coins.find((c) => c.coinId === coinId);
-  const payload = { type: 'atlas.ledger.transfer', v: 1, coinId, from: w.key, to, amount, baseSeq: h ? h.seq : 0, baseHead: h ? h.headHash : '0'.repeat(64), nonce: crypto.randomBytes(16).toString('hex'), issuedAt: iso(NOW() - 5), expiresAt: iso(NOW() + 200), ...over };
+  const c = (await get(n, 'action=coin&coin=' + coinId)).json;
+  const known = c && c.ok;
+  const payload = { type: 'atlas.ledger.transfer', v: 2, coinId, authority: known ? c.genesis.authority : '', genesis: known ? c.genesisDigest : '0'.repeat(64), from: w.key, to, amount, baseSeq: h ? h.seq : 0, baseHead: h ? h.headHash : (known ? c.head.hash : '0'.repeat(64)), nonce: crypto.randomBytes(16).toString('hex'), issuedAt: iso(NOW() - 5), expiresAt: iso(NOW() + 200), ...over };
   return { payload, signature: w.sign(payload) };
 }
 const units = async (n, w, coinId) => { const h = (await post(n, 'action=holdings', { key: w.key })).json.statement.coins.find((c) => c.coinId === coinId); return h ? h.units : '0'; };
@@ -154,4 +166,4 @@ function cleanup() {
   for (const n of Object.values(nodes)) killGroup(n);
   fs.rmSync(work, { recursive: true, force: true });
 }
-module.exports = { A, B, C, D, nodes, issuer, issuerKey, POLICY, b64u, canon, sleep, wallet, start, stop, call, get, post, scan, op, createCoin, NOW, iso, transfer, units, headOf, level, levelOk, hex, credential, cleanup };
+module.exports = { bindingOf, remember, A, B, C, D, nodes, issuer, issuerKey, POLICY, b64u, canon, sleep, wallet, start, stop, call, get, post, scan, op, createCoin, NOW, iso, transfer, units, headOf, level, levelOk, hex, credential, cleanup };

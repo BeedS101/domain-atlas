@@ -29,6 +29,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const LEDGER = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const OTHER_LEDGER = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const LEDGER_DOMAIN = 'ledger.example';
+const GENESIS = 'd'.repeat(64);
 const canon = (v) => Array.isArray(v) ? '[' + v.map(canon).join(',') + ']' : (v && typeof v === 'object') ? '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}' : JSON.stringify(v);
 const PARTNER = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const PARTNER_DOMAIN = 'partner.example';
@@ -67,7 +68,7 @@ const mint = async (A, owner, cls, qty) => { const r = await A.post('/atlas/asse
 // A signed purchase intent as the ledger wallet makes it, with the issuer's proof label.
 function intentFor(owner, cred, o) {
   o = o || {};
-  const payload = { type: 'atlas.ledger.purchase.intent', v: 1, coinId: o.coinId || COIN, credentialId: cred.id, price: o.price === undefined ? 30 : o.price,
+  const payload = { type: 'atlas.ledger.purchase.intent', v: 2, authority: LEDGER_DOMAIN, genesis: GENESIS, coinId: o.coinId || COIN, credentialId: cred.id, price: o.price === undefined ? 30 : o.price,
     recipient: o.recipient || newOwner(), requestId: o.requestId || hex(16), expiresAt: o.expiresAt || iso(now() + 300) };
   return { payload, proof: proofFor(o.signer || cred.owner.publicKey, payload) };
 }
@@ -134,6 +135,14 @@ async function setup(be) {
     await bad('an intent for another credential is refused', g0, intentFor(owner, { ...g0, id: 'urn:other' }), 400, 'bad-intent');
     await bad('a price above the quantity is refused', g0, intentFor(owner, g0, { price: 101 }), 409, 'invalid-credential');
     await bad('a price of zero is refused', g0, intentFor(owner, g0, { price: 0 }), 400, 'bad-intent');
+    {
+      const old = intentFor(owner, g0); delete old.payload.authority; delete old.payload.genesis; old.payload.v = 1; old.proof = proofFor(g0.owner.publicKey, old.payload);
+      await bad('an intent in the old form that names no domain or genesis is refused', g0, old, 400, 'bad-intent');
+      const foreign = intentFor(owner, g0); foreign.payload.authority = 'not-served.example'; foreign.proof = proofFor(g0.owner.publicKey, foreign.payload);
+      await bad('an intent for a ledger domain this issuer does not serve is refused', g0, foreign, 400, 'bad-intent');
+      const noGenesis = intentFor(owner, g0); noGenesis.payload.genesis = 'abc'; noGenesis.proof = proofFor(g0.owner.publicKey, noGenesis.payload);
+      await bad('an intent whose genesis is not a digest is refused', g0, noGenesis, 400, 'bad-intent');
+    }
     await bad('an expired intent is refused', g0, intentFor(owner, g0, { expiresAt: iso(now() - 5) }), 400, 'bad-intent');
     await bad('an intent valid for hours is refused', g0, intentFor(owner, g0, { expiresAt: iso(now() + 86400) }), 400, 'bad-intent');
     await bad('a recipient that is not a ledger key is refused', g0, intentFor(owner, g0, { recipient: 'nope' }), 400, 'bad-intent');

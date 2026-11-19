@@ -156,8 +156,14 @@ function atlas_hold_intent_problem($payload, $credential, $requestId, $now) {
     if (!is_array($payload)) return 'the intent has no payload';
     $keys = array_keys($payload);
     sort($keys);
-    if ($keys !== ['coinId', 'credentialId', 'expiresAt', 'price', 'recipient', 'requestId', 'type', 'v']) return 'the intent has the wrong fields';
-    if ($payload['type'] !== 'atlas.ledger.purchase.intent' || $payload['v'] !== 1) return 'the intent is not a ledger purchase';
+    if ($keys !== ['authority', 'coinId', 'credentialId', 'expiresAt', 'genesis', 'price', 'recipient', 'requestId', 'type', 'v']) return 'the intent has the wrong fields';
+    if ($payload['type'] !== 'atlas.ledger.purchase.intent' || $payload['v'] !== 2) return 'the intent is not a current ledger purchase';
+    // A coin id alone does not name a coin: another domain can register the same id. The intent names the domain that issues the coin and the
+    // digest of its genesis, and when this issuer lists the ledger domains it trusts, only those can be named.
+    if (!is_string($payload['authority']) || !preg_match('/^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/D', $payload['authority'])) return 'the intent names no ledger domain';
+    if (!is_string($payload['genesis']) || !preg_match('/^[a-f0-9]{64}$/D', $payload['genesis'])) return 'the intent names no coin genesis';
+    $trusted = atlas_hold_config()['ledgerAuthorities'];
+    if ($trusted && !isset($trusted[$payload['authority']])) return 'the intent is for a ledger domain this issuer does not serve';
     if (!is_string($payload['coinId']) || !preg_match('/^[a-f0-9]{32}$/D', $payload['coinId'])) return 'the intent names no ledger coin';
     if ($payload['credentialId'] !== ($credential['id'] ?? null)) return 'the intent names another credential';
     if (!is_int($payload['price']) || $payload['price'] < 1 || $payload['price'] > 1000000000) return 'the price is not a whole number of Gold';

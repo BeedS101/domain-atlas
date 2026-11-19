@@ -25,7 +25,7 @@ const def = { decimals: 6, maxSupply: '1000000', initialSupply: '10000' };
 const market = async (n) => (await scan(n, 'action=market')).json;
 const find = (m, id) => m.coins.find((c) => c.coinId === id);
 function intent(w, coinId, cred, price, requestId) {
-  const payload = { type: 'atlas.ledger.purchase.intent', v: 1, coinId, credentialId: cred.id, price, recipient: w.key, requestId, expiresAt: iso(NOW() + 300) };
+  const payload = { type: 'atlas.ledger.purchase.intent', v: 2, ...S.bindingOf(coinId), coinId, credentialId: cred.id, price, recipient: w.key, requestId, expiresAt: iso(NOW() + 300) };
   return { payload, signature: w.sign(payload) };
 }
 async function buy(n, w, coinId, quantity, price, requestId) {

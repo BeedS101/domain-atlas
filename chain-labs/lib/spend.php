@@ -13,7 +13,8 @@ const SPEND_HOLDINGS_MAX_COINS = 50;
 // The digest that names a proposal: the canonical payload the owner signed.
 // Reasons that close a proposal for good, as opposed to failures that leave it pending for a retry.
 const SPEND_FINAL_REASONS = ['expired', 'stale', 'insufficient', 'replayed', 'bad-signature', 'bad-authorization', 'no-account', 'faucet-amount', 'faucet-limit',
-    'duplicate-purchase', 'purchase-key-limit', 'purchase-day-limit', 'purchase-too-small', 'bad-purchase', 'no-purchase-policy', 'revoked-credential'];
+    'duplicate-purchase', 'purchase-key-limit', 'purchase-day-limit', 'purchase-too-small', 'bad-purchase', 'no-purchase-policy', 'revoked-credential',
+    'legacy-authorization', 'wrong-authority', 'wrong-genesis', 'unknown-base'];
 
 function spend_digest(array $authorization): string
 {
@@ -245,6 +246,12 @@ function purchase_verify(?array $gold, array $coin, mixed $intent, mixed $creden
     $need = ['requestId', 'coinId', 'price', 'recipient', 'credentialId', 'quantity', 'expiresAt'];
     foreach ($need as $field) if (!array_key_exists($field, $v)) ledger_fail('bad-purchase', 'the price adapter answered without ' . $field);
     if ($v['coinId'] !== $coin['coin_id']) ledger_fail('bad-purchase', 'the intent is for another coin');
+    // The adapter has already checked the buyer's signature over this exact payload, so its fields are the buyer's own words. A coin id
+    // alone does not name a coin: another domain can register the same id, so the intent also names the authority and the genesis.
+    $signed = $intent['payload'] ?? null;
+    if (!is_array($signed) || ($signed['v'] ?? null) !== 2) ledger_fail('legacy-authorization', 'the intent does not name the domain and genesis it is for; sign it again');
+    if (($signed['authority'] ?? null) !== $coin['genesis']['authority']) ledger_fail('wrong-authority', 'the intent is for another domain');
+    if (($signed['genesis'] ?? null) !== $coin['genesis_digest']) ledger_fail('wrong-genesis', 'the intent is for another coin genesis');
     if (!is_string($v['requestId']) || !preg_match('/^[a-f0-9]{32,64}$/D', $v['requestId'])) ledger_fail('bad-purchase', 'the request id is malformed');
     if (!is_int($v['price']) || $v['price'] < (int) $policy['minPrice']) ledger_fail('purchase-too-small', 'the price is below ' . $policy['minPrice']);
     if (!is_int($v['quantity']) || $v['price'] > $v['quantity']) ledger_fail('bad-purchase', 'the credential holds less than the price');

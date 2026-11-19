@@ -215,6 +215,30 @@ const freshState = () => ({ domains: [], cache: {}, skew: 0 });
     const wrongCoin = rewrite((url, text) => { if (!url.includes('action=propose')) return text; const j = JSON.parse(text); if (j.receipt) j.receipt.entry.coinId = 'f'.repeat(32); return JSON.stringify(j); });
     line((await wrongCoin.prepareSend(A, sgl.id, bob.key, '0.5').then((p) => wrongCoin.send(p)).catch((e) => e)).code === 'bad-receipt', 'a receipt for another coin is not accepted');
 
+    // A signature names the domain that issues the coin and the digest of its genesis, read from the domain and checked before signing.
+    const sent = [];
+    const watching = Chain.create(envFor(alice, Object.assign(freshState(), { domains: JSON.parse(JSON.stringify(st.domains)) }), {
+      fetch: async (url, init) => { if (url.includes('action=propose')) sent.push(JSON.parse(init.body)); return envFor(alice, st).fetch(url, init); }
+    }));
+    const coinNow = (await get(nodes[A], 'action=coin&coin=' + sgl.id)).json;
+    const sw = await watching.prepareSend(A, sgl.id, bob.key, '0.25').then((p) => watching.send(p)).catch((e) => e);
+    const sp = sent[0] && sent[0].authorization && sent[0].authorization.payload;
+    line(sw.status === 'done' && sp && sp.v === 2 && sp.authority === A && sp.genesis === coinNow.genesisDigest && /^[a-f0-9]{64}$/.test(sp.baseHead), 'a signed transfer names the issuing domain, the genesis digest and the base head', sp);
+    const noteDigest = (g) => crypto.createHash('sha256').update(canon(g)).digest('hex');
+    const ownGenesis = rewrite((url, text) => { if (!/action=coin&/.test(url)) return text; const j = JSON.parse(text); j.genesis.symbol = 'EVL'; return JSON.stringify(j); });
+    const og = await ownGenesis.prepareSend(A, sgl.id, bob.key, '0.5').then((p) => ownGenesis.send(p)).catch((e) => e);
+    line(og.code === 'wrong-genesis', 'a genesis that does not match the digest the domain gives is not signed for', og.code);
+    const proposed = [];
+    const fa = Chain.create(envFor(alice, Object.assign(freshState(), { domains: JSON.parse(JSON.stringify(st.domains)) }), {
+      fetch: async (url, init) => {
+        if (url.includes('action=propose')) proposed.push(url);
+        const res = await envFor(alice, st).fetch(url, init); const text = await res.text();
+        return { status: res.status, text: async () => (/action=coin&/.test(url) ? (() => { const j = JSON.parse(text); j.genesis.authority = 'elsewhere.example'; j.genesis.roster = [{ domain: 'elsewhere.example', key: 'x' }]; j.genesisDigest = noteDigest(j.genesis); return JSON.stringify(j); })() : text) };
+      }
+    }));
+    const fr2 = await fa.prepareSend(A, sgl.id, bob.key, '0.5').then((p) => fa.send(p)).catch((e) => e);
+    line(fr2.code === 'wrong-authority' && proposed.length === 0, 'a coin whose authority and roster do not include the domain being asked is not signed for, and nothing is sent', fr2.code);
+
     console.log('\n== a transfer that waits for approvals');
     await stop(c);
     const p3 = await sendOf(A, allOf.id, bob.key, '5');
@@ -272,7 +296,7 @@ const freshState = () => ({ domains: [], cache: {}, skew: 0 });
     line(bought.status === 'done' && bought.receipt.entry.amount === '200' && bought.balance.balance.quantity === 80, 'buying delivers the coin and returns the Gold that is left', bought);
     line((await chain.rows()).pendingBuys.length === 0, 'and nothing is left waiting');
     const sgBal = (await chain.rows()).domains.find((d) => d.domain === A).coins.find((x) => x.symbol === 'SGL');
-    line(sgBal.units === '3750', 'the balance includes the purchase (5000, less 1250, 100, 50 and 50 sent, plus 200)', sgBal);
+    line(sgBal.units === '3725', 'the balance includes the purchase (5000, less 1250, 100, 50, 50 and 25 sent, plus 200)', sgBal);
     const wrongRequest = rewrite((url, text) => { if (!url.includes('action=purchase')) return text; const j = JSON.parse(text); j.requestId = 'a'.repeat(32); return JSON.stringify(j); });
     const wr = await wrongRequest.buy(await wrongRequest.prepareBuy(A, sgl.id, credential(100, alice), 100, '5')).catch((e) => e);
     line(wr.code === 'bad-receipt', 'a purchase result for another request is not accepted', wr.message);

@@ -35,7 +35,7 @@ const def = { decimals: 6, maxSupply: '1000000', initialSupply: '10000' };
     await op(a, 'grant', { coinId: goph.id, to: w.key, amount: '12500000' });
     await op(a, 'grant', { coinId: sell.id, to: w.key, amount: '3000000' });
     const cred = credential(100, w), rid = hex(16);
-    const payload = { type: 'atlas.ledger.purchase.intent', v: 1, coinId: sell.id, credentialId: cred.id, price: 20, recipient: w.key, requestId: rid, expiresAt: iso(NOW() + 300) };
+    const payload = { type: 'atlas.ledger.purchase.intent', v: 2, ...S.bindingOf(sell.id), coinId: sell.id, credentialId: cred.id, price: 20, recipient: w.key, requestId: rid, expiresAt: iso(NOW() + 300) };
     const sale = await post(a, 'action=purchase', { coinId: sell.id, intent: { payload, signature: w.sign(payload) }, credential: cred });
     line(sale.status === 201, 'setup: coins are open, one sale has been made', sale.json);
 

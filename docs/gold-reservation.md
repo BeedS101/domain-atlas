@@ -41,6 +41,12 @@ owner key, price, receiving ledger key, ledger coin id and request id. `finalize
 exactly that price of exactly that credential, returns the rest to the owner and burns the price. The operator token only
 says which caller may ask; it never stands in for the owner.
 
+The intent is version 2 and also names the ledger domain that issues the coin (`authority`) and the digest of the coin's genesis
+(`genesis`), because a coin id alone does not identify a coin: another domain can register the same id. `reserve` refuses a
+version 1 intent, an `authority` that is not a domain name, a `genesis` that is not a 64-character digest and, when
+`ledgerAuthorities` is set, an `authority` that is not listed there. The ledger domain checks the same two fields against its own
+coin before it sells.
+
 ### Enforcement
 
 * `atlas_spend_lock` (every spend path takes it) refuses a held credential after taking the stripe lock.

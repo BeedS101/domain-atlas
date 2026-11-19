@@ -90,7 +90,7 @@ function auth(string $at, array $c, array $from, string $to, string $amount, arr
 {
     global $NOW;
     $row = ledger_account_row(ndb($at), $c['coin'], $from['key']);
-    $payload = array_merge(['type' => 'atlas.ledger.transfer', 'v' => 1, 'coinId' => $c['coin'], 'from' => $from['key'], 'to' => $to, 'amount' => $amount, 'baseSeq' => $row ? (int) $row['seq'] : 0,
+    $payload = array_merge(['type' => 'atlas.ledger.transfer', 'v' => 2, 'coinId' => $c['coin'], ...ledger_binding(ndb($at), $c['coin']), 'from' => $from['key'], 'to' => $to, 'amount' => $amount, 'baseSeq' => $row ? (int) $row['seq'] : 0,
         'baseHead' => ledger_head(ndb($at), $c['coin'])['hash'], 'nonce' => bin2hex(random_bytes(16)), 'issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 10), 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW + 300)], $over);
     return ['payload' => $payload, 'signature' => ledger_owner_sign($from['priv'], $payload)];
 }

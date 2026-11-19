@@ -118,7 +118,9 @@ const NOW = () => Math.floor(Date.now() / 1000);
 const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
 async function transfer(w, n, coinId, to, amount, over = {}) {
   const h = (await post(n, 'action=holdings', { key: w.key })).json.statement.coins.find((c) => c.coinId === coinId);
-  const payload = { type: 'atlas.ledger.transfer', v: 1, coinId, from: w.key, to, amount, baseSeq: h ? h.seq : 0, baseHead: h ? h.headHash : '0'.repeat(64), nonce: crypto.randomBytes(16).toString('hex'), issuedAt: iso(NOW() - 5), expiresAt: iso(NOW() + 200), ...over };
+  const c = (await get(n, 'action=coin&coin=' + coinId)).json;
+  const known = c && c.ok;
+  const payload = { type: 'atlas.ledger.transfer', v: 2, coinId, authority: known ? c.genesis.authority : '', genesis: known ? c.genesisDigest : '0'.repeat(64), from: w.key, to, amount, baseSeq: h ? h.seq : 0, baseHead: h ? h.headHash : (known ? c.head.hash : '0'.repeat(64)), nonce: crypto.randomBytes(16).toString('hex'), issuedAt: iso(NOW() - 5), expiresAt: iso(NOW() + 200), ...over };
   return { payload, signature: w.sign(payload) };
 }
 const units = async (n, w, coinId) => { const h = (await post(n, 'action=holdings', { key: w.key })).json.statement.coins.find((c) => c.coinId === coinId); return h ? h.units : '0'; };

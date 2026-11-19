@@ -167,8 +167,8 @@ function gold_issuer_adapter(array $config): array
             if (!is_array($payload)) return 'the intent has no payload';
             $fields = array_keys($payload);
             sort($fields);
-            if ($fields !== ['coinId', 'credentialId', 'expiresAt', 'price', 'recipient', 'requestId', 'type', 'v']) return 'the intent has the wrong fields';
-            if ($payload['type'] !== 'atlas.ledger.purchase.intent' || $payload['v'] !== 1) return 'the intent is not a purchase';
+            if ($fields !== ['authority', 'coinId', 'credentialId', 'expiresAt', 'genesis', 'price', 'recipient', 'requestId', 'type', 'v']) return 'the intent has the wrong fields';
+            if ($payload['type'] !== 'atlas.ledger.purchase.intent' || $payload['v'] !== 2) return 'the intent is not a current purchase intent';
             if (!ledger_owner_verify(ledger_canonical($payload), $ownerKey, $intent['signature'] ?? null)) return 'the intent is not signed by the credential\'s owner';
             if ($payload['credentialId'] !== $credential['id']) return 'the intent names another credential';
             if (!is_int($payload['price'])) return 'the price is not a whole number';

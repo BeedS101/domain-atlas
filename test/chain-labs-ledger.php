@@ -100,7 +100,7 @@ function authorization(array $w, array $from, string $to, string $amount, ?int $
 {
     global $NOW;
     if ($baseSeq === null) { $row = ledger_account_row($w['db'], $w['coin'], $from['key']); $baseSeq = $row ? (int) $row['seq'] : 0; }
-    $payload = array_merge(['type' => 'atlas.ledger.transfer', 'v' => 1, 'coinId' => $w['coin'], 'from' => $from['key'], 'to' => $to, 'amount' => $amount, 'baseSeq' => $baseSeq,
+    $payload = array_merge(['type' => 'atlas.ledger.transfer', 'v' => 2, 'coinId' => $w['coin'], ...ledger_binding($w['db'], $w['coin']), 'from' => $from['key'], 'to' => $to, 'amount' => $amount, 'baseSeq' => $baseSeq,
         'baseHead' => ledger_head($w['db'], $w['coin'])['hash'], 'nonce' => bin2hex(random_bytes(16)), 'issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 10),
         'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW + 300)], $over);
     return ['payload' => $payload, 'signature' => owner_sign($from, $payload)];

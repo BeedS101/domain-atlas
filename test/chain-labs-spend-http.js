@@ -67,8 +67,12 @@ const op = (action, body) => post('action=' + action, { adminToken: TOKEN, ...bo
 const createCoin = (symbol, extra = {}) => call('coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: TOKEN, ...extra });
 const NOW = () => Math.floor(Date.now() / 1000);
 const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
-const transfer = (w, coinId, to, amount, over = {}) => {
-  const payload = { type: 'atlas.ledger.transfer', v: 1, coinId, from: w.key, to, amount, baseSeq: 0, baseHead: '0'.repeat(64), nonce: crypto.randomBytes(16).toString('hex'), issuedAt: iso(NOW() - 5), expiresAt: iso(NOW() + 120), ...over };
+// A transfer in the bound form: the coin's authority and genesis digest, and the head the log has now (which is a real head
+// of the coin, not older than the sender's last transfer). A coin the domain does not know is signed for with placeholders.
+const transfer = async (w, coinId, to, amount, over = {}) => {
+  const c = (await get('action=coin&coin=' + coinId)).json;
+  const known = c && c.ok;
+  const payload = { type: 'atlas.ledger.transfer', v: 2, coinId, authority: known ? c.genesis.authority : A, genesis: known ? c.genesisDigest : '0'.repeat(64), from: w.key, to, amount, baseSeq: 0, baseHead: known ? c.head.hash : '0'.repeat(64), nonce: crypto.randomBytes(16).toString('hex'), issuedAt: iso(NOW() - 5), expiresAt: iso(NOW() + 120), ...over };
   return { payload, signature: w.sign(payload) };
 };
 const verifySig = (data, sig) => crypto.verify('sha256', Buffer.from(data), domainPublic, Buffer.from(sig, 'base64url'));
@@ -128,7 +132,7 @@ const statementOk = (a, key) => a.statement.domain === A && a.statement.key === 
     line(gl.status === 400 && gl.json.code === 'faucet-amount', 'the faucet policy limits a grant', gl.json);
 
     console.log('\n== spending');
-    const t1 = transfer(alice, pub.id, bob.key, '1200');
+    const t1 = await transfer(alice, pub.id, bob.key, '1200');
     const r1 = await post('action=propose', { authorization: t1 });
     line(r1.status === 201 && receiptOk(r1.json.receipt) && r1.json.receipt.entry.index === 2 && r1.json.receipt.entry.amount === '1200', 'an owner-signed transfer executes and returns a receipt a wallet verifies', r1.json);
     line(r1.json.receipt.entry.prevHash === g0.json.receipt.hash, 'the receipt extends the previous one');
@@ -140,30 +144,30 @@ const statementOk = (a, key) => a.statement.domain === A && a.statement.key === 
     const ah = await post('action=holdings', { key: alice.key });
     line(ah.json.statement.coins.length === 1 && ah.json.statement.coins[0].units === '48800' && ah.json.statement.coins[0].seq === 1 && ah.json.statement.coins[0].headIndex === 2, "the sender's balance and sequence number moved", ah.json);
     const bad = {
-      'a stale sequence number': [transfer(alice, pub.id, bob.key, '1', { baseSeq: 0 }), 409, 'stale'],
-      'more than the balance': [transfer(alice, pub.id, bob.key, '999999', { baseSeq: 1 }), 409, 'insufficient'],
-      'a zero amount': [transfer(alice, pub.id, bob.key, '0', { baseSeq: 1 }), 400, 'bad-amount'],
-      'a transfer to oneself': [transfer(alice, pub.id, alice.key, '1', { baseSeq: 1 }), 400, 'bad-authorization'],
-      'an expired proposal': [transfer(alice, pub.id, bob.key, '1', { baseSeq: 1, issuedAt: iso(NOW() - 100), expiresAt: iso(NOW() - 10) }), 409, 'expired'],
-      'a sender with no account': [transfer(carol, pub.id, bob.key, '1'), 400, 'no-account'],
+      'a stale sequence number': [await transfer(alice, pub.id, bob.key, '1', { baseSeq: 0 }), 409, 'stale'],
+      'more than the balance': [await transfer(alice, pub.id, bob.key, '999999', { baseSeq: 1 }), 409, 'insufficient'],
+      'a zero amount': [await transfer(alice, pub.id, bob.key, '0', { baseSeq: 1 }), 400, 'bad-amount'],
+      'a transfer to oneself': [await transfer(alice, pub.id, alice.key, '1', { baseSeq: 1 }), 400, 'bad-authorization'],
+      'an expired proposal': [await transfer(alice, pub.id, bob.key, '1', { baseSeq: 1, issuedAt: iso(NOW() - 100), expiresAt: iso(NOW() - 10) }), 409, 'expired'],
+      'a sender with no account': [await transfer(carol, pub.id, bob.key, '1'), 400, 'no-account'],
     };
     for (const [name, [auth, status, code]] of Object.entries(bad)) {
       const r = await post('action=propose', { authorization: auth });
       line(r.status === status && r.json.code === code, 'refused: ' + name, r.json);
     }
-    const forged = transfer(alice, pub.id, bob.key, '10', { baseSeq: 1 });
+    const forged = await transfer(alice, pub.id, bob.key, '10', { baseSeq: 1 });
     forged.payload.amount = '9000';
     line((await post('action=propose', { authorization: forged })).status === 401, 'refused: an amount changed after signing');
-    const stolen = transfer(bob, pub.id, carol.key, '10');
+    const stolen = await transfer(bob, pub.id, carol.key, '10');
     stolen.payload.from = alice.key;
     line((await post('action=propose', { authorization: stolen })).status === 401, "refused: a spend signed by someone else's key");
-    const nonceReuse = transfer(alice, pub.id, carol.key, '5', { baseSeq: 1, nonce: t1.payload.nonce });
+    const nonceReuse = await transfer(alice, pub.id, carol.key, '5', { baseSeq: 1, nonce: t1.payload.nonce });
     line((await post('action=propose', { authorization: nonceReuse })).json.code === 'replayed', 'refused: a nonce that was already used');
-    line((await post('action=propose', { authorization: transfer(alice, '1'.repeat(32), bob.key, '1') })).status === 404, 'refused: a coin that does not exist');
+    line((await post('action=propose', { authorization: await transfer(alice, '1'.repeat(32), bob.key, '1') })).status === 404, 'refused: a coin that does not exist');
     line((await post('action=propose', { authorization: { payload: { coinId: 5 } } })).status === 400 && (await post('action=propose', '{not json')).status === 400 && (await post('action=propose', {})).status === 400, 'refused: malformed requests');
     line((await post('action=propose', 'x'.repeat(9000))).status === 413, 'refused: a request that is too large');
     line((await get('action=propose')).status === 404 && (await call('spend34', 'POST', 'action=coin', {})).status === 404, 'a transfer cannot be sent with GET, and reads cannot be sent with POST');
-    const sent = transfer(alice, pub.id, carol.key, '300', { baseSeq: 1 });
+    const sent = await transfer(alice, pub.id, carol.key, '300', { baseSeq: 1 });
     const r2 = await post('action=propose', { authorization: sent });
     line(r2.status === 201 && r2.json.receipt.entry.index === 3 && r2.json.receipt.entry.prevHash === r1.json.receipt.hash, 'a second transfer from the same account follows the first');
     const pr = await get('action=proposal&coin=' + pub.id + '&digest=' + crypto.createHash('sha256').update(canon(sent.payload)).digest('hex'));
@@ -190,7 +194,7 @@ const statementOk = (a, key) => a.statement.domain === A && a.statement.key === 
     line((await post('action=holdings', { key: 'abc' })).status === 400 && (await post('action=holdings', { key: alice.key, request: 'x' })).status === 400, 'a bad key or request is refused');
 
     console.log('\n== a private coin in public');
-    const s1 = await post('action=propose', { authorization: transfer(alice, sec.id, bob.key, '700') });
+    const s1 = await post('action=propose', { authorization: await transfer(alice, sec.id, bob.key, '700') });
     line(s1.status === 201 && receiptOk(s1.json.receipt), 'a transfer on the private coin executes');
     const reads = [await get('action=coins'), await get('action=coin&coin=' + sec.id)];
     for (let i = 0; i <= 2; i++) reads.push(await get('action=receipt&coin=' + sec.id + '&index=' + i));

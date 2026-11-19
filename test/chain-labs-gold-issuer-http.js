@@ -57,7 +57,7 @@ const crashed = (r) => r.status === 0 || (r.status === 200 && r.json === null);
   const a = nodes[A], b = nodes[B];
   const POLICY = { priceClass: GOLD, issuerKey, unitsPerPrice: 10, minPrice: 5, perKeyUnits: '50000', perDayUnits: '80000' };
   const intent = (w, coinId, cred, price, requestId, recipient, over) => {
-    const payload = { type: 'atlas.ledger.purchase.intent', v: 1, coinId, credentialId: cred.id, price, recipient: recipient || w.key, requestId, expiresAt: iso(NOW() + 300), ...(over || {}) };
+    const payload = { type: 'atlas.ledger.purchase.intent', v: 2, ...S.bindingOf(coinId), coinId, credentialId: cred.id, price, recipient: recipient || w.key, requestId, expiresAt: iso(NOW() + 300), ...(over || {}) };
     return { payload, signature: w.sign(payload) };
   };
   const buy = async (n, w, coinId, cred, price, o) => {

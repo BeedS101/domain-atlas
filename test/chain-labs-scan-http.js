@@ -69,7 +69,7 @@ const dbBytes = (n) => ['', '-wal', '-shm'].map((e) => { try { return sha(fs.rea
 const sql = (n, text, params = []) => execFileSync('php', ['-r', "$d=new PDO('sqlite:" + path.join(n.priv, 'chain34.sqlite') + "');$s=$d->prepare($argv[1]);$s->execute(array_slice($argv,2));echo json_encode($s->columnCount()?$s->fetchAll(PDO::FETCH_ASSOC):[]);", '--', text, ...params], { encoding: 'utf8' });
 
 function intent(w, coinId, cred, price, requestId) {
-  const payload = { type: 'atlas.ledger.purchase.intent', v: 1, coinId, credentialId: cred.id, price, recipient: w.key, requestId, expiresAt: iso(NOW() + 300) };
+  const payload = { type: 'atlas.ledger.purchase.intent', v: 2, ...S.bindingOf(coinId), coinId, credentialId: cred.id, price, recipient: w.key, requestId, expiresAt: iso(NOW() + 300) };
   return { payload, signature: w.sign(payload) };
 }
 async function buy(n, w, coinId, quantity, price) {

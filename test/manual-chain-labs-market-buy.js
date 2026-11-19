@@ -188,7 +188,7 @@ const def = { decimals: 6, maxSupply: '1000000', initialSupply: '100000' };
     const after = await ledger.evaluate(() => AtlasWallet.inspectChainLabsGold());
     check('the wallet now holds the issuer\'s remainder of 9 Gold in its place', after.usable.length === 1 && after.usable[0].quantity === 9 && after.usable[0].credential.supersedes === gold.id && after.excluded.length === 0, after);
     const remainder = after.usable[0].credential;
-    const second = await S.post(a, 'action=purchase', { coinId: aeth.id, intent: { payload: { type: 'atlas.ledger.purchase.intent', v: 1, coinId: aeth.id, credentialId: remainder.id, price: 1, recipient: w.pub, requestId: S.hex(16), expiresAt: S.iso(S.NOW() + 300) }, signature: 'x'.repeat(86) }, credential: remainder });
+    const second = await S.post(a, 'action=purchase', { coinId: aeth.id, intent: { payload: { type: 'atlas.ledger.purchase.intent', v: 2, ...S.bindingOf(aeth.id), coinId: aeth.id, credentialId: remainder.id, price: 1, recipient: w.pub, requestId: S.hex(16), expiresAt: S.iso(S.NOW() + 300) }, signature: 'x'.repeat(86) }, credential: remainder });
     check('the authority still refuses an intent that was not signed by the owner', second.status >= 400 && (await owned()) === '10000000', second.json);
 
     console.log('--- a sale that waits for the other domain ---');

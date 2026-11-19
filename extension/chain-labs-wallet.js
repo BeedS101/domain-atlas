@@ -222,7 +222,11 @@
     'unknown-coin': 'The domain does not know this coin.',
     busy: 'The domain is busy. Try again in a moment.',
     'peer-down': 'A partner domain did not answer, so the transfer could not be approved.',
-    'not-enough-approvals': 'The partner domains did not approve the transfer.'
+    'not-enough-approvals': 'The partner domains did not approve the transfer.',
+    'legacy-authorization': 'This domain no longer takes transfers in the old form. Update the wallet and try again.',
+    'wrong-authority': 'The domain says this transfer was signed for a different domain. Nothing was sent.',
+    'wrong-genesis': 'The domain says this transfer was signed for a different version of the coin. Nothing was sent.',
+    'unknown-base': 'The domain does not recognise the balance this transfer was made from. Refresh and try again.'
   };
 
   const OFFER_STATE_TTL_MS = 30000;
@@ -240,7 +244,10 @@
     'purchases-off': 'This domain does not take Gold purchases yet.',
     'not-authority': 'Buy from the coin\'s authority domain.',
     'not-active': 'This coin is not active.',
-    'unknown-coin': 'The domain does not know this coin.'
+    'unknown-coin': 'The domain does not know this coin.',
+    'legacy-authorization': 'This domain no longer takes purchases in the old form. Update the wallet and try again.',
+    'wrong-authority': 'The domain says this purchase was signed for a different domain. Nothing was bought.',
+    'wrong-genesis': 'The domain says this purchase was signed for a different version of the coin. Nothing was bought.'
   };
 
   function create(env) {
@@ -437,11 +444,28 @@
       };
     }
 
+    // What a signature must name besides the coin id, which another domain can reuse: the domain that issues the coin and the digest of its
+    // genesis. Both are read from the coin's genesis on the domain the wallet is asking, and the digest is worked out here, never taken
+    // on the domain's word. A domain that is neither the coin's authority nor on its roster has no business taking the signature.
+    async function coinBinding(record, coinId) {
+      const r = await request(record.domain, 'GET', 'action=coin&coin=' + coinId);
+      if (r.status === 0) throw Object.assign(new Error(PROBLEMS.network), { code: 'network' });
+      const g = r.json && r.json.ok ? r.json.genesis : null;
+      if (!isObject(g) || g.coinId !== coinId || typeof g.authority !== 'string' || !g.authority) throw Object.assign(new Error(SEND_PROBLEMS['unknown-coin']), { code: 'unknown-coin' });
+      let digest;
+      try { digest = toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical(g))))); } catch (err) { digest = ''; }
+      if (!HASH_RE.test(digest) || digest !== r.json.genesisDigest) throw Object.assign(new Error('The domain\'s description of this coin does not match its digest, so nothing was signed.'), { code: 'wrong-genesis' });
+      const roster = Array.isArray(g.roster) ? g.roster.map((m) => (isObject(m) ? m.domain : null)) : [];
+      if (g.authority !== record.domain && !roster.includes(record.domain)) throw Object.assign(new Error(SEND_PROBLEMS['wrong-authority']), { code: 'wrong-authority' });
+      return { authority: g.authority, genesis: digest };
+    }
+
     async function signTransfer(record, prepared) {
       const { coin, key } = await freshCoin(record, prepared.coinId);
+      const binding = await coinBinding(record, prepared.coinId);
       if (BigInt(prepared.amount) > BigInt(coin.units)) throw Object.assign(new Error(SEND_PROBLEMS.insufficient), { code: 'insufficient' });
       const t = nowMs();
-      const payload = { type: 'atlas.ledger.transfer', v: 1, coinId: prepared.coinId, from: key, to: prepared.to, amount: prepared.amount, baseSeq: coin.seq, baseHead: coin.headHash, nonce: randomHex(16), issuedAt: iso(t - 5000), expiresAt: iso(t + TRANSFER_WINDOW_S * 1000) };
+      const payload = { type: 'atlas.ledger.transfer', v: 2, coinId: prepared.coinId, authority: binding.authority, genesis: binding.genesis, from: key, to: prepared.to, amount: prepared.amount, baseSeq: coin.seq, baseHead: coin.headHash, nonce: randomHex(16), issuedAt: iso(t - 5000), expiresAt: iso(t + TRANSFER_WINDOW_S * 1000) };
       const envelope = await env.sign(payload);
       if (!envelope || envelope.publicKey !== key || typeof envelope.signature !== 'string') throw Object.assign(new Error(PROBLEMS['proof-unsupported']), { code: 'proof-unsupported' });
       return { payload, signature: envelope.signature };
@@ -547,8 +571,8 @@
       };
     }
 
-    async function intentFor(prepared) {
-      const payload = { type: 'atlas.ledger.purchase.intent', v: 1, coinId: prepared.coinId, credentialId: credentialId(prepared.credential), price: prepared.price, recipient: prepared.recipient, requestId: prepared.requestId, expiresAt: iso(nowMs() + INTENT_WINDOW_S * 1000) };
+    async function intentFor(prepared, binding) {
+      const payload = { type: 'atlas.ledger.purchase.intent', v: 2, authority: binding.authority, genesis: binding.genesis, coinId: prepared.coinId, credentialId: credentialId(prepared.credential), price: prepared.price, recipient: prepared.recipient, requestId: prepared.requestId, expiresAt: iso(nowMs() + INTENT_WINDOW_S * 1000) };
       const envelope = await env.sign(payload);
       if (!envelope || envelope.publicKey !== prepared.from || typeof envelope.signature !== 'string') throw Object.assign(new Error(PROBLEMS['proof-unsupported']), { code: 'proof-unsupported' });
       return { payload, signature: envelope.signature };
@@ -558,7 +582,7 @@
     // signature and expiry, since an intent expires) is the same purchase and cannot be delivered twice.
     async function buy(prepared) {
       const record = await recordFor(prepared.domain);
-      const intent = await intentFor(prepared);
+      const intent = await intentFor(prepared, await coinBinding(record, prepared.coinId));
       await mutateCache((c) => {
         if (c.pendingBuys.some((p) => p.requestId === prepared.requestId)) return;
         c.pendingBuys = c.pendingBuys.concat([{ domain: record.domain, coinId: prepared.coinId, requestId: prepared.requestId, credential: prepared.credential, price: prepared.price, recipient: prepared.recipient, from: prepared.from, symbol: prepared.symbol, decimals: prepared.decimals, private: prepared.private, units: prepared.units, createdAt: nowMs() }]).slice(-MAX_PENDING);

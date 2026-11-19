@@ -48,7 +48,7 @@ const GOOD = { decimals: 2, maxSupply: '100000', initialSupply: '10000' };
   const revoked = () => (IA.revocations() || []).map((r) => r.id);
   const mint = async (w, qty) => { const r = await IA.post('/atlas/asset/issue', { ownerPublicKey: w.key, assetClass: GOLD, quantity: qty }); if (r.status !== 200) throw new Error('mint ' + r.status); return r.body; };
   const intent = (w, coinId, cred, price, requestId) => {
-    const payload = { type: 'atlas.ledger.purchase.intent', v: 1, coinId, credentialId: cred.id, price, recipient: w.key, requestId, expiresAt: iso(NOW() + 300) };
+    const payload = { type: 'atlas.ledger.purchase.intent', v: 2, ...S.bindingOf(coinId), coinId, credentialId: cred.id, price, recipient: w.key, requestId, expiresAt: iso(NOW() + 300) };
     return { payload, signature: w.sign(payload) };
   };
   const buy = async (w, coinId, cred, price) => { const requestId = hex(16); return post(a, 'action=purchase', { coinId, intent: intent(w, coinId, cred, price, requestId), credential: cred }); };

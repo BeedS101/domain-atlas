@@ -58,7 +58,7 @@ function auth(PDO $db, array $c, array $from, string $to, string $amount, array 
 {
     global $NOW;
     $row = ledger_account_row($db, $c['coin'], $from['key']);
-    $payload = array_merge(['type' => 'atlas.ledger.transfer', 'v' => 1, 'coinId' => $c['coin'], 'from' => $from['key'], 'to' => $to, 'amount' => $amount, 'baseSeq' => $row ? (int) $row['seq'] : 0,
+    $payload = array_merge(['type' => 'atlas.ledger.transfer', 'v' => 2, 'coinId' => $c['coin'], ...ledger_binding($db, $c['coin']), 'from' => $from['key'], 'to' => $to, 'amount' => $amount, 'baseSeq' => $row ? (int) $row['seq'] : 0,
         'baseHead' => ledger_head($db, $c['coin'])['hash'], 'nonce' => bin2hex(random_bytes(16)), 'issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 10), 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW + 300)], $over);
     return ['payload' => $payload, 'signature' => ledger_owner_sign($from['priv'], $payload)];
 }

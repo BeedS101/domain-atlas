@@ -122,13 +122,28 @@ fields below are the design; exact encodings are fixed in the build stage.
 
 | Message | Signed by | Fields |
 | --- | --- | --- |
-| Transfer proposal | Owner | `type` (`atlas.ledger.transfer`), `v`, `network`, `coin`, `coinId`, `from`, `to`, `amount`, `baseSeq`, `baseHead`, `nonce`, `issuedAt`, `expiresAt` |
+| Transfer proposal | Owner | `type` (`atlas.ledger.transfer`), `v` (2), `coinId`, `authority`, `genesis`, `from`, `to`, `amount`, `baseSeq`, `baseHead`, `nonce`, `issuedAt`, `expiresAt` |
 | Approval | Each domain | `type` (`atlas.ledger.transfer.approval`), `v`, `digest` (of the proposal), `approver`, `decision`, `approvedAt` |
 | Receipt (log entry) | Authority | `index`, `transfer`, `ownerAuthorization`, `approvals`, `prevHash`, `hash`, `executedAt` |
 | Head attestation | Either domain | `coinId`, `index`, `hash`, `issuedAt`, nonce-bound to the requester |
 
-`baseSeq` is the sender's `seq` when the owner signed; `baseHead` is the log head hash. A proposal is valid only while
-the sender's `seq` equals `baseSeq`, which is what makes a stale or replayed proposal fail. The wallet signs the
+`baseSeq` is the sender's `seq` when the owner signed; `baseHead` is the hash of a log entry the owner saw. A proposal is valid only while
+the sender's `seq` equals `baseSeq`, which is what makes a stale or replayed proposal fail. `baseHead` must be an entry of this coin's own
+log, at or after the sender's last send; it need not be the newest, so a busy coin does not make every proposal stale.
+
+A coin id is random but not unique across domains: another domain can register a coin with the same id. A version 2 proposal
+therefore also signs `authority` (the domain that issues the coin) and `genesis` (the digest of the coin's genesis, which
+fixes the roster, treasury and terms). A domain refuses a proposal whose `authority` or `genesis` is not its own coin's
+(`wrong-authority`, `wrong-genesis`), so a signature made for one domain's coin cannot be replayed against another's ledger.
+A version 1 proposal, which names neither, is refused for new entries (`legacy-authorization`). The same binding applies to
+the buyer's purchase intent (section 10) and to the issuer's own grant authorizations.
+
+Entries that were authorized in version 1 before this rule stay in the log and stay valid: a mirror or catch-up accepts a
+version 1 authorization only as history, while no version 2 entry precedes it in that coin's log, and `ledger_check` flags a
+version 1 entry that follows a version 2 one. Existing coins, balances and signed genesis data do not change; only the wallet's
+newly signed requests do. The wallet reads the coin's genesis from the domain it asks, computes the genesis digest itself and
+refuses to sign when the digest does not match or the domain is neither the coin's authority nor on its roster. An older wallet
+that still signs version 1 gets `legacy-authorization` and must be updated; deploy the domains first and then the wallet. The wallet signs the
 proposal through the existing signing bridge; the page's manifest must list the signing purpose, and the wallet asks
 the owner to confirm the request before it signs.
 
@@ -290,7 +305,8 @@ result. A ledger coin is a new kind of purchasable item on the same endpoint, pr
 ### 10.1 Flow
 
 1. The coin's catalog entry declares its price class (`atlas.element.gold`) and a price per unit, fixed in the genesis.
-2. The buyer signs a purchase intent naming the Gold credential, the coin, the quantity, the recipient ledger key
+2. The buyer signs a purchase intent naming the Gold credential, the coin (with its issuing domain and genesis digest, so the
+   intent cannot be spent against another domain's coin of the same id; a version 1 intent is refused), the quantity, the recipient ledger key
    (the buyer's own by default) and a request id.
 3. The domain takes the spend locks on the Gold credential and a lease on the request id, checks that the credential is
    its own, valid, unspent and large enough, and computes the price from the genesis rate.
@@ -500,7 +516,7 @@ Each stage ships separately, with tests, on its own branch.
      accounts by reference, the coin and amount). A transfer through a partner is pointed at the authority. A transfer waiting
      for approvals is kept and checked later.
    - Buy with Gold reads the offer from the coin's public genesis on its authority, which must be on the list, checks price
-     against the minimum and the credential, signs an intent (`atlas.ledger.purchase.intent`: coin, credential id, price,
+     against the minimum and the credential, signs an intent (`atlas.ledger.purchase.intent`, version 2: coin, issuing domain, genesis digest, credential id, price,
      recipient, request id, expiry) and sends it with the credential. An unfinished purchase is kept with its request id and
      resumed by signing a new intent for the same request. The Gold credentials come from the wallet's own items of class
      `atlas.element.gold`; how the real Gold credential and intent are laid out is settled when the adapter is wired to the

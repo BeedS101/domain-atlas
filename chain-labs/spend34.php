@@ -63,6 +63,7 @@ const SPEND34_STATUS = [
     'peer-down' => 502, 'peer-bad-answer' => 502, 'bad-history' => 502, 'not-enough-approvals' => 503,
     'locked' => 409, 'request-reused' => 409, 'insufficient-treasury' => 409, 'duplicate-purchase' => 409, 'purchase-key-limit' => 409, 'purchase-day-limit' => 409,
     'no-purchase-policy' => 409, 'revoked-credential' => 409, 'cannot-cancel' => 409, 'cannot-close' => 409, 'sale-closed' => 409, 'unknown-request' => 404, 'no-purchase-verifier' => 503,
+    'legacy-authorization' => 409, 'wrong-authority' => 409, 'wrong-genesis' => 409, 'unknown-base' => 409,
 ];
 function fail34(LedgerError $e): never
 {

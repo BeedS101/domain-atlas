@@ -506,14 +506,23 @@ function ledger_approval_bytes(string $coinId, int $index, string $hash): string
     return ledger_canonical(['type' => 'atlas.ledger.entry.approval', 'v' => 1, 'coinId' => $coinId, 'index' => $index, 'hash' => $hash]);
 }
 
-// Checks an owner's signed transfer and returns [from, to, amount, baseSeq, nonce]. No state is read except the coin's
-// own genesis; the caller checks balances, the sequence number and the nonce against the store.
-function ledger_check_authorization(array $coin, array $authorization, int $now): array
+// Checks an owner's signed transfer and returns [from, to, amount, baseSeq, baseHead, nonce, purchase, version]. No state is
+// read except the coin's own genesis; the caller checks balances, the sequence number, the base head and the nonce against
+// the store.
+//
+// Version 2 names the coin it moves: `authority` is the genesis's authority domain and `genesis` its digest, both signed, so a
+// signature made for one coin cannot be used on a ledger that carries the same coin id under another authority or genesis.
+// Version 1 carries neither and is accepted only as history ($legacyOk): an entry written before the change, being applied by a
+// mirror or checked, that no bound entry precedes. A new transfer in version 1 is refused.
+function ledger_check_authorization(array $coin, array $authorization, int $now, bool $legacyOk = false): array
 {
     $payload = $authorization['payload'] ?? null;
     $signature = $authorization['signature'] ?? null;
     if (!is_array($payload) || array_is_list($payload)) ledger_fail('bad-authorization', 'the authorization has no payload');
+    $version = $payload['v'] ?? null;
+    if ($version !== 1 && $version !== 2) ledger_fail('bad-authorization', 'the payload is not a transfer for this coin');
     $expected = ['type', 'v', 'coinId', 'from', 'to', 'amount', 'baseSeq', 'baseHead', 'nonce', 'issuedAt', 'expiresAt'];
+    if ($version === 2) array_push($expected, 'authority', 'genesis');
     $keys = array_values(array_diff(array_keys($payload), ['purchase']));
     sort($keys);
     $sorted = $expected;
@@ -527,7 +536,14 @@ function ledger_check_authorization(array $coin, array $authorization, int $now)
         if ($shape !== ['price', 'requestId'] || !is_int($purchase['price']) || $purchase['price'] < 1 || $purchase['price'] > 1000000000
             || !is_string($purchase['requestId']) || !preg_match('/^[a-f0-9]{32,64}$/D', $purchase['requestId'])) ledger_fail('bad-authorization', 'the purchase reference is malformed');
     }
-    if ($payload['type'] !== 'atlas.ledger.transfer' || $payload['v'] !== 1 || $payload['coinId'] !== $coin['coin_id']) ledger_fail('bad-authorization', 'the payload is not a transfer for this coin');
+    if ($payload['type'] !== 'atlas.ledger.transfer' || $payload['coinId'] !== $coin['coin_id']) ledger_fail('bad-authorization', 'the payload is not a transfer for this coin');
+    if ($version === 1) {
+        if (!$legacyOk) ledger_fail('legacy-authorization', 'this transfer was signed in the older form, which does not name the coin\'s authority and genesis, so it could be replayed on another ledger; sign it again with an updated wallet');
+    } else {
+        if (!is_string($payload['authority']) || $payload['authority'] !== $coin['genesis']['authority']) ledger_fail('wrong-authority', 'this transfer was signed for another authority domain');
+        if (!is_string($payload['genesis']) || !preg_match('/^[a-f0-9]{64}$/D', $payload['genesis'])) ledger_fail('bad-authorization', 'the genesis digest must be a hash');
+        if ($payload['genesis'] !== $coin['genesis_digest']) ledger_fail('wrong-genesis', 'this transfer was signed for another genesis of this coin id');
+    }
     if (!ledger_valid_owner_key($payload['from']) || !ledger_valid_owner_key($payload['to'])) ledger_fail('bad-authorization', 'from and to must be wallet public keys');
     if ($payload['from'] === $payload['to']) ledger_fail('bad-authorization', 'a transfer to the same account is not allowed');
     $amount = ledger_parse_units($payload['amount'], 'amount');
@@ -544,7 +560,51 @@ function ledger_check_authorization(array $coin, array $authorization, int $now)
     if ($issued > $now + LEDGER_CLOCK_SKEW_SECONDS) ledger_fail('not-yet-valid', 'the proposal is dated in the future');
     if ($now >= $expires) ledger_fail('expired', 'the proposal has expired');
     if (!ledger_owner_verify(ledger_canonical($payload), $payload['from'], $signature)) ledger_fail('bad-signature', 'the owner signature does not verify');
-    return ['from' => $payload['from'], 'to' => $payload['to'], 'amount' => $amount, 'baseSeq' => $payload['baseSeq'], 'nonce' => $payload['nonce'], 'purchase' => $purchase];
+    return ['from' => $payload['from'], 'to' => $payload['to'], 'amount' => $amount, 'baseSeq' => $payload['baseSeq'], 'baseHead' => $payload['baseHead'], 'nonce' => $payload['nonce'], 'purchase' => $purchase, 'version' => $version];
+}
+
+// The two signed fields of the bound form for a coin: its authority domain and its genesis digest.
+function ledger_binding(PDO $db, string $coinId): array
+{
+    $coin = ledger_coin($db, $coinId);
+    return ['authority' => $coin['genesis']['authority'], 'genesis' => $coin['genesis_digest']];
+}
+
+// Whether an entry in the older form may still be applied as history: only while the log has no entry in the bound form, which
+// is read from the newest entry (an older-form entry can only follow older-form entries and the genesis).
+function ledger_legacy_allowed(PDO $db, string $coinId): bool
+{
+    $head = ledger_head($db, $coinId);
+    if ($head['index'] < 1) return true;
+    $row = $db->prepare('SELECT private_json FROM ledger_log WHERE coin_id=? AND idx=?');
+    $row->execute([$coinId, $head['index']]);
+    $private = json_decode((string) $row->fetchColumn(), true);
+    return is_array($private) && ($private['authorization']['payload']['v'] ?? null) === 1;
+}
+
+// The index of the sender's newest entry that debited its account (0 when it has never sent).
+function ledger_last_send_index(PDO $db, string $coinId, string $ref): int
+{
+    $rows = $db->prepare('SELECT e.idx AS idx, l.public_json AS public_json FROM ledger_account_entries e JOIN ledger_log l ON l.coin_id=e.coin_id AND l.idx=e.idx WHERE e.coin_id=? AND e.ref=? ORDER BY e.pos DESC');
+    $rows->execute([$coinId, $ref]);
+    while ($row = $rows->fetch(PDO::FETCH_ASSOC)) {
+        $public = json_decode($row['public_json'], true);
+        if (is_array($public) && ($public['from'] ?? null) === $ref) { $rows->closeCursor(); return (int) $row['idx']; }
+    }
+    return 0;
+}
+
+// `baseHead` is the head the owner saw when signing. It must be a hash this coin's log really has, and no earlier than the entry
+// of the sender's last transfer, since the owner's view includes what their own account last did. It need not be the newest, so
+// other people's transfers do not make a signed one stale. A transfer in the older form carried no checked base.
+function ledger_check_base(PDO $db, string $coinId, string $senderRef, array $t): void
+{
+    if ($t['version'] < 2) return;
+    $row = $db->prepare('SELECT idx FROM ledger_log WHERE coin_id=? AND hash=?');
+    $row->execute([$coinId, $t['baseHead']]);
+    $idx = $row->fetchColumn();
+    if ($idx === false) ledger_fail('unknown-base', 'baseHead is not a head of this coin\'s log');
+    if ((int) $idx < ledger_last_send_index($db, $coinId, $senderRef)) ledger_fail('stale', 'baseHead is older than the sender\'s last transfer');
 }
 
 function ledger_account_row(PDO $db, string $coinId, string $key): ?array
@@ -568,6 +628,7 @@ function ledger_prepare_transfer(PDO $db, string $coinId, array $authorization, 
     $from = ledger_account_row($db, $coinId, $t['from']);
     if (!$from) ledger_fail('no-account', 'the sender has no account');
     if ((int) $from['seq'] !== $t['baseSeq']) ledger_fail('stale', 'the sender account has moved on since this was signed');
+    ledger_check_base($db, $coinId, $from['ref'], $t);
     if ((int) $from['units'] < $t['amount']) ledger_fail('insufficient', 'the sender holds less than the amount');
     $head = ledger_head($db, $coinId);
     $at = ledger_check_executed_at(gmdate('Y-m-d\TH:i:s\Z', $now), $authorization['payload'], ledger_head_time($db, $coinId));
@@ -610,12 +671,12 @@ function ledger_check_frame(PDO $db, array $coin, array $prepared): array
 // The state rules of an entry against the current accounts: the owner's authorization, the references, the nonce, the
 // sequence number, the balance, the time and the faucet. Writes nothing. Every domain that applies or approves an entry
 // runs these against its own copy.
-function ledger_validate_state(PDO $db, array $coin, array $public, array $private, int $now): array
+function ledger_validate_state(PDO $db, array $coin, array $public, array $private, int $now, bool $history = false): array
 {
     $coinId = $coin['coin_id'];
     $authorization = $private['authorization'] ?? null;
     if (!is_array($authorization)) ledger_fail('bad-entry', 'the private form has no authorization');
-    $t = ledger_check_authorization($coin, $authorization, $now);
+    $t = ledger_check_authorization($coin, $authorization, $now, $history && ledger_legacy_allowed($db, $coinId));
     if (($private['from'] ?? null) !== $t['from'] || ($private['to'] ?? null) !== $t['to']) ledger_fail('bad-entry', 'the private form does not match the authorization');
     if ($public['amount'] !== (string) $t['amount']) ledger_fail('bad-entry', 'the public amount does not match the authorization');
     $fromRef = ledger_account_ref($coin, $t['from']);
@@ -627,6 +688,7 @@ function ledger_validate_state(PDO $db, array $coin, array $public, array $priva
     $from = ledger_account_row($db, $coinId, $t['from']);
     if (!$from) ledger_fail('no-account', 'the sender has no account');
     if ((int) $from['seq'] !== $t['baseSeq']) ledger_fail('stale', 'the sender account has moved on since this was signed');
+    ledger_check_base($db, $coinId, $fromRef, $t);
     if ((int) $from['units'] < $t['amount']) ledger_fail('insufficient', 'the sender holds less than the amount');
     $at = ledger_check_executed_at($public['executedAt'], $authorization['payload'], ledger_head_time($db, $coinId));
     if (abs($at - $now) > LEDGER_CLOCK_SKEW_SECONDS) ledger_fail('bad-time', 'executedAt is not close to the current time');
@@ -692,7 +754,7 @@ function ledger_validate_prepared(PDO $db, string $coinId, array $prepared, int 
 
 // Writes a prepared entry once the authority has signed its hash and enough approvers have signed the approval bytes.
 // Everything is checked again inside one write transaction, so two commits of the same index cannot both succeed.
-function ledger_commit(PDO $db, string $coinId, array $prepared, string $authoritySignature, array $approvals, int $now): array
+function ledger_commit(PDO $db, string $coinId, array $prepared, string $authoritySignature, array $approvals, int $now, bool $history = false): array
 {
     $db->exec('BEGIN IMMEDIATE');
     try {
@@ -715,7 +777,7 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
             $kept[] = ['domain' => $domain, 'signature' => $approval['signature']];
         }
         if (count($approvers) < (int) $coin['threshold']) ledger_fail('not-enough-approvals', 'the entry has ' . count($approvers) . ' of ' . $coin['threshold'] . ' required approvals');
-        $checked = ledger_validate_state($db, $coin, $public, $private, $now);
+        $checked = ledger_validate_state($db, $coin, $public, $private, $now, $history);
         $t = $checked['t'];
         $at = $checked['at'];
         $fromRef = $checked['fromRef'];
@@ -785,7 +847,7 @@ function ledger_mirror_apply(PDO $db, string $coinId, array $record): array
     $at = is_array($record['public'] ?? null) && is_string($record['public']['executedAt'] ?? null) ? strtotime($record['public']['executedAt']) : false;
     if ($at === false) ledger_fail('bad-time', 'the entry has no readable time');
     return ledger_commit($db, $coinId, ['public' => $record['public'], 'private' => $record['private'] ?? null, 'hash' => $record['hash'] ?? null],
-        (string) ($record['authoritySignature'] ?? ''), is_array($record['approvals'] ?? null) ? $record['approvals'] : [], $at);
+        (string) ($record['authoritySignature'] ?? ''), is_array($record['approvals'] ?? null) ? $record['approvals'] : [], $at, true);
 }
 
 // ---------- reads for everyone: public forms only ----------
@@ -875,6 +937,9 @@ function ledger_check(PDO $db, string $coinId): array
     $given = [];
     $sold = [];
     $previousAt = 0;
+    $hashIndex = [];
+    $lastSend = [];
+    $bound = false;
     $private = $genesis['visibility'] === 'private';
     $refFor = static fn(string $key): string => $private ? ledger_ref((string) $coin['ref_secret'], $key) : $key;
     foreach ($rows->fetchAll(PDO::FETCH_ASSOC) as $row) {
@@ -890,6 +955,7 @@ function ledger_check(PDO $db, string $coinId): array
         $hash = ledger_digest($public);
         if ($hash !== $row['hash'] || ($priv['hash'] ?? null) !== $hash) $problems[] = $where . 'hash does not match the public form';
         $prev = $row['hash'];
+        $hashIndex[$row['hash']] = $i;
         if ($authorityKey === null || !ledger_verify($authorityKey, $row['hash'], $row['authority_sig'])) $problems[] = $where . 'authority signature does not verify';
         if ($i === 0) {
             if (($public['type'] ?? null) !== 'genesis' || ($public['amount'] ?? null) !== $genesis['initialUnits'] || ($public['to'] ?? null) !== $genesis['treasuryRef']) $problems[] = $where . 'does not credit the treasury with the initial units';
@@ -917,6 +983,22 @@ function ledger_check(PDO $db, string $coinId): array
         $from = $payload['from'];
         $to = $payload['to'];
         $amount = (int) $payload['amount'];
+        // The binding: a bound entry names this coin's authority and genesis and a base head from earlier in this log, no earlier
+        // than the sender's last transfer; an entry in the older form can only come before every bound one.
+        $version = $payload['v'] ?? null;
+        if ($version === 2) {
+            $bound = true;
+            if (($payload['authority'] ?? null) !== $genesis['authority']) $problems[] = $where . 'the owner signed for another authority domain';
+            if (($payload['genesis'] ?? null) !== $coin['genesis_digest']) $problems[] = $where . 'the owner signed for another genesis';
+            $baseAt = is_string($payload['baseHead'] ?? null) ? ($hashIndex[$payload['baseHead']] ?? null) : null;
+            if ($baseAt === null || $baseAt >= $i) $problems[] = $where . 'the base head is not an earlier entry of this log';
+            elseif ($baseAt < ($lastSend[$from] ?? 0)) $problems[] = $where . 'the base head is older than the sender\'s last transfer';
+        } elseif ($version === 1) {
+            if ($bound) $problems[] = $where . 'is in the older form after an entry in the bound form';
+        } else {
+            $problems[] = $where . 'the authorization has an unknown version';
+        }
+        $lastSend[$from] = $i;
         if (($priv['from'] ?? null) !== $from || ($priv['to'] ?? null) !== $to || ($public['amount'] ?? null) !== $payload['amount']) $problems[] = $where . 'the private and public forms disagree';
         if (($public['from'] ?? null) !== $refFor($from) || ($public['to'] ?? null) !== $refFor($to)) $problems[] = $where . 'the public references do not match the keys';
         try {
@@ -1057,7 +1139,7 @@ function ledger_grant_authorization(PDO $db, string $coinId, array $treasury, st
     if (($treasury['key'] ?? null) !== $coin['treasury_key']) ledger_fail('not-treasury', 'that is not the coin\'s treasury key');
     $row = ledger_account_row($db, $coinId, $coin['treasury_key']);
     if (!$row) ledger_fail('no-account', 'the treasury has no account yet');
-    $payload = ['type' => 'atlas.ledger.transfer', 'v' => 1, 'coinId' => $coinId, 'from' => $coin['treasury_key'], 'to' => $recipientKey, 'amount' => $amount,
+    $payload = ['type' => 'atlas.ledger.transfer', 'v' => 2, 'coinId' => $coinId, 'authority' => $coin['genesis']['authority'], 'genesis' => $coin['genesis_digest'], 'from' => $coin['treasury_key'], 'to' => $recipientKey, 'amount' => $amount,
         'baseSeq' => (int) $row['seq'], 'baseHead' => ledger_head($db, $coinId)['hash'], 'nonce' => bin2hex(random_bytes(16)),
         'issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $now), 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $now + 300)];
     if ($purchase !== null) $payload['purchase'] = $purchase;
