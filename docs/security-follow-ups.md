@@ -15,11 +15,46 @@ to attest that its own second leg did not settle, which is a protocol change.
 
 ## Shared outbound lookup rate budget
 
-Reported in the review and not yet reproduced or fixed. The outbound request budgets (`ATLAS_OUTBOUND_RATE`,
-`_ALL`, `_KEY_RATE`, `_KEY_RATE_ALL`) are shared by every lookup a request triggers, so a caller that triggers many
-distinct lookups may use up what other callers need (peer key fetches, trade relays, directory lookups). Next step:
-reproduce it with a test that exhausts the budget from one caller and measures another, then reserve a share per
-purpose so one purpose cannot starve the others, keeping the global cap.
+Fixed, with limits that remain. Reproduced first (`test/security-outbound-isolation.js`, Node and PHP): a visitor
+with no account can make an issuer look up another domain by presenting a credential that names it as its issuer
+(`POST /atlas/world/drop` and the other endpoints that verify a foreign credential: one key lookup plus the
+revocation and suspension lists, none of it cached). The budgets were two pools (`key`, and everything else), each
+counted per remote domain and overall, and not tied to who caused the lookup. In the test one caller on its own:
+
+- used the whole overall key budget with made-up domains, so a legitimate relayed claim from a federated domain
+  the issuer had not seen recently was refused ("too many requests to other domains");
+- used one peer's whole revocation budget, so another caller's credential from that peer could not be verified and a
+  pick-up that had to be relayed to that peer never reached it.
+
+What changed (`issuer-server/lib-outbound.js` `createRateLimiter`; `issuer-php/lib/outbound.php`
+`atlas_outbound_rate_take`). The overall caps are unchanged, so total outbound traffic is bounded as before. Within them:
+
+- Operations are classes with a reserved floor: `key`, and for everything else `verify` (a credential's revocation and
+  suspension lists), `drop` (world-drop relays) and `relay` (trade, mail and other relays). Per-domain budgets are kept per
+  class, and a class cannot take what would push another class below its floor (15% of the overall budget each).
+- Callers are the socket address of the request that caused the lookup (never a forwarded-for header; hashed in PHP).
+  A caller that has used a quarter of a budget cannot take the last 15% of it, overall or for one domain, which stays
+  for callers that have not. Only attempts that were let through are remembered, so what is held is bounded by the
+  overall budget and cannot be grown by changing identities, request fields or domains.
+- Work this server starts itself has no caller and is never held to the share rule.
+
+New settings, both optional: `ATLAS_OUTBOUND_RESERVE` (default `0.15`, range 0 to 0.3; `0` turns the sharing rules
+off and leaves plain caps) and `ATLAS_OUTBOUND_FAIR_SHARE` (default `0.25`). A budget too small to have a whole reserved
+slice (under 7) is unchanged, so the existing `_RATE`/`_KEY_RATE` settings keep their meaning; at the defaults one caller
+can use at most about 85% of a budget (17 of 20 for one domain, 102 of 120 key lookups).
+
+Remaining:
+
+- The caller is the socket address. Behind a reverse proxy every visitor shares the proxy's address and so one share:
+  one busy visitor then looks like the whole site, and the unused 15% reserved slice is all the headroom others have.
+  Set `ATLAS_OUTBOUND_RESERVE=0` there, or fix the proxy setup, until callers can be told apart.
+- Several callers (several addresses) that each stay under their share can still use a whole budget together; the
+  protection is against one caller, not a botnet. The overall caps still bound the traffic, and what stays guaranteed
+  is each class's floor.
+- Verifying a foreign credential still fetches the issuer's key without the peer-key memory (it needs the current key
+  document alongside the revocation lists). Caching that fetch would cut the cost of the commonest legitimate case and
+  is a separate change.
+- Directory lookups live outside the issuer (`directory-php`) and were not part of this change.
 
 ## Drop intents without expiry
 

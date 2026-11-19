@@ -1101,7 +1101,7 @@ function verify_foreign_asset_credential($credential, $signatureOnly = false) {
   // an issuer that predates suspensions never published.
   $revoked = null;
   try {
-    $revRes = atlas_peer_request('GET', $issuerDomain, '/.well-known/atlas-revocations.json');
+    $revRes = atlas_peer_request('GET', $issuerDomain, '/.well-known/atlas-revocations.json', null, 'verify');
   } catch (AtlasOutboundException $e) {
     return 'could not confirm whether it has revoked this credential (' . $e->getMessage() . ')';
   }
@@ -1111,7 +1111,7 @@ function verify_foreign_asset_credential($credential, $signatureOnly = false) {
   $revoked = $revDoc['revoked'];
   $suspended = [];
   try {
-    $susRes = atlas_peer_request('GET', $issuerDomain, '/.well-known/atlas-suspensions.json');
+    $susRes = atlas_peer_request('GET', $issuerDomain, '/.well-known/atlas-suspensions.json', null, 'verify');
   } catch (AtlasOutboundException $e) {
     return 'could not confirm whether it has suspended this credential (' . $e->getMessage() . ')';
   }

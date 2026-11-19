@@ -10,7 +10,9 @@
 //     it off).
 //   - Redirects are not followed; a request has connect and total time limits and a response size limit.
 //   - Requests are rate limited per remote domain and overall, counting every attempt, failures included, before any
-//     connection is made, so a flood of made-up domains cannot turn this server into a lookup engine.
+//     connection is made, so a flood of made-up domains cannot turn this server into a lookup engine. The budgets are
+//     split by kind of operation and by who caused the request, so one caller or one kind of operation cannot use up
+//     what the others need (createRateLimiter).
 //   - A failure's message is safe to send to a client (it names the peer the client supplied and a short category);
 //     the underlying detail is logged and kept on `detail`.
 'use strict';
@@ -124,23 +126,54 @@ function envNumber(env, name, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-// Counts every attempt (not only successful ones) against a per-domain and an overall budget over a sliding window.
-function createRateLimiter(window, perAuthority, overall) {
-  const byAuthority = new Map();
-  let all = [];
-  return function take(authority, now) {
+// Budgets over a sliding window. Every attempt that is let through is remembered with its operation class, the domain
+// it was for and the caller that caused it (refused attempts cost nothing and are not remembered, so what is held is
+// bounded by the overall budget). An attempt is refused when
+//   - the overall budget is spent, or taking it would eat into another class's reserved floor (`classes`), or
+//   - this domain's budget for this class is spent, or
+//   - the caller has already used its fair share and only the reserved slice is left, in the overall budget or in this
+//     domain's: a caller that has used `share` of a budget cannot take its last `reserve`, which stays for callers that
+//     have not.
+// `reserve` and `share` are fractions; reserve 0 turns the sharing rules off (budgets then behave as plain caps). A
+// budget too small to have a whole reserved slice has none. An attempt with no caller (this server's own work, not a
+// request from outside) is never held to the share rule.
+function createRateLimiter(window, perAuthority, overall, options) {
+  const o = options || {};
+  const reserve = o.reserve > 0 ? o.reserve : 0;
+  const share = o.share > 0 ? Math.min(1, o.share) : 0.25;
+  const classes = o.classes && o.classes.length ? o.classes : ['default'];
+  const slice = (budget) => Math.floor(budget * reserve);
+  const fair = (budget) => Math.max(1, Math.ceil(budget * share));
+  let held = [];
+  return function take(authority, now, caller, klass) {
     const t = now === undefined ? Date.now() : now;
-    all = all.filter((x) => t - x < window);
-    const mine = (byAuthority.get(authority) || []).filter((x) => t - x < window);
-    if (mine.length >= perAuthority || all.length >= overall) {
-      if (mine.length) byAuthority.set(authority, mine); else byAuthority.delete(authority);
-      return false;
+    held = held.filter((e) => t - e.at < window);
+    const cls = klass && classes.includes(klass) ? klass : classes[0];
+    const named = typeof caller === 'string' && caller !== '';
+    if (held.length >= overall) return false;
+    if (named && held.length >= overall - slice(overall) && held.reduce((n, e) => n + (e.caller === caller ? 1 : 0), 0) >= fair(overall)) return false;
+    if (classes.length > 1) {
+      const used = {};
+      for (const e of held) used[e.cls] = (used[e.cls] || 0) + 1;
+      let reservedForOthers = 0;
+      for (const c of classes) if (c !== cls) reservedForOthers += Math.max(0, slice(overall) - (used[c] || 0));
+      if (held.length + 1 + reservedForOthers > overall) return false;
     }
-    mine.push(t); all.push(t);
-    byAuthority.set(authority, mine);
-    if (byAuthority.size > 5000) for (const [k, v] of byAuthority) if (!v.some((x) => t - x < window)) byAuthority.delete(k);
+    let here = 0, mine = 0;
+    for (const e of held) if (e.cls === cls && e.authority === authority) { here++; if (e.caller === caller) mine++; }
+    if (here >= perAuthority) return false;
+    if (named && here >= perAuthority - slice(perAuthority) && mine >= fair(perAuthority)) return false;
+    held.push({ at: t, cls, authority, caller: named ? caller : null });
     return true;
   };
+}
+
+// A fraction from the environment within [min, max], or the fallback.
+function envFraction(env, name, fallback, min, max) {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
 }
 
 // options: ownDomain (this server's own domain), env, and, for tests only and never from the environment:
@@ -151,9 +184,14 @@ function createOutbound(options) {
   const flag = env.ATLAS_ALLOW_LOCAL_PEERS;
   const allowLocal = flag === '0' ? false : flag === '1' ? true : !!(own && own.local);
   const windowMs = envNumber(env, 'ATLAS_OUTBOUND_RATE_WINDOW_MS', 60000);
+  // Two overall budgets (published-key discovery, and everything else), the second split into operation classes that
+  // each keep a reserved floor: 'verify' (a credential's revocation and suspension lists), 'drop' (world-drop relays)
+  // and 'relay' (trade, mail and other relays). Callers are the sockets that made the request that caused the lookup.
+  const reserve = envFraction(env, 'ATLAS_OUTBOUND_RESERVE', 0.15, 0, 0.3);
+  const share = envFraction(env, 'ATLAS_OUTBOUND_FAIR_SHARE', 0.25, 0.01, 1);
   const limiters = {
-    key: createRateLimiter(windowMs, envNumber(env, 'ATLAS_OUTBOUND_KEY_RATE', 20), envNumber(env, 'ATLAS_OUTBOUND_KEY_RATE_ALL', 120)),
-    other: createRateLimiter(windowMs, envNumber(env, 'ATLAS_OUTBOUND_RATE', 120), envNumber(env, 'ATLAS_OUTBOUND_RATE_ALL', 600))
+    key: createRateLimiter(windowMs, envNumber(env, 'ATLAS_OUTBOUND_KEY_RATE', 20), envNumber(env, 'ATLAS_OUTBOUND_KEY_RATE_ALL', 120), { reserve, share, classes: ['key'] }),
+    other: createRateLimiter(windowMs, envNumber(env, 'ATLAS_OUTBOUND_RATE', 120), envNumber(env, 'ATLAS_OUTBOUND_RATE_ALL', 600), { reserve, share, classes: ['verify', 'drop', 'relay'] })
   };
   const maxBytesDefault = envNumber(env, 'ATLAS_OUTBOUND_MAX_BYTES', 4 * 1024 * 1024);
   const timeoutDefault = envNumber(env, 'ATLAS_OUTBOUND_TIMEOUT_MS', 10000);
@@ -179,14 +217,19 @@ function createOutbound(options) {
     return addresses;
   }
 
-  // kind: 'key' for published-key discovery (the cheapest thing a stranger can make this server do), else 'other'.
+  // kind: 'key' for published-key discovery (the cheapest thing a stranger can make this server do), 'verify' for a
+  // credential's revocation and suspension lists, 'drop' for a world-drop relay, anything else (trade, mail and other
+  // relays) 'relay'. options.caller() names who caused the request, or returns null for this server's own work.
   async function request(domain, pathAndQuery, opts) {
     const o = opts || {};
     const peer = parsePeer(domain, allowLocal);
     if (typeof pathAndQuery !== 'string' || !pathAndQuery.startsWith('/') || /[\x00-\x20\x7f\\]/.test(pathAndQuery)) {
       throw new OutboundError('not an acceptable request', 'path-invalid');
     }
-    if (!limiters[o.kind === 'key' ? 'key' : 'other'](peer.authority)) {
+    const caller = options.caller ? options.caller() : null;
+    const allowed = o.kind === 'key' ? limiters.key(peer.authority, undefined, caller, 'key')
+      : limiters.other(peer.authority, undefined, caller, o.kind === 'verify' || o.kind === 'drop' ? o.kind : 'relay');
+    if (!allowed) {
       throw new OutboundError('too many requests to other domains just now; try again shortly', 'rate-limited');
     }
     const maxBytes = o.maxBytes || maxBytesDefault;

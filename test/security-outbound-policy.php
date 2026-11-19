@@ -182,6 +182,48 @@ check('a flood of made-up domains hits the overall budget', count(array_unique(a
 putenv('ATLAS_OUTBOUND_KEY_RATE'); putenv('ATLAS_OUTBOUND_KEY_RATE_ALL');
 reset_rate();
 
+echo "--- budgets are shared out between callers and kinds of operation ---\n";
+// 20 per domain and 120 overall for three classes, with a 15% reserve (a slice of 3 per domain, 18 overall and as each class's floor).
+putenv('ATLAS_OUTBOUND_RATE=20'); putenv('ATLAS_OUTBOUND_RATE_ALL=120');
+$grants = function ($n, $who, $kind, $domain) {
+  $_SERVER['REMOTE_ADDR'] = $who;
+  $ok = 0;
+  for ($i = 0; $i < $n; $i++) if (atlas_outbound_rate_take(is_callable($domain) ? $domain($i) : $domain, $kind)) $ok++;
+  unset($_SERVER['REMOTE_ADDR']);
+  return $ok;
+};
+reset_rate();
+check('a caller that keeps asking for one domain is stopped before that domain\'s budget is gone', $grants(100, '198.51.100.1', 'verify', 'a.example') === 17);
+check('so another caller still has the reserved slice for that domain', $grants(10, '198.51.100.2', 'verify', 'a.example') === 3);
+check('and the same domain\'s budget for another kind of operation is untouched (its own caller limit still applies)', $grants(30, '198.51.100.2', 'relay', 'a.example') === 17);
+reset_rate();
+check('one kind of operation cannot take more than the overall budget less the others\' floors', $grants(400, '198.51.100.1', 'verify', function ($i) { return "d$i.example"; }) === 84);
+check('the other kinds can still be served after it', $grants(5, '198.51.100.2', 'drop', 'x.example') === 5 && $grants(5, '198.51.100.2', 'relay', 'y.example') === 5);
+reset_rate();
+$taken = 0;
+$kinds = ['verify', 'drop', 'relay'];
+for ($i = 0; $i < 400; $i++) {
+  $_SERVER['REMOTE_ADDR'] = '198.51.100.' . (10 + ($i % 40));
+  if (atlas_outbound_rate_take("d$i.example", $kinds[$i % 3])) $taken++;
+}
+unset($_SERVER['REMOTE_ADDR']);
+check('however many callers there are, the overall budget is never exceeded', $taken === 120, $taken);
+reset_rate();
+unset($_SERVER['REMOTE_ADDR']);
+$noCaller = 0;
+for ($i = 0; $i < 100; $i++) if (atlas_outbound_rate_take('a.example', 'relay')) $noCaller++;
+check('work with no caller is not held to the fair share', $noCaller === 20, $noCaller);
+putenv('ATLAS_OUTBOUND_RESERVE=0');
+reset_rate();
+check('with the reserve turned off the budgets are plain caps again', $grants(100, '198.51.100.1', 'verify', 'a.example') === 20 && $grants(400, '198.51.100.1', 'verify', function ($i) { return "d$i.example"; }) === 100);
+putenv('ATLAS_OUTBOUND_RESERVE');
+putenv('ATLAS_OUTBOUND_RATE'); putenv('ATLAS_OUTBOUND_RATE_ALL');
+putenv('ATLAS_OUTBOUND_KEY_RATE=3'); putenv('ATLAS_OUTBOUND_KEY_RATE_ALL=5');
+reset_rate();
+check('a budget too small for a whole reserved slice is unchanged', $grants(10, '198.51.100.1', 'key', 'a.example') === 3 && $grants(10, '198.51.100.1', 'key', function ($i) { return "e$i.example"; }) === 2);
+putenv('ATLAS_OUTBOUND_KEY_RATE'); putenv('ATLAS_OUTBOUND_KEY_RATE_ALL');
+reset_rate();
+
 echo "--- local development ---\n";
 $GLOBALS['atlas_outbound_test_hooks'] = [];
 check('production does not allow loopback', atlas_outbound_allow_local() === false);

@@ -2283,10 +2283,12 @@ function recordRelayAttempt(relayingDomain) {
 // public-address-only pinned connections, no redirects, size and time limits, rate limits, client-safe errors).
 const { createOutbound, OutboundError } = require('./lib-outbound');
 const { verifyWebauthnEnvelope, policyFromEnv } = require('./lib-webauthn');
-const outbound = createOutbound({ ownDomain: DOMAIN });
+// `caller` is whoever made the request being served (its socket address, set where the request starts), so the outbound
+// budgets can be shared out fairly; work this server starts itself has none.
+const outbound = createOutbound({ ownDomain: DOMAIN, caller: () => { const c = spendContext.getStore(); return c && c.caller ? c.caller : null; } });
 const peerRequest = (domain, pathAndQuery, opts) => outbound.request(domain, pathAndQuery, opts);
 
-// Task #97 (SPEC.md §11.4 step 3): fetches ANOTHER domain's own published
+// SPEC.md §11.4 step 3: fetches ANOTHER domain's own published
 // signing key, the exact same cross-domain trust bootstrap
 // verifyCredential() in extension/wallet.js already performs client-side
 // (§5 step 1) — this is the first time this SERVER itself has ever needed
@@ -2343,7 +2345,7 @@ async function fetchDomainPublicKeyUncached(domain) {
   return activeKey.publicKey;
 }
 
-// Task #97 (SPEC.md §11.4 step 3): verifies a relaying domain's own
+// SPEC.md §11.4 step 3: verifies a relaying domain's own
 // attestation against a public key already fetched via fetchDomainPublicKey
 // above — the raw-ecdsa half of verifyEnvelope, but checked against an
 // externally-supplied domain key rather than a key pulled out of the
@@ -5847,8 +5849,8 @@ async function main() {
     const issuerDomain = credential.issuer.domain;
     const [keyAttempt, revAttempt, susAttempt] = await Promise.allSettled([
       peerRequest(issuerDomain, '/.well-known/atlas-key.json', { kind: 'key' }),
-      peerRequest(issuerDomain, '/.well-known/atlas-revocations.json'),
-      peerRequest(issuerDomain, '/.well-known/atlas-suspensions.json')
+      peerRequest(issuerDomain, '/.well-known/atlas-revocations.json', { kind: 'verify' }),
+      peerRequest(issuerDomain, '/.well-known/atlas-suspensions.json', { kind: 'verify' })
     ]);
     const why = (attempt) => (attempt.reason instanceof OutboundError ? attempt.reason.message : 'could not reach it');
     if (keyAttempt.status !== 'fulfilled') return why(keyAttempt);
@@ -6849,7 +6851,7 @@ async function main() {
     return summary;
   }
 
-  const server = http.createServer((req, res) => spendContext.run({ res, held: new Set() }, async () => {
+  const server = http.createServer((req, res) => spendContext.run({ res, held: new Set(), caller: adminClientKey(req) }, async () => {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
@@ -10383,7 +10385,7 @@ async function main() {
         let relayRes;
         try {
           relayRes = await peerRequest(credential.issuer.domain, '/atlas/world/drops/relay-claim', {
-            method: 'POST', body: { credential, attestation, attestationSignature, dropIntent: won.dropIntent, claimIntent: intent }
+            kind: 'drop', method: 'POST', body: { credential, attestation, attestationSignature, dropIntent: won.dropIntent, claimIntent: intent }
           });
         } catch (err) {
           // Whether the issuer acted on the claim is unknown, so the reservation stays: the same claimant asking again

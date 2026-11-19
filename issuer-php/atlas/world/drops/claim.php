@@ -80,7 +80,8 @@ try {
   $relayResult = atlas_peer_post_json(
     $credential['issuer']['domain'], '/atlas/world/drops/relay-claim',
     ['credential' => $credential, 'attestation' => $attestation, 'attestationSignature' => $attestationSignature,
-   'dropIntent' => $won['dropIntent'] ?? null, 'claimIntent' => $intent]
+   'dropIntent' => $won['dropIntent'] ?? null, 'claimIntent' => $intent],
+    'drop'
   );
 } catch (AtlasOutboundException $e) {
   // Whether the issuer acted on the claim is unknown, so the reservation stays: the same claimant asking again is

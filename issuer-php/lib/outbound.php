@@ -131,42 +131,85 @@ function atlas_outbound_rate_file() {
   return __DIR__ . '/atlas-outbound-rate-store.json';
 }
 
-// Counts every attempt against a per-domain and an overall budget over a sliding window, in a file shared by all
-// requests (each PHP request is its own process). Returns false when the budget is spent.
+// A fraction from the environment within [$min, $max], or the fallback.
+function atlas_outbound_env_fraction($name, $fallback, $min, $max) {
+  $v = getenv($name);
+  if (!is_string($v) || $v === '' || !is_numeric($v)) return $fallback;
+  $n = (float) $v;
+  return $n >= $min && $n <= $max ? $n : $fallback;
+}
+
+// Who caused the lookup: the socket address of the request being served, hashed (never a forwarded-for header, which a
+// client controls; behind a reverse proxy every client shares the proxy's address and so one share). Null for work that
+// is not a request from outside (a command-line run), which is never held to the fair-share rule.
+function atlas_outbound_caller() {
+  $addr = isset($_SERVER['REMOTE_ADDR']) && is_string($_SERVER['REMOTE_ADDR']) ? preg_replace('/^::ffff:/', '', $_SERVER['REMOTE_ADDR']) : '';
+  return $addr === '' ? null : substr(hash('sha256', $addr), 0, 16);
+}
+
+// Budgets over a sliding window, in a file shared by all requests (each PHP request is its own process). Mirrors
+// lib-outbound.js's createRateLimiter(): every attempt that is let through is kept as [time, class, domain, caller]
+// (refused attempts cost nothing and are not kept, so the file is bounded by the overall budget). An attempt is refused when
+//   - the overall budget is spent, or taking it would eat into another class's reserved floor, or
+//   - this domain's budget for this class is spent, or
+//   - the caller has used its fair share of a budget and only the reserved slice is left, overall or for this domain.
+// Two overall budgets: published-key discovery ('key'), and everything else, split into 'verify' (a credential's
+// revocation and suspension lists), 'drop' (world-drop relays) and 'relay' (trade, mail and other relays).
+// ATLAS_OUTBOUND_RESERVE (default 0.15; 0 turns the sharing rules off) and ATLAS_OUTBOUND_FAIR_SHARE (default 0.25).
+// Returns false when the budget is spent.
 function atlas_outbound_rate_take($authority, $kind) {
   $window = (int) atlas_outbound_env_number('ATLAS_OUTBOUND_RATE_WINDOW_MS', 60000);
   if ($kind === 'key') {
+    $bucket = 'key';
+    $classes = ['key'];
+    $cls = 'key';
     $perAuthority = (int) atlas_outbound_env_number('ATLAS_OUTBOUND_KEY_RATE', 20);
     $overall = (int) atlas_outbound_env_number('ATLAS_OUTBOUND_KEY_RATE_ALL', 120);
   } else {
-    $kind = 'other';
+    $bucket = 'other';
+    $classes = ['verify', 'drop', 'relay'];
+    $cls = ($kind === 'verify' || $kind === 'drop') ? $kind : 'relay';
     $perAuthority = (int) atlas_outbound_env_number('ATLAS_OUTBOUND_RATE', 120);
     $overall = (int) atlas_outbound_env_number('ATLAS_OUTBOUND_RATE_ALL', 600);
   }
+  $reserve = atlas_outbound_env_fraction('ATLAS_OUTBOUND_RESERVE', 0.15, 0, 0.3);
+  $share = atlas_outbound_env_fraction('ATLAS_OUTBOUND_FAIR_SHARE', 0.25, 0.01, 1);
+  $slice = function ($budget) use ($reserve) { return (int) floor($budget * $reserve); };
+  $fair = function ($budget) use ($share) { return max(1, (int) ceil($budget * $share)); };
+  $caller = atlas_outbound_caller();
   $now = (int) round(microtime(true) * 1000);
   $fh = @fopen(atlas_outbound_rate_file(), 'c+');
   if ($fh === false) return false; // cannot record attempts, so cannot bound them: refuse
   flock($fh, LOCK_EX);
   $doc = json_decode(stream_get_contents($fh), true);
   if (!is_array($doc)) $doc = [];
-  $bucket = isset($doc[$kind]) && is_array($doc[$kind]) ? $doc[$kind] : ['all' => [], 'by' => []];
-  $keep = function ($list) use ($now, $window) {
-    return array_values(array_filter(is_array($list) ? $list : [], function ($t) use ($now, $window) { return is_int($t) && $now - $t < $window; }));
-  };
-  $all = $keep($bucket['all'] ?? []);
-  $by = [];
-  foreach (($bucket['by'] ?? []) as $name => $list) {
-    $kept = $keep($list);
-    if ($kept) $by[$name] = $kept;
+  $held = [];
+  foreach ((isset($doc[$bucket]) && is_array($doc[$bucket]) ? $doc[$bucket] : []) as $e) {
+    // (a file written before budgets were split by class holds another shape and is simply dropped)
+    if (is_array($e) && count($e) === 4 && is_int($e[0]) && $now - $e[0] < $window && is_string($e[1]) && is_string($e[2])) $held[] = $e;
   }
-  $mine = $by[$authority] ?? [];
-  $ok = count($mine) < $perAuthority && count($all) < $overall;
+  $ok = count($held) < $overall;
+  if ($ok && $caller !== null && count($held) >= $overall - $slice($overall)) {
+    $mine = 0;
+    foreach ($held as $e) if ($e[3] === $caller) $mine++;
+    if ($mine >= $fair($overall)) $ok = false;
+  }
+  if ($ok && count($classes) > 1) {
+    $used = [];
+    foreach ($held as $e) $used[$e[1]] = ($used[$e[1]] ?? 0) + 1;
+    $reservedForOthers = 0;
+    foreach ($classes as $c) if ($c !== $cls) $reservedForOthers += max(0, $slice($overall) - ($used[$c] ?? 0));
+    if (count($held) + 1 + $reservedForOthers > $overall) $ok = false;
+  }
   if ($ok) {
-    $mine[] = $now;
-    $all[] = $now;
-    $by[$authority] = $mine;
+    $here = 0;
+    $mine = 0;
+    foreach ($held as $e) if ($e[1] === $cls && $e[2] === $authority) { $here++; if ($e[3] === $caller) $mine++; }
+    if ($here >= $perAuthority) $ok = false;
+    elseif ($caller !== null && $here >= $perAuthority - $slice($perAuthority) && $mine >= $fair($perAuthority)) $ok = false;
   }
-  $doc[$kind] = ['all' => $all, 'by' => $by];
+  if ($ok) $held[] = [$now, $cls, $authority, $caller];
+  $doc[$bucket] = $held;
   ftruncate($fh, 0);
   rewind($fh);
   fwrite($fh, json_encode($doc));
@@ -253,7 +296,9 @@ function atlas_outbound_checked_address($peer) {
 
 // One request to another domain. Returns ['status' => int, 'raw' => string] for any completed response (a caller needs
 // to see why the other domain refused something) and throws AtlasOutboundException otherwise. $kind 'key' is published-
-// key discovery, the cheapest thing a stranger can make this server do; everything else is 'other'.
+// key discovery, the cheapest thing a stranger can make this server do; 'verify' is a credential's revocation and
+// suspension lists, 'drop' a world-drop relay, and everything else ('relay', or the older 'other') trade, mail and other
+// relays. The budgets are shared out by kind and by who caused the request (atlas_outbound_rate_take()).
 function atlas_peer_request($method, $domain, $pathAndQuery, $jsonBody = null, $kind = 'other', $maxBytes = null) {
   $peer = atlas_outbound_parse_peer($domain, atlas_outbound_allow_local());
   if (!is_string($pathAndQuery) || $pathAndQuery === '' || $pathAndQuery[0] !== '/' || preg_match('/[\x00-\x20\x7f\\\\]/', $pathAndQuery)) {
@@ -330,8 +375,8 @@ function atlas_peer_request($method, $domain, $pathAndQuery, $jsonBody = null, $
 }
 
 // POSTs JSON to another domain and returns its status and decoded body, whatever that status was.
-function atlas_peer_post_json($domain, $pathAndQuery, $body) {
-  $res = atlas_peer_request('POST', $domain, $pathAndQuery, $body);
+function atlas_peer_post_json($domain, $pathAndQuery, $body, $kind = 'relay') {
+  $res = atlas_peer_request('POST', $domain, $pathAndQuery, $body, $kind);
   $decoded = json_decode($res['raw'], true);
   return ['status' => $res['status'], 'body' => is_array($decoded) ? $decoded : []];
 }

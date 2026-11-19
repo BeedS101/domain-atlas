@@ -49,7 +49,10 @@ issuers with their own keys and state; no live domain was contacted.
   `ATLAS_WEBAUTHN_REQUIRE_UV=1`.
 - **Outbound tuning.** `ATLAS_OUTBOUND_TIMEOUT_MS`, `_MAX_BYTES`, `_RATE`, `_RATE_ALL`, `_RATE_WINDOW_MS`,
   `_KEY_RATE`, `_KEY_RATE_ALL`, `_KEY_CACHE_MS`, `_USER_AGENT`. A peer's key is cached for 60 s by default, so a rotated
-  key can stay trusted that long.
+  key can stay trusted that long. The budgets are shared out between callers and kinds of operation (key lookups,
+  revocation checks, world-drop relays, other relays): `ATLAS_OUTBOUND_RESERVE` (default 0.15; 0 turns it off) and
+  `ATLAS_OUTBOUND_FAIR_SHARE` (default 0.25). Callers are told apart by socket address, so behind a reverse proxy set
+  `ATLAS_OUTBOUND_RESERVE=0` (see `docs/security-follow-ups.md`).
 - **Repeated requests.** An identical repeat of reissue, clawback or legacy transfer within the replay window
   (`ATLAS_REPLAY_TTL_HOURS`, default 168) now returns the recorded result instead of "already revoked". The same request
   with a different recipient is refused.
@@ -129,6 +132,8 @@ issuers with their own keys and state; no live domain was contacted.
 ```
 node test/security-world-drop-relay.js        # STACK=node|php
 node test/security-world-drop-expiry.js       # STACK=node|php
+node test/security-outbound-isolation.js       # STACK=node|php
+node test/security-outbound-policy.js ; php test/security-outbound-policy.php
 node test/security-webauthn-envelope.js ; php test/security-webauthn-envelope.php
 node test/security-replacement-recovery.js both
 node test/security-world-drop-settlement.js both

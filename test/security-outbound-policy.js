@@ -10,7 +10,7 @@ const https = require('https');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { createOutbound, OutboundError, isPublicAddress, parsePeer } = require('../issuer-server/lib-outbound');
+const { createOutbound, OutboundError, isPublicAddress, parsePeer, createRateLimiter } = require('../issuer-server/lib-outbound');
 const vectors = require('./support/outbound-vectors.json');
 
 let failures = 0;
@@ -143,6 +143,32 @@ const rejection = async (promise) => { try { await promise; return null; } catch
     const codes = [];
     for (let i = 0; i < 9; i++) codes.push((await rejection(manyDomains.request('made-up-' + i + '.example', '/x', { kind: 'key' }))).code);
     check('a flood of made-up domains hits the overall budget', codes.slice(0, 6).every((c) => c === 'unreachable') && codes.slice(6).every((c) => c === 'rate-limited'), codes);
+
+    console.log('--- budgets are shared out between callers and kinds of operation ---');
+    // 20 per domain and 120 overall for three classes, with a 15% reserve (a slice of 3 per domain, 18 overall and as each class's floor).
+    const fairLimiter = (opts) => createRateLimiter(60000, 20, 120, Object.assign({ reserve: 0.15, share: 0.25, classes: ['verify', 'drop', 'relay'] }, opts));
+    const grants = (take, n, who, klass, domain) => { let ok = 0; for (let i = 0; i < n; i++) if (take(typeof domain === 'function' ? domain(i) : domain, 0, who, klass)) ok++; return ok; };
+    let lim = fairLimiter();
+    check('a caller that keeps asking for one domain is stopped before that domain\'s budget is gone', grants(lim, 100, 'abuser', 'verify', 'a.example') === 17);
+    check('so another caller still has the reserved slice for that domain', grants(lim, 10, 'other', 'verify', 'a.example') === 3);
+    check('and the same domain\'s budget for another kind of operation is untouched (its own caller limit still applies)', grants(lim, 30, 'other', 'relay', 'a.example') === 17);
+    lim = fairLimiter();
+    check('one kind of operation cannot take more than the overall budget less the others\' floors', grants(lim, 400, 'abuser', 'verify', (i) => 'd' + i + '.example') === 84);
+    check('the other kinds can still be served after it', grants(lim, 5, 'other', 'drop', 'x.example') === 5 && grants(lim, 5, 'other', 'relay', 'y.example') === 5);
+    lim = fairLimiter();
+    const spread = ['verify', 'drop', 'relay'];
+    let taken = 0;
+    for (let i = 0; i < 400; i++) if (lim('d' + i + '.example', 0, 'c' + (i % 40), spread[i % 3])) taken++;
+    check('however many callers there are, the overall budget is never exceeded', taken === 120, taken);
+    lim = fairLimiter();
+    check('work with no caller (this server\'s own) is not held to the fair share', grants(lim, 100, null, 'relay', 'a.example') === 20);
+    lim = fairLimiter({ reserve: 0 });
+    check('with the reserve turned off the budgets are plain caps again', grants(lim, 100, 'abuser', 'verify', 'a.example') === 20 && grants(lim, 400, 'abuser', 'verify', (i) => 'd' + i + '.example') === 100);
+    lim = createRateLimiter(60000, 3, 5, { reserve: 0.15, share: 0.25, classes: ['key'] });
+    check('a budget too small for a whole reserved slice is unchanged', grants(lim, 10, 'someone', 'key', 'a.example') === 3 && grants(lim, 10, 'someone', 'key', (i) => 'e' + i + '.example') === 2);
+    lim = fairLimiter();
+    grants(lim, 100, 'abuser', 'verify', 'a.example');
+    check('a spent budget is available again once the window has passed', lim('a.example', 61000, 'abuser', 'verify') === true);
 
     console.log('--- local development ---');
     const dev = createOutbound({ ownDomain: 'localhost:8001', env: {} });
