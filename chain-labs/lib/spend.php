@@ -210,7 +210,7 @@ function spend_holdings(PDO $db, string $domain, string $domainPrivatePem, strin
         $head = ledger_head($db, $coinId);
         $genesis = $coin['genesis'];
         $coins[] = ['coinId' => $coinId, 'symbol' => $genesis['symbol'], 'decimals' => $genesis['decimals'], 'visibility' => $genesis['visibility'], 'mode' => $genesis['mode'],
-            'threshold' => $genesis['threshold'], 'roster' => count($genesis['roster']), 'state' => $coin['state'], 'units' => (string) $account['units'], 'seq' => (int) $account['seq'],
+            'threshold' => $genesis['threshold'], 'roster' => count($genesis['roster']), 'state' => ledger_state_shown($db, $coin), 'units' => (string) $account['units'], 'seq' => (int) $account['seq'],
             'headIndex' => $head['index'], 'headHash' => $head['hash']];
         if (count($coins) >= SPEND_HOLDINGS_MAX_COINS) break;
     }

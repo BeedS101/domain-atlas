@@ -2005,7 +2005,7 @@ label.modlabel { display:inline-block; margin-right:14px; }
     ['/lib/replay/', 'replay records', 'data'], ['/lib/holdings/', 'holdings records', 'data'], ['/lib/txn/', 'transaction journal', 'data'], ['/lib/mint-allowance/', 'mint allowance counters', 'data'],
     ['/lib/atlas-mail-store.json', 'mail store', 'data'], ['/lib/atlas-subscribers-store.json', 'subscriber list', 'data'], ['/lib/atlas-postoffice-members-store.json', 'Global Mail members', 'data'],
     ['/lib/atlas-tradingstation-members-store.json', 'Trading Station members', 'data'], ['/lib/atlas-admin-keys-store.json', 'administrator key list', 'data'],
-    ['/chain-labs/lib/ledger.php', 'Chain Labs ledger library'], ['/chain-labs/lib/hosts.php', 'Chain Labs host list'], ['/atlas/directory/lib/store.php', 'directory library'],
+    ['/chain-labs/lib/ledger.php', 'Chain Labs ledger library'], ['/chain-labs/lib/checkpoint.php', 'Chain Labs checkpoint library'], ['/chain-labs/lib/hosts.php', 'Chain Labs host list'], ['/atlas/directory/lib/store.php', 'directory library'],
     ['/atlas/directory/lib/atlas-directory-config.json', 'directory setting', 'data'], ['/presence/lib/atlas-presence-store.json', 'presence state', 'data']
   ];
 

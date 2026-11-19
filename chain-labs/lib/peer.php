@@ -768,3 +768,92 @@ function peer_compare_heads(PDO $db, array $node, string $coinId, callable $send
     }
     return ['results' => $report, 'state' => ledger_coin($db, $coinId)['state']];
 }
+
+// ---------- after a database was restored from an older copy ----------
+
+// A domain whose database holds fewer entries than it already committed gets them back from the other roster domains, each applied
+// with every check a mirror makes: the chain, the authority's signature, the approvals, the owner's signature and the balances. The
+// entries are the ones that were lost, so no balance that was spent comes back. The coin runs again only when the database holds the
+// entry its checkpoint names. Returns how many entries were applied, what each domain answered, and the checkpoint's verdict.
+function peer_restore_from_partners(PDO $db, array $node, string $coinId, callable $send, int $now): array
+{
+    $coin = ledger_coin($db, $coinId);
+    $applied = 0;
+    $results = [];
+    foreach ($coin['genesis']['roster'] as $member) {
+        $domain = $member['domain'];
+        if ($domain === $node['domain']) continue;
+        try {
+            while (true) {
+                $head = ledger_head($db, $coinId)['index'];
+                $answer = $send($domain, peer_envelope($node, $domain, 'sync', ['coinId' => $coinId, 'after' => $head], $now));
+                $records = $answer['records'] ?? null;
+                if (!is_array($records)) ledger_fail('bad-history', $domain . ' sent no records');
+                foreach ($records as $record) {
+                    if (!is_array($record) || ($record['index'] ?? null) !== ledger_head($db, $coinId)['index'] + 1) ledger_fail('bad-history', $domain . ' sent records out of order');
+                    ledger_mirror_apply($db, $coinId, $record);
+                    $applied++;
+                }
+                if (count($records) < PEER_SYNC_PAGE) break;
+            }
+            $results[$domain] = 'ok';
+        } catch (LedgerError $e) {
+            $results[$domain] = $e->reason;
+        }
+    }
+    return ['applied' => $applied, 'results' => $results, 'verdict' => ledger_guard_check($db, $coinId, true, $now)];
+}
+
+// Whether the other roster domains hold the same history as this one, from their signed head statements alone. The authority must
+// state exactly this domain's head (or this domain is the authority and no partner is ahead of it); a partner may be behind but
+// never on another entry. A domain that does not answer is not agreement.
+function peer_heads_agree(PDO $db, array $node, string $coinId, callable $send, int $now): array
+{
+    $coin = ledger_coin($db, $coinId);
+    $authority = $coin['genesis']['authority'];
+    $mine = ledger_head($db, $coinId);
+    $report = [];
+    foreach ($coin['genesis']['roster'] as $member) {
+        $domain = $member['domain'];
+        if ($domain === $node['domain']) continue;
+        try {
+            $answer = $send($domain, peer_envelope($node, $domain, 'head', ['coinId' => $coinId], $now));
+            $theirs = peer_check_attestation($coin, $answer['head'] ?? null, $domain, $now);
+        } catch (LedgerError $e) {
+            $report[$domain] = 'unreachable';
+            continue;
+        }
+        $held = peer_hash_at($db, $coinId, $theirs['index']);
+        if ($held !== $theirs['hash'] || $theirs['index'] > $mine['index']) $report[$domain] = 'differs';
+        elseif ($domain === $authority && $theirs['index'] !== $mine['index']) $report[$domain] = 'behind-authority';
+        else $report[$domain] = $theirs['index'] === $mine['index'] ? 'equal' : 'behind';
+    }
+    return ['agree' => $report !== [] && !array_diff($report, ['equal', 'behind']), 'results' => $report];
+}
+
+// A copy that froze itself on evidence of a rollback may run again once the entries are back and every domain states the same
+// history. Only a freeze for that evidence qualifies: a fork, an authority's two entries for one index, invalid history and an
+// accepted loss stay frozen for an operator's own review.
+function peer_resume_after_rollback(PDO $db, array $node, string $coinId, callable $send, int $now): array
+{
+    $coin = ledger_coin($db, $coinId);
+    if ($coin['state'] !== 'frozen') ledger_fail('not-frozen', 'the coin is not frozen');
+    $kinds = array_unique(array_column(ledger_evidence($db, $coinId), 'kind'));
+    if (!in_array('rollback', $kinds, true) || array_diff($kinds, ['rollback', 'resumed'])) ledger_fail('not-resumable', 'this coin was frozen for more than a rollback: ' . implode(', ', $kinds));
+    $verdict = ledger_guard_check($db, $coinId, true, $now);
+    if ($verdict['status'] === 'halted') ledger_fail('not-resumable', 'the coin is still stopped by its checkpoint: ' . $verdict['reason']);
+    $problems = ledger_check($db, $coinId);
+    if ($problems) ledger_fail('not-resumable', 'the database does not pass the checker: ' . $problems[0]);
+    $agreement = peer_heads_agree($db, $node, $coinId, $send, $now);
+    if (!$agreement['agree']) ledger_fail('not-resumable', 'the domains do not state the same history yet: ' . json_encode($agreement['results']));
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        $db->prepare("UPDATE ledger_coins SET state='active' WHERE coin_id=? AND state='frozen'")->execute([$coinId]);
+        $db->prepare('INSERT INTO ledger_evidence(coin_id,kind,detail_json,created_at) VALUES(?,?,?,?)')->execute([$coinId, 'resumed', json_encode($agreement['results'], JSON_UNESCAPED_SLASHES), $now]);
+        $db->exec('COMMIT');
+    } catch (Throwable $e) {
+        ledger_rollback($db);
+        throw $e;
+    }
+    return ['state' => 'active'] + $agreement;
+}

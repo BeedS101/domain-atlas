@@ -65,7 +65,12 @@
     const mode = coin.mode === 'multi' ? 'needs ' + coin.threshold + ' of ' + coin.roster + ' domains' : 'one authority';
     line.appendChild(el('div', { className: 'meta', textContent: [mode, coin.visibility, domain.proven ? 'proven with your signature' : 'reported to anyone who asks', coin.state === 'frozen' ? 'frozen' : null].filter(Boolean).join(' · ') }));
     const actions = el('div', { className: 'item-actions' });
-    if (coin.state === 'active') {
+    // A domain whose newest entry went backwards, or changed, since it last told this wallet: nothing is sent or bought until
+    // it comes back, or the person decides to trust what it says now.
+    if (coin.integrity) {
+      line.appendChild(el('div', { className: 'ledger-problem', role: 'alert', textContent: coin.integrity.message + ' It reported entry ' + coin.integrity.trusted.index + ' before' + (coin.integrity.seen.index >= 0 ? ' and entry ' + coin.integrity.seen.index + ' now.' : ' and does not list the coin now.') }));
+      actions.appendChild(button('Trust what it says now', () => act(() => chain().acceptHead(domain.domain, coin.coinId), 'The wallet now treats the domain\'s current state as the real one.'), 'secondary'));
+    } else if (coin.state === 'active') {
       actions.appendChild(button('Send…', () => { panel = { kind: 'send', domain: domain.domain, coin, step: 'form' }; render(); }));
       // Buy with Gold is offered only where the authority has published terms and can take the Gold; otherwise the coin says it is not for sale.
       const sale = offers.get(domain.domain + '/' + coin.coinId);

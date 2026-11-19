@@ -147,6 +147,14 @@ that still signs version 1 gets `legacy-authorization` and must be updated; depl
 proposal through the existing signing bridge; the page's manifest must list the signing purpose, and the wallet asks
 the owner to confirm the request before it signs.
 
+Rolling the binding out to a multi authority coin. A domain that has the bound rules refuses a live version 1 authorization, and a domain
+that does not have them refuses a version 2 one (it accepted version 1 only), so a mixed set of domains never disagrees about an entry: the
+side that does not understand it refuses it, and spending on that coin stalls until the set is the same. The order that keeps the stall
+short: deploy the library files (`chain-labs/lib/*.php`, `chain-labs/spend34.php`) to every domain of the coin in one sitting, the partners
+first and the authority last, then update wallets. Afterwards compare the heads (`compare` on the authority, or the `head` route on each
+domain) and expect the same index and hash everywhere before announcing the change. Version 1 history copied to a domain that is not yet
+upgraded stays valid as history; nothing in a coin's log has to be rewritten. A single authority coin has one domain and no ordering to keep.
+
 ### 4.6 Visibility
 
 The creator picks the visibility on the coin creation form, next to the authority mode, and it is part of the genesis
@@ -261,7 +269,7 @@ not make the attack impossible: an authority that withholds service still stops 
 | Crash during execution | The transaction rolled back; the proposal is still pending and recovery retries. |
 | Duplicate submission | Same digest is idempotent; the nonce store rejects a second signed copy. |
 | Two spends from one balance at once | One executes; the other fails on `baseSeq`. |
-| Authority database restored from an old backup | The co-approvers' heads are ahead, so the heads differ and the coin freezes. |
+| Authority database restored from an old backup | The authority's own checkpoint files are ahead of the database, so it stops the coin before taking another entry (`rollback-detected`). If the checkpoints went back too, the co-approvers' heads are ahead, so the heads differ and the coin freezes. Wallets that kept the higher head refuse to send. See `docs/chain-labs-rollback-protection.md`. |
 | Authority shows different histories to different domains | Approvals are bound to the head, and the co-approvers compare heads with each other, so the split is found and the coin freezes. |
 | Authority key compromised | It still cannot create a valid entry without the other approvals the threshold needs; the coin is frozen and the key rotated. |
 | Fewer than the threshold of co-approver keys compromised | They cannot approve alone: every entry also needs the authority's signature and a valid owner authorization. |
@@ -467,7 +475,9 @@ Each stage ships separately, with tests, on its own branch.
    - An entry that fails a check during catch-up freezes that copy and is kept as `invalid-history` evidence; the others are
      told, and they pull and check the history themselves rather than freezing on the report.
    - A frozen copy approves nothing, catches up from nothing and compares nothing. History and receipts stay readable.
-     Resuming a frozen coin is an operator's review of the kept evidence; no function does it.
+     Resuming a frozen coin is an operator's review of the kept evidence. The only evidence that has a way back is a `rollback` of a domain that
+     has since been restored: `peer_resume_after_rollback` un-freezes the coin when the domains state the same history (none holds another one), the ledger checks clean and the
+     checkpoint guard is not stopped. A fork, an invalid history or an equivocation has none (`docs/chain-labs-rollback-protection.md`).
    - A domain that claims entries nobody signed, or an old statement replayed as a new one, proves nothing and freezes nothing.
 7. Purchase with Gold, with the limits in the genesis, tested with crash injection at each step of 10.3.
    Built on the chain-labs side as `lib/purchase.php` and the `purchase`, `purchase-recover` and `purchase-cancel` routes of

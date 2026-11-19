@@ -9,9 +9,11 @@
 //   node test/chain-labs-wallet.js
 'use strict';
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 const S = require('./support/chain-labs-servers');
-const { A, B, C, D, nodes, issuerKey, POLICY, b64u, canon, wallet, start, stop, get, post, op, createCoin, NOW, iso, level, levelOk, headOf, hex, credential } = S;
+const { A, B, C, D, nodes, issuerKey, POLICY, b64u, canon, wallet, start, stop, get, post, op, createCoin, units, NOW, iso, level, levelOk, headOf, hex, credential } = S;
 
 let failures = 0, total = 0;
 const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((ok ? 'PASS ' : 'FAIL ') + text + (!ok && detail !== undefined ? ' :: ' + JSON.stringify(detail).slice(0, 400) : '')); };
@@ -324,6 +326,78 @@ const freshState = () => ({ domains: [], cache: {}, skew: 0 });
     line(resumed.status === 'done' && resumed.receipt.entry.purchase.requestId === pw.requestId && (await chain.rows()).pendingBuys.length === 0, 'the same request, signed again, finishes it once the partner is back', resumed);
     const delivered = await post(a, 'action=holdings', { key: alice.key });
     line(delivered.json.statement.coins.find((x) => x.coinId === allOf.id).units === '2700', 'the coin was delivered once (3000, less the 5.00 sent, plus 200)');
+
+
+    console.log('\n== a domain whose database is put back from an older copy');
+    const dave = wallet();
+    const rlb = (await createCoin(a, 'RLB')).json;
+    await op(a, 'open', { coinId: rlb.id });
+    await op(a, 'grant', { coinId: rlb.id, to: dave.key, amount: '1000' });
+    const daveState = freshState();
+    const daveChain = Chain.create(envFor(dave, daveState));
+    await daveChain.addDomain(A);
+    const first = await daveChain.lookup(A);
+    const keptOf = () => (daveState.domains.find((d) => d.domain === A).heads || {})[rlb.id];
+    line(first.ok && keptOf() && keptOf().index === 1 && !keptOf().suspect, 'a verified statement leaves the coin\'s head in the domain list', keptOf());
+    const dbFile = path.join(a.priv, 'chain34.sqlite');
+    await stop(a);
+    const oldCopy = path.join(path.dirname(dbFile), 'chain34-old-' + process.pid + '.sqlite');
+    fs.copyFileSync(dbFile, oldCopy);
+    await start(a);
+    const spend = await daveChain.send(await daveChain.prepareSend(A, rlb.id, bob.key, '1'));
+    line(spend.status === 'done' && (await daveChain.lookup(A)).ok && keptOf().index === 2, 'a later statement moves the kept head up', keptOf());
+    await stop(a);
+    for (const x of ['', '-wal', '-shm']) fs.rmSync(dbFile + x, { force: true });
+    fs.copyFileSync(oldCopy, dbFile);
+    await start(a);
+    line((await units(a, dave, rlb.id)) === '1000', 'the database holds the balance dave had before he spent');
+    const looked = await daveChain.lookup(A);
+    const markedRow = (await daveChain.rows()).domains.find((d) => d.domain === A).coins.find((x) => x.coinId === rlb.id);
+    line(looked.ok && keptOf().index === 2 && keptOf().suspect && keptOf().suspect.kind === 'rollback-suspected' && keptOf().suspect.index === 1, 'a signed statement with a lower entry is not believed and the kept head stays', keptOf());
+    line(markedRow.integrity && markedRow.integrity.code === 'rollback-suspected' && markedRow.integrity.trusted.index === 2 && markedRow.integrity.seen.index === 1, 'the tab is told what was trusted and what is seen now', markedRow.integrity);
+    const refusedSend = await daveChain.prepareSend(A, rlb.id, bob.key, '1').catch((e) => e);
+    line(refusedSend.code === 'rollback-suspected', 'a send is refused before anything is signed', refusedSend.code);
+    const noLine = (await get(a, 'action=coin&coin=' + rlb.id)).json.head.index;
+    line(noLine === 1 && (await units(a, bob, rlb.id)) === '0', 'and nothing reached the domain');
+    const refusedBuy = await daveChain.prepareBuy(A, rlb.id, 'credential', 5, '1').catch((e) => e);
+    line(refusedBuy.code === 'rollback-suspected', 'a purchase is not prepared either', refusedBuy.code);
+    await daveChain.lookup(A);
+    line(keptOf().index === 2 && keptOf().suspect.kind === 'rollback-suspected', 'asking again does not clear the mark while the domain still shows less');
+
+    console.log('\n== the domain recovers');
+    const replayAll = await op(a, 'restore', { coinId: rlb.id });
+    line(replayAll.status === 200, 'the domain brings its entries back (a database copy that still holds them, put back, does the same)', replayAll.json);
+    const healed = await daveChain.lookup(A);
+    line(healed.ok && keptOf().index === 2 && !keptOf().suspect, 'the mark goes when the domain shows the kept entry again', keptOf());
+    const okSend = await daveChain.prepareSend(A, rlb.id, bob.key, '1').catch((e) => e);
+    line(okSend.amount === '100', 'and the coin can be sent again', [okSend.code, okSend.message]);
+
+    console.log('\n== another history at the same entry');
+    const forgedState = freshState();
+    forgedState.domains = JSON.parse(JSON.stringify(daveState.domains));
+    const forgedChain = Chain.create(envFor(dave, forgedState, {
+      fetch: async (url, init) => { const res = await envFor(dave, daveState).fetch(url, init); const text = await res.text(); if (!url.includes('action=holdings')) return { status: res.status, text: async () => text }; const j = JSON.parse(text); j.statement.coins.find((x) => x.coinId === rlb.id).headHash = 'a'.repeat(64); j.signature = b64u(crypto.sign('sha256', Buffer.from(canon(j.statement)), a.pair.privateKey)); return { status: res.status, text: async () => JSON.stringify(j) }; }
+    }));
+    await forgedChain.lookup(A);
+    const fKept = () => forgedState.domains.find((d) => d.domain === A).heads[rlb.id];
+    line(fKept().suspect && fKept().suspect.kind === 'history-conflict' && (await forgedChain.prepareSend(A, rlb.id, bob.key, '1').catch((e) => e)).code === 'history-conflict', 'a different hash at the kept entry is marked and stops sends', fKept());
+    const accepted = await forgedChain.acceptHead(A, rlb.id);
+    line(!fKept().suspect && fKept().hash === 'a'.repeat(64), 'trusting what the domain says now replaces the kept head and clears the mark', fKept());
+    line((await forgedChain.acceptHead(A, rlb.id).catch((e) => e)).code === 'nothing-to-accept', 'and there is nothing to accept when nothing is marked');
+
+    console.log('\n== a coin that disappears');
+    const missingState = freshState();
+    missingState.domains = JSON.parse(JSON.stringify(daveState.domains));
+    const hiding = Chain.create(envFor(dave, missingState, {
+      fetch: async (url, init) => { const res = await envFor(dave, daveState).fetch(url, init); const text = await res.text(); if (!url.includes('action=holdings')) return { status: res.status, text: async () => text }; const j = JSON.parse(text); j.statement.coins = j.statement.coins.filter((x) => x.coinId !== rlb.id); j.signature = b64u(crypto.sign('sha256', Buffer.from(canon(j.statement)), a.pair.privateKey)); return { status: res.status, text: async () => JSON.stringify(j) }; }
+    }));
+    await hiding.lookup(A);
+    const mSus = missingState.domains.find((d) => d.domain === A).heads[rlb.id].suspect;
+    line(mSus && mSus.kind === 'coin-missing', 'a coin the domain showed before and now leaves out is marked', mSus);
+
+    console.log('\n== the kept heads survive a copy of the list');
+    const copied = JSON.parse(JSON.stringify(daveState.domains));
+    line(copied.find((d) => d.domain === A).heads[rlb.id].index === 2, 'the heads are part of the domain records that the wallet saves and backs up');
 
     console.log('\n== leaving');
     await chain.removeDomain(B);

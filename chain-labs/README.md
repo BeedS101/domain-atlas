@@ -156,6 +156,16 @@ Every commit runs in one `BEGIN IMMEDIATE` transaction that re-checks the entry 
 sequence number and balance, so concurrent commits of one index have exactly one winner. Amounts are decimal strings of
 whole units, at most 10^12 (13 digits, so the largest legal supply is written with 13 digits and anything above it is refused). The `lib` folder must be uploaded with the PHP files; the library refuses a direct request.
 
+## Rollback protection
+
+`lib/checkpoint.php` keeps, per coin, an append-only checkpoint log and a journal of committed entries in `<database>.checkpoints/`
+in the private folder (never in the web root). A database that has gone back to an older copy is found before the next entry is
+taken, the coin stops with `rollback-detected` (503), and the operator replays the journal (`restore`), or accepts the loss
+(`accept-rollback`, which retires the coin), or repairs a damaged checkpoint file (`reseal`). `integrity` reports the verdict and
+`resume` lets a partner that froze on rollback evidence run again. The wallet keeps the highest verified head per coin and refuses to
+send while a domain shows less. What this does and does not cover, the recovery steps and what an independent witness needs are in
+`docs/chain-labs-rollback-protection.md`. Back up a live ledger with `VACUUM INTO`, not by copying the file.
+
 ## Provenance
 
 The PHP files were imported from the deployed files. `SOURCE.sha256` records the SHA-256 of each file as it stands (PHP

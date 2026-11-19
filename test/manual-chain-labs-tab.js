@@ -148,6 +148,23 @@ const { A, B, nodes } = S;
     check('a coin the domain calls frozen says so and offers neither Send nor Buy', (await page.locator('.chain-labs-coin', { hasText: 'SGL' }).getByRole('button').count()) === 0 && (await page.locator('.chain-labs-coin', { hasText: 'PRV' }).getByRole('button').count()) === 1);
     await page.evaluate(() => { AtlasWallet.getChainLabs().rows = window.__realRows; return AtlasChainLabsTab.render(); });
     await waitFor(/a\.example says you hold 39\.5 SGL, as of/);
+    await page.evaluate(() => {
+      const chain = AtlasWallet.getChainLabs();
+      const rows = chain.rows.bind(chain);
+      window.__realRows = rows;
+      window.__accepted = [];
+      chain.acceptHead = async (domain, coinId) => { window.__accepted.push([domain, coinId]); };
+      chain.rows = async () => { const v = await rows(); v.domains.forEach((d) => d.coins.forEach((c) => { if (c.symbol === 'SGL') c.integrity = { code: 'rollback-suspected', message: 'This domain now shows an older state of this coin than it did before.', trusted: { index: 4, hash: 'a'.repeat(64) }, seen: { index: 1, hash: 'b'.repeat(64) } }; })); return v; };
+      return AtlasChainLabsTab.render();
+    });
+    await waitFor(/shows an older state of this coin/);
+    const marked = page.locator('.chain-labs-coin', { hasText: 'SGL' });
+    check('a coin whose domain went backwards says what was trusted and what is seen, and offers neither Send nor Buy', /entry 4 before and entry 1 now/.test(await marked.innerText()) && (await marked.getByRole('button', { name: /Send|Buy/ }).count()) === 0 && (await marked.getByRole('button', { name: 'Trust what it says now' }).count()) === 1 && (await page.locator('.chain-labs-coin', { hasText: 'PRV' }).getByRole('button', { name: 'Send…' }).count()) === 1, await marked.innerText());
+    await marked.getByRole('button', { name: 'Trust what it says now' }).click();
+    await until(async () => (await page.evaluate(() => window.__accepted.length)) === 1, 5000);
+    check('trusting what the domain says now asks the wallet to accept the head for that coin only', (await page.evaluate(() => window.__accepted))[0][1].length === 32);
+    await page.evaluate(() => { AtlasWallet.getChainLabs().rows = window.__realRows; return AtlasChainLabsTab.render(); });
+    await waitFor(/a\.example says you hold 39\.5 SGL, as of/);
     check('the section is a labelled group for screen readers', await page.evaluate(() => { const s = document.getElementById('chainLabsSection'); const h = document.getElementById(s.getAttribute('aria-labelledby')); return !!h && /Chain labs coins/.test(h.textContent); }));
 
     console.log('--- what the signer will sign ---');
@@ -179,8 +196,8 @@ const { A, B, nodes } = S;
     check('the list and the last answers are kept on this device', (await page.evaluate(() => AtlasWallet.getChainLabs().domains())).length === 2 && (await page.evaluate(() => AtlasWallet.getChainLabs().rows())).domains[0].coins.length === 2);
 
     const raw = await page.evaluate(async () => { const g = await chrome.storage.local.get(['atlasChainLabsCache', 'atlasChainLabsDomains']); return { cache: JSON.stringify(g.atlasChainLabsCache || {}), domains: JSON.stringify(g.atlasChainLabsDomains || {}) }; });
-    check('the cache of answers is stored encrypted, not as readable balances', /__atlasEncrypted/.test(raw.cache) && !/SGL|units/.test(raw.cache), raw.cache.slice(0, 120));
-    check('the list itself holds only host names and the public keys pinned for them', /a\.example/.test(raw.domains) && !/seed|private|privateKey/i.test(raw.domains));
+    check('the cache of answers is stored encrypted, not as readable balances', /__atlasEncrypted/.test(raw.cache) && !/"SGL"|"units"/.test(raw.cache), raw.cache.slice(0, 120));
+    check('the list itself holds host names, the public keys pinned for them and the newest entry shown for each coin, never a balance or a secret', /a\.example/.test(raw.domains) && !/seed|private|privateKey|units/i.test(raw.domains));
 
     console.log('--- the backup ---');
     const seed = created.seedPhrase;

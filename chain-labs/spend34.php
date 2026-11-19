@@ -63,6 +63,8 @@ const SPEND34_STATUS = [
     'peer-down' => 502, 'peer-bad-answer' => 502, 'bad-history' => 502, 'not-enough-approvals' => 503,
     'locked' => 409, 'request-reused' => 409, 'insufficient-treasury' => 409, 'duplicate-purchase' => 409, 'purchase-key-limit' => 409, 'purchase-day-limit' => 409,
     'no-purchase-policy' => 409, 'revoked-credential' => 409, 'cannot-cancel' => 409, 'cannot-close' => 409, 'sale-closed' => 409, 'unknown-request' => 404, 'no-purchase-verifier' => 503,
+    'rollback-detected' => 503, 'checkpoint-conflict' => 503, 'checkpoint-corrupt' => 503, 'checkpoint-unavailable' => 503,
+    'not-halted' => 409, 'confirm-mismatch' => 409, 'reason-needed' => 400, 'not-damaged' => 409, 'database-invalid' => 409, 'entries-missing' => 409, 'not-frozen' => 409, 'not-resumable' => 409,
     'legacy-authorization' => 409, 'wrong-authority' => 409, 'wrong-genesis' => 409, 'unknown-base' => 409,
 ];
 function fail34(LedgerError $e): never
@@ -144,7 +146,8 @@ try {
     }
     if ($method === 'GET' && $action === 'head') {
         $coinId = arg34('coin', '/^[a-f0-9]{32}$/D');
-        reply34(200, ['ok' => true, 'head' => peer_head_attestation($db, $node, $coinId, $now), 'state' => ledger_coin($db, $coinId)['state']]);
+        $at = isset($_GET['index']) ? (int) arg34('index', '/^\d{1,9}$/D') : null;
+        reply34(200, ['ok' => true, 'head' => peer_head_attestation($db, $node, $coinId, $now, $at), 'state' => ledger_state_shown($db, ledger_coin($db, $coinId))]);
     }
     if ($method === 'GET' && $action === 'proposal') {
         $coinId = arg34('coin', '/^[a-f0-9]{32}$/D');
@@ -201,7 +204,7 @@ try {
     }
 
     // Operator actions.
-    if (in_array($action, ['open', 'grant', 'recover', 'compare', 'evidence', 'purchase-recover', 'purchase-cancel'], true)) {
+    if (in_array($action, ['open', 'grant', 'recover', 'compare', 'evidence', 'purchase-recover', 'purchase-cancel', 'integrity', 'restore', 'accept-rollback', 'reseal', 'resume'], true)) {
         $m = body34();
         operator34($m, $admin);
         $coinId = $m['coinId'] ?? null;
@@ -269,6 +272,32 @@ try {
         $coin = ledger_coin($db, $coinId);
         if ($coin['mode'] !== 'multi') reply34(409, ['ok' => false, 'code' => 'not-multi', 'error' => 'Only a multi authority coin has partners to compare with']);
         reply34(200, ['ok' => true] + peer_compare_heads($db, $node, $coinId, peer_http_sender($peerConfig, 5), $now));
+    }
+    // The checkpoint of a coin (lib/checkpoint.php): what it says, and the ways back from a database that was restored from an older copy.
+    //   integrity        the verdict, the floor and the database head
+    //   restore          puts the lost entries back from this domain's journal and, for a coin of several domains, from the others
+    //   accept-rollback  the operator accepts that the entries are lost for good: the coin is frozen and stays stopped
+    //   reseal           begins a new checkpoint file after the old one was damaged, when the database passes the checker
+    //   resume           lets a coin that froze itself on evidence of a rollback run again, when every domain states the same history
+    if ($action === 'integrity') {
+        $verdict = ledger_guard_check($db, $coinId, false);
+        reply34(200, ['ok' => true, 'verdict' => $verdict, 'head' => ledger_head($db, $coinId), 'state' => ledger_coin($db, $coinId)['state']]);
+    }
+    if ($action === 'restore') {
+        $coin = ledger_coin($db, $coinId);
+        $out = ['journal' => ledger_guard_replay($db, $coinId, $now)];
+        if (ledger_guard_halted($db, $coinId) !== null && $coin['mode'] === 'multi') $out['partners'] = peer_restore_from_partners($db, $node, $coinId, $send, $now);
+        $out['verdict'] = ledger_guard_check($db, $coinId, false);
+        reply34(200, ['ok' => true] + $out);
+    }
+    if ($action === 'accept-rollback') {
+        reply34(200, ['ok' => true, 'accepted' => ledger_guard_accept($db, $coinId, is_array($m['confirm'] ?? null) ? $m['confirm'] : [], (string) ($m['reason'] ?? ''), $now)]);
+    }
+    if ($action === 'reseal') {
+        reply34(200, ['ok' => true, 'resealed' => ledger_guard_reseal($db, $coinId, is_array($m['confirm'] ?? null) ? $m['confirm'] : [], $now)]);
+    }
+    if ($action === 'resume') {
+        reply34(200, ['ok' => true] + peer_resume_after_rollback($db, $node, $coinId, $send, $now));
     }
     if ($action === 'evidence') {
         reply34(200, ['ok' => true, 'state' => ledger_coin($db, $coinId)['state'], 'evidence' => ledger_evidence($db, $coinId)]);

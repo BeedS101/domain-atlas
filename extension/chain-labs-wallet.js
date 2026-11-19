@@ -208,6 +208,9 @@
     unreadable: 'The answer was not in a form the wallet reads, so it was ignored.',
     clock: 'The answer\'s time does not match this device\'s clock. Check the clock and try again.',
     network: 'The domain did not answer.',
+    'rollback-suspected': 'This domain now reports an older state of this coin than it did before. Its database may have been restored from a backup, which can bring back balances that were already spent. Nothing is sent or bought on this coin until the domain recovers or you decide to trust the new state.',
+    'history-conflict': 'This domain now reports a different history for this coin than the one it reported before. Nothing is sent or bought on this coin until the difference is explained or you decide to trust the new state.',
+    'coin-missing': 'This domain no longer lists a coin it listed before. Its database may have been restored from an older backup. Nothing is sent or bought on this coin until the domain recovers or you decide to trust the new state.',
     'proof-unsupported': 'This identity cannot sign for a ledger, so only public coins are shown.',
     'not-listed': 'That domain is not on your list.'
   };
@@ -226,7 +229,14 @@
     'legacy-authorization': 'This domain no longer takes transfers in the old form. Update the wallet and try again.',
     'wrong-authority': 'The domain says this transfer was signed for a different domain. Nothing was sent.',
     'wrong-genesis': 'The domain says this transfer was signed for a different version of the coin. Nothing was sent.',
-    'unknown-base': 'The domain does not recognise the balance this transfer was made from. Refresh and try again.'
+    'unknown-base': 'The domain does not recognise the balance this transfer was made from. Refresh and try again.',
+    'rollback-detected': 'The domain has found that its own database was restored from an older copy, and has stopped this coin until that is sorted out. Nothing was sent.',
+    'checkpoint-conflict': 'The domain has found that its database holds a different history from the one it recorded, and has stopped this coin. Nothing was sent.',
+    'checkpoint-corrupt': 'The domain\'s integrity record is damaged, so it has stopped this coin until the operator repairs it. Nothing was sent.',
+    'checkpoint-unavailable': 'The domain could not record the transfer safely, so it did not make it. Try again later.',
+    'rollback-suspected': 'This domain now reports an older state of this coin than it did before. Nothing is sent until it recovers or you decide to trust the new state.',
+    'history-conflict': 'This domain now reports a different history for this coin than before. Nothing is sent until the difference is explained or you decide to trust the new state.',
+    'coin-missing': 'This domain no longer lists this coin. Nothing is sent until it recovers or you decide to trust the new state.'
   };
 
   const OFFER_STATE_TTL_MS = 30000;
@@ -247,7 +257,14 @@
     'unknown-coin': 'The domain does not know this coin.',
     'legacy-authorization': 'This domain no longer takes purchases in the old form. Update the wallet and try again.',
     'wrong-authority': 'The domain says this purchase was signed for a different domain. Nothing was bought.',
-    'wrong-genesis': 'The domain says this purchase was signed for a different version of the coin. Nothing was bought.'
+    'wrong-genesis': 'The domain says this purchase was signed for a different version of the coin. Nothing was bought.',
+    'rollback-detected': 'The domain has found that its own database was restored from an older copy, and has stopped this coin. Nothing was bought.',
+    'checkpoint-conflict': 'The domain has found that its database holds a different history from the one it recorded, and has stopped this coin. Nothing was bought.',
+    'checkpoint-corrupt': 'The domain\'s integrity record is damaged, so it has stopped this coin until the operator repairs it. Nothing was bought.',
+    'checkpoint-unavailable': 'The domain could not record the purchase safely, so it did not make it. Try again later.',
+    'rollback-suspected': 'This domain now reports an older state of this coin than it did before. Nothing is bought until it recovers or you decide to trust the new state.',
+    'history-conflict': 'This domain now reports a different history for this coin than before. Nothing is bought until the difference is explained or you decide to trust the new state.',
+    'coin-missing': 'This domain no longer lists this coin. Nothing is bought until it recovers or you decide to trust the new state.'
   };
 
   function create(env) {
@@ -369,12 +386,112 @@
       return checked.ok ? Object.assign({ signed }, checked) : checked;
     }
 
+    // ---------- the highest head a domain has shown ----------
+
+    // A domain's database can be put back from an older copy, which brings back balances that were already spent. The statements a
+    // domain signs name the newest entry it holds for each coin, so the wallet keeps the highest one it has verified, per domain and
+    // coin, with the list of domains (and so in its backup). A later statement that holds a lower entry, another hash at the same
+    // entry, or no longer lists the coin is not believed: the coin is marked and takes no send or purchase until the head
+    // comes back to the kept one on the same history, or the person says to trust the new state.
+    const HEADS_KEPT = 200;
+
+    function headNote(h) { return { index: h.index, hash: h.hash }; }
+
+    // Asks the domain for its signed head at an index, to see whether the history that reached it passes through the kept entry.
+    // true: it does. false: another hash is held there. null: the domain cannot say (an older server, or no answer).
+    async function headAt(record, coinId, index, hash) {
+      const r = await request(record.domain, 'GET', 'action=head&coin=' + coinId + '&index=' + index);
+      const head = r.json && r.json.ok === true ? r.json.head : null;
+      const payload = isObject(head) ? head.payload : null;
+      if (!isObject(payload) || payload.type !== 'atlas.ledger.head' || payload.coinId !== coinId || payload.domain !== record.domain || payload.index !== index || !HASH_RE.test(payload.hash || '')) return null;
+      let text;
+      try { text = canonical(payload); } catch (err) { return null; }
+      if (!await verifyDomainSignature(record.key, text, head.signature)) return null;
+      return payload.hash === hash;
+    }
+
+    // What one statement says about one coin against the kept head: new, same, progress, older (a statement older than the kept
+    // one, ignored), rollback or conflict.
+    async function judgeHead(record, kept, c, asOfMs) {
+      if (!kept) return { kind: 'new' };
+      if (asOfMs < kept.asOf) return { kind: 'older' };
+      if (c.headIndex < kept.index) return { kind: 'rollback' };
+      if (c.headIndex === kept.index) return { kind: c.headHash === kept.hash ? 'same' : 'conflict' };
+      const same = await headAt(record, c.coinId, kept.index, kept.hash);
+      return { kind: same === false ? 'conflict' : 'progress' };
+    }
+
+    // Weighs a verified statement against the kept heads, keeps the higher, and marks what is wrong. Returns the verdict per coin.
+    async function observe(record, got) {
+      const asOfMs = Date.parse(got.asOf);
+      const kept = (await recordFor(record.domain)).heads || {};
+      const verdicts = {};
+      for (const c of got.coins) verdicts[c.coinId] = await judgeHead(record, isObject(kept[c.coinId]) ? kept[c.coinId] : null, c, asOfMs);
+      // A coin the domain showed before and now leaves out, when the statement is one that would list it.
+      for (const coinId of Object.keys(kept)) {
+        if (verdicts[coinId] || !isObject(kept[coinId])) continue;
+        if ((got.signed || kept[coinId].isPublic === true) && asOfMs >= kept[coinId].asOf) verdicts[coinId] = { kind: 'missing' };
+      }
+      await serial(async () => {
+        const list = await domains();
+        const entry = list.find((d) => d.domain === record.domain);
+        if (!entry) return;
+        const heads = isObject(entry.heads) ? Object.assign({}, entry.heads) : {};
+        for (const c of got.coins) {
+          const v = verdicts[c.coinId];
+          const prior = isObject(heads[c.coinId]) ? heads[c.coinId] : null;
+          if (v.kind === 'new' || v.kind === 'progress' || v.kind === 'same') {
+            heads[c.coinId] = { index: c.headIndex, hash: c.headHash, asOf: asOfMs, isPublic: c.visibility === 'public' };
+          } else if (prior && (v.kind === 'rollback' || v.kind === 'conflict')) {
+            heads[c.coinId] = Object.assign({}, prior, { suspect: { kind: v.kind === 'rollback' ? 'rollback-suspected' : 'history-conflict', index: c.headIndex, hash: c.headHash, asOf: asOfMs, seenAt: nowMs() } });
+          }
+        }
+        for (const coinId of Object.keys(verdicts)) {
+          if (verdicts[coinId].kind === 'missing' && isObject(heads[coinId])) heads[coinId] = Object.assign({}, heads[coinId], { suspect: { kind: 'coin-missing', index: -1, hash: null, asOf: asOfMs, seenAt: nowMs() } });
+        }
+        const ids = Object.keys(heads);
+        if (ids.length > HEADS_KEPT) for (const id of ids.slice(0, ids.length - HEADS_KEPT)) delete heads[id];
+        await env.saveDomains(list.map((d) => (d.domain === record.domain ? Object.assign({}, d, { heads }) : d)));
+      });
+      return verdicts;
+    }
+
+    // The mark on a coin, if any: what to tell the person and the heads involved.
+    function integrityOf(record, coinId) {
+      const kept = isObject(record && record.heads) ? record.heads[coinId] : null;
+      const sus = isObject(kept) ? kept.suspect : null;
+      if (!isObject(sus)) return null;
+      return { code: sus.kind, message: PROBLEMS[sus.kind], trusted: headNote(kept), seen: { index: sus.index, hash: sus.hash } };
+    }
+
+    async function assertIntegrity(record, coinId) {
+      const mark = integrityOf((await recordFor(record.domain)), coinId);
+      if (mark) throw Object.assign(new Error(mark.message), { code: mark.code });
+    }
+
+    // The person trusts what the domain says now: the lower or different head becomes the kept one. This is what accepting a
+    // domain's recovery or its loss looks like; nothing else clears the mark but the domain showing the kept entry again.
+    async function acceptHead(domain, coinId) {
+      const record = await recordFor(domain);
+      await serial(async () => {
+        const list = await domains();
+        const entry = list.find((d) => d.domain === record.domain);
+        const kept = entry && isObject(entry.heads) ? entry.heads[coinId] : null;
+        if (!isObject(kept) || !isObject(kept.suspect)) throw Object.assign(new Error('There is nothing to accept for that coin.'), { code: 'nothing-to-accept' });
+        const heads = Object.assign({}, entry.heads);
+        if (kept.suspect.kind === 'coin-missing') delete heads[coinId];
+        else heads[coinId] = { index: kept.suspect.index, hash: kept.suspect.hash, asOf: kept.suspect.asOf, isPublic: kept.isPublic === true };
+        await env.saveDomains(list.map((d) => (d.domain === record.domain ? Object.assign({}, d, { heads }) : d)));
+      });
+    }
+
     async function lookup(domain) {
       const record = await recordFor(domain);
       const key = await env.ownerKey();
       if (!key) throw Object.assign(new Error('Unlock your wallet first.'), { code: 'locked' });
       let got = await lookupOnce(record, key, true);
       if (!got.ok && got.reason === 'proof-unsupported') got = await lookupOnce(record, key, false);
+      if (got.ok) await observe(record, got).catch(() => null);
       // A domain taken off the list while it was being asked is not put back by its answer, and an answer for a key the
       // wallet has since stopped acting as is dropped instead of being stored under the identity that is active now.
       const answer = await mutateCache(async (c) => {
@@ -409,7 +526,7 @@
           domain: d.domain, fingerprint: d.fingerprint || '', addedAt: d.addedAt, asOf: a ? a.asOf : null, fetchedAt: a ? a.fetchedAt : null, proven: !!(a && a.proven),
           problem: a && a.problem ? PROBLEMS[a.problem] || PROBLEMS.network : null, never: !a || a.fetchedAt === null,
           stale: !a || a.fetchedAt === null || nowMs() - a.fetchedAt > STALE_AFTER_MS || !!a.problem,
-          coins: a ? a.coins.map((coin) => Object.assign({ amount: formatUnits(coin.units, coin.decimals) }, coin)) : []
+          coins: a ? a.coins.map((coin) => Object.assign({ amount: formatUnits(coin.units, coin.decimals), integrity: integrityOf(d, coin.coinId) }, coin)) : []
         });
       }
       return { domains: out, pendingSends: c.pendingSends, pendingBuys: c.pendingBuys.map((p) => ({ domain: p.domain, coinId: p.coinId, requestId: p.requestId, price: p.price, symbol: p.symbol, decimals: p.decimals, units: p.units, note: p.note || '', createdAt: p.createdAt })) };
@@ -422,6 +539,10 @@
       let got = await lookupOnce(record, key, true);
       if (!got.ok && got.reason === 'proof-unsupported') got = await lookupOnce(record, key, false);
       if (!got.ok) throw Object.assign(new Error(PROBLEMS[got.reason] || PROBLEMS.network), { code: got.reason });
+      // The statement is weighed against the heads the domain showed before, so a rolled back domain is found at the moment of sending
+      // and not only at the next refresh.
+      await observe(record, got).catch(() => null);
+      await assertIntegrity(record, coinId);
       const coin = got.coins.find((c) => c.coinId === coinId);
       if (!coin) throw Object.assign(new Error('This domain no longer lists that coin for you.'), { code: 'unknown-coin' });
       return { coin, key };
@@ -554,6 +675,7 @@
     }
 
     async function prepareBuy(domain, coinId, credential, quantity, priceText, recipient) {
+      await assertIntegrity(await recordFor(domain), coinId);
       const terms = await offer(domain, coinId);
       const key = await env.ownerKey();
       if (!key) throw Object.assign(new Error('Unlock your wallet first.'), { code: 'locked' });
@@ -582,6 +704,7 @@
     // signature and expiry, since an intent expires) is the same purchase and cannot be delivered twice.
     async function buy(prepared) {
       const record = await recordFor(prepared.domain);
+      await assertIntegrity(record, prepared.coinId);
       const intent = await intentFor(prepared, await coinBinding(record, prepared.coinId));
       await mutateCache((c) => {
         if (c.pendingBuys.some((p) => p.requestId === prepared.requestId)) return;
@@ -628,7 +751,7 @@
       return mutateCache((c) => { c.pendingBuys = c.pendingBuys.filter((p) => p.requestId !== requestId); });
     }
 
-    return { addDomain, removeDomain, lookup, refresh, rows, prepareSend, send, checkPending, offer, offerState, prepareBuy, buy, resumeBuy, dropBuy, domains };
+    return { addDomain, removeDomain, lookup, refresh, rows, acceptHead, prepareSend, send, checkPending, offer, offerState, prepareBuy, buy, resumeBuy, dropBuy, domains };
   }
 
   // What to tell the person when no Gold credential can pay: each credential the wallet found and why it cannot be used, or that

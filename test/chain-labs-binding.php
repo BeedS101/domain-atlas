@@ -246,6 +246,17 @@ $copy->prepare('UPDATE ledger_log SET private_json=? WHERE coin_id=? AND idx=2')
 $found = ledger_check($copy, $e['coin']);
 t($found !== [] && (bool) array_filter($found, fn($p) => str_contains($p, 'genesis')), 'the checker finds an entry whose owner signature names another genesis', $found);
 
+echo "\n== the first transfers on a newly opened coin\n";
+$n = world('n.example');
+$genesisEntry = ledger_head($n['db'], $n['coin']);
+t($genesisEntry['index'] === 0 && $genesisEntry['hash'] !== $n['digest'], 'a newly opened coin has only its genesis entry, whose hash is not the genesis digest');
+t(refuses(fn() => ledger_prepare_transfer($n['db'], $n['coin'], authorization($n, $n['treasury'], $alice['key'], '100', ['baseHead' => $n['digest']]), $NOW), 'unknown-base'), 'the genesis digest is not a base head: it is no entry of the log');
+t(grant($n, $alice['key'], '100')['index'] === 1, 'the treasury\'s first grant is based on the genesis entry and goes through');
+$onGenesis = authorization($n, $alice, $bob['key'], '10', ['baseHead' => $genesisEntry['hash']]);
+t(ledger_prepare_transfer($n['db'], $n['coin'], $onGenesis, $NOW)['public']['index'] === 2, 'a first transfer based on the genesis entry is accepted');
+t(send($n, $alice, $bob['key'], '10')['index'] === 2 && balance_of($n, $bob) === 10, 'and so is one based on the head the holder saw after being funded');
+t(refuses(fn() => ledger_prepare_transfer($n['db'], $n['coin'], authorization($n, $alice, $bob['key'], '10', ['baseHead' => $genesisEntry['hash']]), $NOW), 'stale'), 'once the holder has sent, a base before that send is stale');
+
 echo "\n";
 echo $failures === 0 ? "ALL $total CHAIN-LABS BINDING CHECKS PASSED\n" : "$failures of $total FAILED\n";
 exit($failures === 0 ? 0 : 1);

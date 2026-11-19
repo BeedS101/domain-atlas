@@ -25,6 +25,8 @@ function ledger_fail(string $reason, string $message): never
     throw new LedgerError($reason, $message);
 }
 
+require_once __DIR__ . '/checkpoint.php';
+
 // ---------- encoding, hashing, signatures ----------
 
 function ledger_b64u_encode(string $raw): string
@@ -117,6 +119,8 @@ function ledger_open(string $path): PDO
     $db->exec('PRAGMA busy_timeout=5000');
     $db->exec('PRAGMA foreign_keys=ON');
     ledger_schema($db);
+    // The checkpoints of this database are kept beside it, in the same private folder, never in a public one.
+    ledger_guard_attach($db, $path === ':memory:' || $path === '' ? null : $path . '.checkpoints');
     return $db;
 }
 
@@ -390,6 +394,7 @@ function ledger_activate(PDO $db, string $coinId, string $authorityPrivatePem): 
         $entry = ledger_genesis_entry($coin, $approvals);
         ledger_write_genesis_entry($db, $coin, $entry, ledger_sign($authorityPrivatePem, $entry['hash']));
         $db->exec('COMMIT');
+        try { ledger_guard_check($db, $coinId, true); } catch (Throwable $e) {}
     } catch (Throwable $e) {
         ledger_rollback($db);
         throw $e;
@@ -420,6 +425,7 @@ function ledger_mirror_genesis(PDO $db, string $coinId, array $record): void
         if ($authorityKey === null || !ledger_verify($authorityKey, $entry['hash'], $record['authoritySignature'] ?? null)) ledger_fail('bad-authority-signature', 'the authority signature does not verify');
         ledger_write_genesis_entry($db, $coin, $entry, $record['authoritySignature']);
         $db->exec('COMMIT');
+        try { ledger_guard_check($db, $coinId, true); } catch (Throwable $e) {}
     } catch (Throwable $e) {
         ledger_rollback($db);
         throw $e;
@@ -621,6 +627,7 @@ function ledger_prepare_transfer(PDO $db, string $coinId, array $authorization, 
 {
     $coin = ledger_coin($db, $coinId);
     if ($coin['state'] !== 'active') ledger_fail('not-active', 'the coin is ' . $coin['state']);
+    ledger_guard_require($db, $coinId);
     $t = ledger_check_authorization($coin, $authorization, $now);
     $nonce = $db->prepare('SELECT 1 FROM ledger_nonces WHERE coin_id=? AND owner_key=? AND nonce=?');
     $nonce->execute([$coinId, $t['from'], $t['nonce']]);
@@ -747,6 +754,7 @@ function ledger_validate_prepared(PDO $db, string $coinId, array $prepared, int 
 {
     $coin = ledger_coin($db, $coinId);
     if ($coin['state'] !== 'active') ledger_fail('not-active', 'the coin is ' . $coin['state']);
+    ledger_guard_require($db, $coinId);
     [$public, $private, $hash] = ledger_check_frame($db, $coin, $prepared);
     ledger_validate_state($db, $coin, $public, $private, $now);
     return ['public' => $public, 'private' => $private, 'hash' => $hash];
@@ -757,10 +765,13 @@ function ledger_validate_prepared(PDO $db, string $coinId, array $prepared, int 
 function ledger_commit(PDO $db, string $coinId, array $prepared, string $authoritySignature, array $approvals, int $now, bool $history = false): array
 {
     $db->exec('BEGIN IMMEDIATE');
+    $restoring = false;
     try {
         $coin = ledger_coin($db, $coinId);
         $genesis = $coin['genesis'];
-        if ($coin['state'] !== 'active') ledger_fail('not-active', 'the coin is ' . $coin['state']);
+        if ($coin['state'] !== 'active' && !($history && $coin['state'] === 'frozen' && ledger_guard_may_restore($db, $coinId))) ledger_fail('not-active', 'the coin is ' . $coin['state']);
+        // A database that is behind what this domain already committed takes no new entry; history may still be replayed into it.
+        ledger_guard_require($db, $coinId, $history);
         [$public, $private, $hash] = ledger_check_frame($db, $coin, $prepared);
         $authorityKey = ledger_roster_key($genesis, $genesis['authority']);
         if ($authorityKey === null || !ledger_verify($authorityKey, $hash, $authoritySignature)) ledger_fail('bad-authority-signature', 'the authority signature does not verify');
@@ -809,12 +820,15 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
         }
         $db->prepare("UPDATE ledger_proposals SET status='executed', executed_index=? WHERE coin_id=? AND from_key=? AND nonce=? AND status='pending'")
             ->execute([$public['index'], $coinId, $t['from'], $t['nonce']]);
+        // The intent is on the disk before the database commits; without it nothing commits.
+        $restoring = ledger_guard_before($db, $coinId, $public, $hash, $history, $now);
         $db->exec('COMMIT');
-        return ['index' => $public['index'], 'hash' => $hash];
     } catch (Throwable $e) {
         ledger_rollback($db);
         throw $e;
     }
+    ledger_guard_after($db, $coinId, $public, $hash, $restoring, $now);
+    return ['index' => $public['index'], 'hash' => $hash];
 }
 
 // ---------- sharing the log between roster domains ----------
@@ -858,7 +872,7 @@ function ledger_public_coin(PDO $db, string $coinId): array
     $head = ledger_head($db, $coinId);
     $count = $db->prepare('SELECT COUNT(*) FROM ledger_accounts WHERE coin_id=?');
     $count->execute([$coinId]);
-    return ['genesis' => $coin['genesis'], 'genesisDigest' => $coin['genesis_digest'], 'state' => $coin['state'], 'supply' => $coin['genesis']['initialUnits'],
+    return ['genesis' => $coin['genesis'], 'genesisDigest' => $coin['genesis_digest'], 'state' => ledger_state_shown($db, $coin), 'supply' => $coin['genesis']['initialUnits'],
         'head' => $head, 'entries' => $head['index'] + 1, 'accounts' => (int) $count->fetchColumn()];
 }
 
