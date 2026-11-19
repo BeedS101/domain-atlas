@@ -299,6 +299,8 @@ function peer_on_close_sale(PDO $db, array $node, string $from, array $body, int
     } catch (LedgerError $e) {
         // A copy that cannot be brought up to date does not change the check below, which rests on what this domain itself approved.
     }
+    // The witness rests on this domain's own log and approvals; a copy that is stopped for a rollback may have lost either.
+    ledger_guard_require($db, $coinId);
     $db->exec('BEGIN IMMEDIATE');
     try {
         if (ledger_request_entry($db, $coinId, $requestId) !== null) ledger_fail('cannot-close', 'an entry for this request is in this domain\'s log');

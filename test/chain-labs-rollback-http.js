@@ -75,9 +75,55 @@ const send = async (w, coinId, to, amount) => post(a, 'action=propose', { author
     line(restored.status === 200 && restored.json.journal.applied === 2 && restored.json.verdict.status === 'ok', 'restore replays the two lost entries from the journal', restored.json);
     const after = (await get(a, 'action=coin&coin=' + coin.id)).json;
     line(after.head.index === head.index && after.head.hash === head.hash && after.state === 'active', 'the head is exactly the one before the rollback and the coin is active', after.head);
+    const kindsAfter = fs.readFileSync(path.join(cpDir(), coin.id + '.log'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).kind);
+    line(kindsAfter.includes('halt') && kindsAfter.includes('restored') && kindsAfter.indexOf('halt') < kindsAfter.lastIndexOf('restored'), 'the checkpoint log keeps the stop and the recovery both: nothing is erased', kindsAfter);
     line((await units(a, alice, coin.id)) === '0' && (await units(a, bob, coin.id)) === '30000' && (await units(a, carol, coin.id)) === '70000', 'balances are as they were: alice\'s 100000 did not come back');
     const again = await send(bob, coin.id, carol.key, '1000');
     line(again.status === 201, 'the coin takes transfers again', again.json);
+
+    console.log('\n== who may recover, and what recovery cannot do');
+    const backup3 = path.join(path.dirname(backup), 'chain34-backup3-' + process.pid + '.sqlite');
+    await stop(a);
+    copyDb(backup3);
+    await start(a);
+    const s4 = await send(bob, coin.id, carol.key, '2000');
+    line(s4.status === 201, 'one more transfer after the third backup');
+    await stop(a);
+    putBack(backup3);
+    await start(a);
+    const halted = async () => (await op(a, 'integrity', { coinId: coin.id })).json.verdict.status;
+    line((await halted()) === 'halted', 'the coin is stopped by a rollback');
+    const confirm = (await op(a, 'integrity', { coinId: coin.id })).json.verdict.detail;
+    const bodies = {
+      integrity: { coinId: coin.id },
+      restore: { coinId: coin.id },
+      'accept-rollback': { coinId: coin.id, reason: 'x', confirm: { floorIndex: confirm.floorIndex, floorHash: confirm.floorHash, databaseIndex: confirm.databaseIndex } },
+      reseal: { coinId: coin.id, confirm: { databaseIndex: 0, databaseHash: 'f'.repeat(64) } },
+      resume: { coinId: coin.id }
+    };
+    for (const [action, body] of Object.entries(bodies)) {
+      const none = await post(a, 'action=' + action, body);
+      const wrong = await post(a, 'action=' + action, { ...body, adminToken: '0'.repeat(64) });
+      const short = await post(a, 'action=' + action, { ...body, adminToken: a.token.slice(0, 32) });
+      const inUrl = await post(a, 'action=' + action + '&adminToken=' + a.token, body);
+      const asGet = await get(a, 'action=' + action + '&coin=' + coin.id + '&adminToken=' + a.token);
+      line(none.status === 403 && wrong.status === 403 && short.status === 403 && inUrl.status === 403 && asGet.status === 404, action + ' needs the operator token in the body: none, a wrong one, a short one and one in the address are refused', [none.status, wrong.status, short.status, inUrl.status, asGet.status]);
+    }
+    line((await halted()) === 'halted' && (await get(a, 'action=coin&coin=' + coin.id)).json.state === 'frozen', 'and none of those refusals changed the coin: it is still stopped');
+    const walker = await post(a, 'action=holdings', { key: alice.key, adminToken: a.token });
+    line(walker.status === 200 && !('verdict' in walker.json), 'a token sent to a public route opens nothing');
+
+    const notDamaged = await op(a, 'reseal', { coinId: coin.id, confirm: { databaseIndex: confirm.databaseIndex, databaseHash: 'f'.repeat(64) } });
+    const notFrozen = await op(a, 'resume', { coinId: coin.id });
+    line(notDamaged.status === 409 && ['not-damaged', 'confirm-mismatch'].includes(notDamaged.json.code) && notFrozen.status === 409 && (await halted()) === 'halted', 'a reseal is not a way round a rollback, and a resume does not apply to a coin that is not frozen: both are refused and the stop stays', [notDamaged.json, notFrozen.json]);
+    const journalFile = path.join(cpDir(), coin.id + '.journal');
+    const savedJournal = fs.readFileSync(journalFile);
+    fs.rmSync(journalFile);
+    const noJournal = await op(a, 'restore', { coinId: coin.id });
+    line((await halted()) === 'halted' && (noJournal.json.journal ? noJournal.json.journal.applied === 0 : true), 'a restore with no journal to replay changes nothing and the coin stays stopped', noJournal.json);
+    fs.writeFileSync(journalFile, savedJournal);
+    const fixed = await op(a, 'restore', { coinId: coin.id });
+    line(fixed.status === 200 && fixed.json.verdict.status === 'ok', 'with the journal back the restore replays it and the stop ends', fixed.json);
 
     console.log('\n== accepting the loss');
     const backup2 = path.join(path.dirname(backup), 'chain34-backup2-' + process.pid + '.sqlite');
@@ -100,6 +146,10 @@ const send = async (w, coinId, to, amount) => post(a, 'action=propose', { author
     const afterAccept = await send(carol, coin.id, alice.key, '1');
     line(afterAccept.status >= 400 && (await units(a, alice, coin.id)) === '0', 'nothing can be spent on it', afterAccept.json);
     line((await op(a, 'restore', { coinId: coin.id })).json.journal.applied === 0, 'and restore no longer replays anything');
+    const afterReseal = await op(a, 'reseal', { coinId: coin.id, confirm: { databaseIndex: d.databaseIndex, databaseHash: 'f'.repeat(64) } });
+    const afterResume = await op(a, 'resume', { coinId: coin.id });
+    const verdictAfter = (await op(a, 'integrity', { coinId: coin.id })).json;
+    line(afterReseal.status === 409 && afterResume.status === 409 && afterResume.json.code === 'not-resumable' && verdictAfter.verdict.status === 'halted' && verdictAfter.state === 'frozen', 'neither a reseal nor a resume brings an accepted loss back: the coin stays stopped and frozen', [afterReseal.json, afterResume.json, verdictAfter.verdict]);
 
     console.log('\n== a damaged checkpoint file');
     const coin2 = (await createCoin(a, 'DMG')).json;

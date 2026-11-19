@@ -69,7 +69,7 @@
     // it comes back, or the person decides to trust what it says now.
     if (coin.integrity) {
       line.appendChild(el('div', { className: 'ledger-problem', role: 'alert', textContent: coin.integrity.message + ' It reported entry ' + coin.integrity.trusted.index + ' before' + (coin.integrity.seen.index >= 0 ? ' and entry ' + coin.integrity.seen.index + ' now.' : ' and does not list the coin now.') }));
-      actions.appendChild(button('Trust what it says now', () => act(() => chain().acceptHead(domain.domain, coin.coinId), 'The wallet now treats the domain\'s current state as the real one.'), 'secondary'));
+      actions.appendChild(button('Trust what it says now…', () => { panel = { kind: 'trust', domain: domain.domain, coin, integrity: coin.integrity }; render(); }, 'secondary'));
     } else if (coin.state === 'active') {
       actions.appendChild(button('Send…', () => { panel = { kind: 'send', domain: domain.domain, coin, step: 'form' }; render(); }));
       // Buy with Gold is offered only where the authority has published terms and can take the Gold; otherwise the coin says it is not for sale.
@@ -288,6 +288,13 @@
     if (panel && panel.kind === 'remove') {
       host.appendChild(stepBox('Remove ' + panel.domain, 'Take ' + panel.domain + ' off the list? It stops being asked, and the wallet forgets its last answer and any transfer or purchase waiting there. Nothing at the domain changes.',
         [button('Remove', () => act(async () => { const d = panel.domain; panel = null; await chain().removeDomain(d); }, 'Removed.'), 'danger-btn'), cancel()]));
+    }
+    if (panel && panel.kind === 'trust') {
+      const i = panel.integrity;
+      const seen = i.seen.index >= 0 ? 'entry ' + i.seen.index + (i.code === 'history-conflict' ? ' with a different history' : '') : 'no such coin at all';
+      host.appendChild(stepBox('Trust ' + panel.domain + ' about ' + panel.coin.symbol,
+        'This wallet last saw ' + panel.domain + ' at entry ' + i.trusted.index + ' of ' + panel.coin.symbol + '. It now says ' + seen + '. That usually means the domain put an old copy of its database back. If it did, balances that were already spent can show again, and anything you accept on the strength of them can later be undone. Trusting it does not repair anything at the domain; it only lets this wallet send and buy on the coin again, from the state the domain shows now. Do this only if the domain\'s operator has told you what happened and you believe them. Nothing is changed until you press the button.',
+        [button('Trust the state it shows now', () => act(async () => { const p = panel; panel = null; await chain().acceptHead(p.domain, p.coin.coinId, { index: p.integrity.seen.index, hash: p.integrity.seen.hash }); }, 'The wallet now treats the domain\'s current state of ' + panel.coin.symbol + ' as the real one.'), 'danger-btn'), cancel()]));
     }
     if (panel && panel.kind === 'add') {
       host.appendChild(stepBox('Add ' + panel.domain, 'Ask ' + panel.domain + ' what your key holds? The wallet will fetch the key the domain signs with and pin it, then check every answer against it. Your public key is sent to the domain with each lookup.',

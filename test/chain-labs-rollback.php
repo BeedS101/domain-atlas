@@ -89,6 +89,17 @@ function reopen(array &$w): void
     $w['db'] = null;
     $w['db'] = ledger_open($w['file']);
 }
+// Every line of a checkpoint file from the start (guard_read looks only at the tail).
+function all_lines(string $file): array
+{
+    $out = [];
+    guard_each($file, function (array $l) use (&$out) { $out[] = $l; return true; });
+    return $out;
+}
+function journal_indexes(string $file): array
+{
+    return array_values(array_map(fn($l) => $l['index'], array_filter(all_lines($file), fn($l) => $l['kind'] === 'entry')));
+}
 function verdict(array $w): array { return ledger_guard_check($w['db'], $w['coin'], false); }
 function log_kinds(array $w): array { return array_column(guard_read(cp_log($w))['lines'], 'kind'); }
 function tamper_line(string $file, int $line, callable $change): void
@@ -329,6 +340,121 @@ copy(cp_log($s), $empty . '.checkpoints/' . $s2coin . '.log');
 $edb = ledger_open($empty);
 $scan = ledger_guard_scan($edb);
 t(isset($scan[$s2coin]) && $scan[$s2coin]['status'] === 'halted' && $scan[$s2coin]['reason'] === 'rollback' && ($scan[$s2coin]['detail']['coinMissing'] ?? false), 'a database restored from before a coin was opened is reported for that coin', $scan);
+
+echo "\n== crash consistency: no committed entry is forgotten\n";
+// Entries are journaled only after the database commits them, so the journal is a record of commits, and it counts even when the
+// crash came before the commit line was written.
+$k = single();
+grant($k, $alice['key'], '1000');
+$kOld = snapshot($k);
+send($k, $alice, $bob['key'], '400');
+$logFile = cp_log($k);
+$lines = explode("\n", rtrim((string) file_get_contents($logFile), "\n"));
+t(json_decode(end($lines), true)['kind'] === 'commit', 'a commit line follows the entry');
+array_pop($lines);
+file_put_contents($logFile, implode("\n", $lines) . "\n");
+t(json_decode(end($lines), true)['kind'] === 'intent' && verdict($k)['status'] === 'ok', 'a crash after the journal and before the commit line is no rollback: the database holds the entry');
+restore($k, $kOld);
+$vk = verdict($k);
+t($vk['status'] === 'halted' && $vk['reason'] === 'rollback' && $vk['detail']['floorIndex'] === 2, 'but an older copy put back after that crash is a rollback: the journal still holds the entry', $vk);
+t(refuses(fn() => send($k, $alice, $carol['key'], '1000'), 'rollback-detected') && bal($k, $alice) === 1000, 'and alice\'s balance is not spent again');
+$r = ledger_guard_replay($k['db'], $k['coin'], $NOW);
+t($r['applied'] === 1 && bal($k, $alice) === 600 && verdict($k)['status'] === 'ok', 'replaying the journal brings the entry back', $r);
+
+echo "\n   - two commits whose lines were never written\n";
+$k = single();
+grant($k, $alice['key'], '1000');
+send($k, $alice, $bob['key'], '100');
+send($k, $alice, $carol['key'], '200');
+// The log as it stood when the second entry was about to commit: cut after its intent, then the third entry's intent on top.
+$lines = explode("\n", rtrim((string) file_get_contents(cp_log($k)), "\n"));
+$kept = [];
+foreach ($lines as $l) { $kept[] = $l; $row = json_decode($l, true); if ($row['kind'] === 'intent' && $row['index'] === 2) break; }
+file_put_contents(cp_log($k), implode("\n", $kept) . "\n");
+guard_append(cp_log($k), ['v' => 1, 'kind' => 'intent', 'coinId' => $k['coin'], 'index' => 3, 'hash' => ledger_head($k['db'], $k['coin'])['hash'], 'at' => $NOW]);
+file_put_contents(cp_journal($k), implode("\n", array_slice(explode("\n", rtrim((string) file_get_contents(cp_journal($k)), "\n")), 0, 2)) . "\n");
+$vk = ledger_guard_check($k['db'], $k['coin'], true);
+t($vk['status'] === 'repaired' && head_of($k)['index'] === 3, 'a database two entries ahead of the floor, each with its intent, is repaired as a crash', $vk);
+t(journal_indexes(cp_journal($k)) === [0, 1, 2, 3], 'and the journal holds every entry once, in order');
+send($k, $alice, $bob['key'], '1');
+t(verdict($k)['status'] === 'ok' && head_of($k)['index'] === 4, 'and the coin goes on');
+
+echo "\n   - a journal line cut short\n";
+$k = single();
+grant($k, $alice['key'], '1000');
+send($k, $alice, $bob['key'], '100');
+$kOld = snapshot($k);
+send($k, $alice, $carol['key'], '200');
+$journal = (string) file_get_contents(cp_journal($k));
+file_put_contents(cp_journal($k), substr($journal, 0, strlen($journal) - 40));
+$lines = explode("\n", rtrim((string) file_get_contents(cp_log($k)), "\n"));
+array_pop($lines);
+file_put_contents(cp_log($k), implode("\n", $lines) . "\n");
+$vk = ledger_guard_check($k['db'], $k['coin'], true);
+t($vk['status'] === 'repaired', 'a crash that cut the journal line short is repaired from the database', $vk);
+t(journal_indexes(cp_journal($k)) === [0, 1, 2, 3], 'the cut line is ignored and the entry journaled whole');
+restore($k, $kOld);
+$r = ledger_guard_replay($k['db'], $k['coin'], $NOW);
+t($r['applied'] === 1 && bal($k, $carol) === 200 && verdict($k)['status'] === 'ok', 'a later rollback is replayed in full from that journal', $r);
+
+echo "\n   - several processes commit to one database at once\n";
+$k = single();
+$workers = 6;
+$each = 8;
+$procs = [];
+$jobs = [];
+for ($i = 0; $i < $workers; $i++) {
+    $job = tempnam(sys_get_temp_dir(), 'rollback-job-');
+    file_put_contents($job, json_encode(['file' => $k['file'], 'coin' => $k['coin'], 'treasuryKey' => $k['treasury']['key'], 'treasuryPrivate' => $k['treasury']['priv'], 'domainPrivate' => $k['priv'], 'count' => $each, 'now' => $NOW]));
+    $jobs[] = $job;
+    $procs[$i] = proc_open([PHP_BINARY, __DIR__ . '/support/rollback-worker.php', $job], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes[$i]);
+}
+// Two readers ask for the verdict all the time while the others commit.
+$stopFile = tempnam(sys_get_temp_dir(), 'rollback-stop-');
+unlink($stopFile);
+$readers = [];
+$readerPipes = [];
+for ($i = 0; $i < 2; $i++) {
+    $job = tempnam(sys_get_temp_dir(), 'rollback-job-');
+    file_put_contents($job, json_encode(['mode' => 'check', 'file' => $k['file'], 'coin' => $k['coin'], 'treasuryKey' => $k['treasury']['key'], 'treasuryPrivate' => $k['treasury']['priv'], 'domainPrivate' => $k['priv'], 'now' => $NOW, 'stopFile' => $stopFile]));
+    $jobs[] = $job;
+    $readers[$i] = proc_open([PHP_BINARY, __DIR__ . '/support/rollback-worker.php', $job], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $readerPipes[$i]);
+}
+$summary = [];
+foreach ($procs as $i => $proc) {
+    $out = stream_get_contents($pipes[$i][1]);
+    $err = stream_get_contents($pipes[$i][2]);
+    $code = proc_close($proc);
+    $summary[] = [$code, trim($out), trim($err)];
+}
+touch($stopFile);
+$seen = [];
+foreach ($readers as $i => $proc) {
+    $out = json_decode(trim(stream_get_contents($readerPipes[$i][1])), true);
+    proc_close($proc);
+    $seen[] = $out;
+}
+@unlink($stopFile);
+t(count(array_filter($seen, fn($r) => is_array($r) && $r['checks'] > 20 && $r['stops'] === [])) === 2, 'and neither reader that kept asking for the verdict ever saw a stop', $seen);
+$total_done = 0;
+foreach ($summary as $row) $total_done += (int) (json_decode($row[1], true)['done'] ?? 0);
+reopen($k);
+t($total_done === $workers * $each && head_of($k)['index'] === $workers * $each, 'six processes commit forty-eight entries to one coin between them', $summary);
+$v = verdict($k);
+t($v['status'] === 'ok' && $v['floor']['index'] === head_of($k)['index'], 'the floor is the head: nothing was left dangling or counted twice', $v);
+$ks = array_column(all_lines(cp_log($k)), 'kind');
+$counts = array_count_values($ks);
+t(!isset($counts['halt']) && ($counts['intent'] ?? 0) === $workers * $each, 'one intent for each entry and no stop written while they ran', $counts);
+$indexes = journal_indexes(cp_journal($k));
+t($indexes === range(0, $workers * $each), 'the journal holds every entry once, in order', count($indexes));
+t(ledger_check($k['db'], $k['coin']) === [], 'and the checker finds nothing wrong with the database');
+$kk = snapshot($k);
+$old = $kk;
+grant($k, $alice['key'], '5');
+restore($k, $old);
+$r = ledger_guard_replay($k['db'], $k['coin'], $NOW);
+t($r['applied'] === 1 && verdict($k)['status'] === 'ok', 'after all that a rollback still comes back exactly from the journal', $r);
+foreach ($jobs as $j) @unlink($j);
 
 echo "\n== a coin of three domains\n";
 cluster(3);

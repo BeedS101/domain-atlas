@@ -230,24 +230,45 @@ function guard_journal_last(string $file): ?array
     return null;
 }
 
-// Copies the entries the journal lacks from the database, in order. Fails if the journal is of another history.
+// The newest entry the journal holds, or null when there is no journal or it cannot be read (the caller's other checks then decide).
+function guard_journal_tail(PDO $db, string $coinId): ?array
+{
+    try {
+        $file = guard_file($db, $coinId, 'journal');
+        return is_file($file) ? guard_journal_last($file) : null;
+    } catch (RuntimeException $e) {
+        return null;
+    }
+}
+
+// Copies the entries the journal lacks from the database, in order. Fails if the journal is of another history. One process at a time:
+// two that read the same last entry would both append what follows it.
 function guard_journal_sync(PDO $db, string $coinId, int $now): void
 {
     $file = guard_file($db, $coinId, 'journal');
-    $last = guard_journal_last($file);
-    $head = ledger_head($db, $coinId);
-    if ($last !== null) {
-        $held = guard_hash_at($db, $coinId, $last['index']);
-        if ($held !== null && $held !== $last['hash']) throw new RuntimeException('the journal is of another history');
-    }
-    $after = $last === null ? -1 : $last['index'];
-    while ($after < $head['index']) {
-        $records = ledger_records_after($db, $coinId, $after, LEDGER_PAGE_MAX);
-        if (!$records) break;
-        foreach ($records as $record) {
-            guard_append($file, ['v' => 1, 'kind' => 'entry', 'coinId' => $coinId, 'index' => $record['index'], 'hash' => $record['hash'], 'at' => $now, 'record' => $record]);
-            $after = $record['index'];
+    guard_prepare_dir(dirname($file));
+    $lock = @fopen($file . '.lock', 'c');
+    if (!$lock || !flock($lock, LOCK_EX)) throw new RuntimeException('the journal cannot be locked');
+    try {
+        @chmod($file . '.lock', 0600);
+        $last = guard_journal_last($file);
+        $head = ledger_head($db, $coinId);
+        if ($last !== null) {
+            $held = guard_hash_at($db, $coinId, $last['index']);
+            if ($held !== null && $held !== $last['hash']) throw new RuntimeException('the journal is of another history');
         }
+        $after = $last === null ? -1 : $last['index'];
+        while ($after < $head['index']) {
+            $records = ledger_records_after($db, $coinId, $after, LEDGER_PAGE_MAX);
+            if (!$records) break;
+            foreach ($records as $record) {
+                guard_append($file, ['v' => 1, 'kind' => 'entry', 'coinId' => $coinId, 'index' => $record['index'], 'hash' => $record['hash'], 'at' => $now, 'record' => $record]);
+                $after = $record['index'];
+            }
+        }
+    } finally {
+        flock($lock, LOCK_UN);
+        fclose($lock);
     }
 }
 
@@ -280,8 +301,14 @@ function ledger_guard_check(PDO $db, string $coinId, bool $repair = true, ?int $
         $read = guard_read($file);
         if ($read['corrupt'] !== null) return guard_halted('checkpoint-corrupt', ['problem' => $read['corrupt']]);
         $state = guard_state($read['lines']);
+        // An entry is journaled only once the database has committed it, so a journal that holds an entry the database no longer does
+        // is as good a record as a commit line, and it survives a crash between the journal and the commit line. Both records are read
+        // before the database's head: another process may commit and journal an entry in between, and a head read earlier than the
+        // journal would then look like a rollback.
+        $journaled = guard_journal_tail($db, $coinId);
         $head = ledger_head($db, $coinId);
         $floor = $state['floor'];
+        if ($floor !== null && $journaled !== null && $journaled['index'] > $head['index'] && $journaled['index'] > $floor['index']) $floor = $journaled;
         // A coin stopped for a rollback runs again once the database holds the floor's entry again, however it got there (the lost
         // entries replayed, or a newer copy of the database put back).
         if ($state['halt'] !== null && $state['halt']['reason'] === 'rollback' && !$state['halt']['accepted'] && $floor !== null && $head['index'] >= $floor['index'] && guard_hash_at($db, $coinId, $floor['index']) === $floor['hash']) {

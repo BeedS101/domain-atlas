@@ -378,12 +378,94 @@ const freshState = () => ({ domains: [], cache: {}, skew: 0 });
     const forgedChain = Chain.create(envFor(dave, forgedState, {
       fetch: async (url, init) => { const res = await envFor(dave, daveState).fetch(url, init); const text = await res.text(); if (!url.includes('action=holdings')) return { status: res.status, text: async () => text }; const j = JSON.parse(text); j.statement.coins.find((x) => x.coinId === rlb.id).headHash = 'a'.repeat(64); j.signature = b64u(crypto.sign('sha256', Buffer.from(canon(j.statement)), a.pair.privateKey)); return { status: res.status, text: async () => JSON.stringify(j) }; }
     }));
+    const keptNow0 = daveState.domains.find((d) => d.domain === A).heads[rlb.id];
     await forgedChain.lookup(A);
     const fKept = () => forgedState.domains.find((d) => d.domain === A).heads[rlb.id];
     line(fKept().suspect && fKept().suspect.kind === 'history-conflict' && (await forgedChain.prepareSend(A, rlb.id, bob.key, '1').catch((e) => e)).code === 'history-conflict', 'a different hash at the kept entry is marked and stops sends', fKept());
-    const accepted = await forgedChain.acceptHead(A, rlb.id);
+    const sus = fKept().suspect;
+    const refusals = [
+      (await forgedChain.acceptHead(A, rlb.id).catch((e) => e)).code,
+      (await forgedChain.acceptHead(A, rlb.id, {}).catch((e) => e)).code,
+      (await forgedChain.acceptHead(A, rlb.id, { index: sus.index, hash: 'b'.repeat(64) }).catch((e) => e)).code,
+      (await forgedChain.acceptHead(A, rlb.id, { index: sus.index + 1, hash: sus.hash }).catch((e) => e)).code
+    ];
+    line(refusals.join() === 'confirm-needed,confirm-needed,confirm-mismatch,confirm-mismatch' && fKept().suspect && fKept().hash === keptNow0.hash, 'trusting a domain\'s state needs the state that was shown, repeated exactly; nothing less changes anything', refusals);
+    await forgedChain.lookup(A);
+    await forgedChain.refresh();
+    line(fKept().suspect && fKept().hash === keptNow0.hash, 'and asking the domain again, or all of them, never clears the mark on its own');
+    await forgedChain.acceptHead(A, rlb.id, { index: sus.index, hash: sus.hash });
     line(!fKept().suspect && fKept().hash === 'a'.repeat(64), 'trusting what the domain says now replaces the kept head and clears the mark', fKept());
-    line((await forgedChain.acceptHead(A, rlb.id).catch((e) => e)).code === 'nothing-to-accept', 'and there is nothing to accept when nothing is marked');
+    line((await forgedChain.acceptHead(A, rlb.id, { index: sus.index, hash: sus.hash }).catch((e) => e)).code === 'nothing-to-accept', 'and there is nothing to accept when nothing is marked');
+
+    console.log('\n== a higher entry that does not continue the kept one');
+    const headReply = (index, hash, signWith) => {
+      const payload = { type: 'atlas.ledger.head', v: 1, coinId: rlb.id, domain: A, index, hash, issuedAt: iso(NOW()) };
+      return { ok: true, head: { payload, signature: b64u(crypto.sign('sha256', Buffer.from(canon(payload)), (signWith || a.pair).privateKey)), authoritySignature: null, public: null }, state: 'active' };
+    };
+    const claimsHigher = (idx, hash, headAnswer) => {
+      const state = freshState();
+      state.domains = JSON.parse(JSON.stringify(daveState.domains));
+      const calls = { purchase: 0, head: [] };
+      const w = Chain.create(envFor(dave, state, {
+        fetch: async (url, init) => {
+          const res = await envFor(dave, daveState).fetch(url, init);
+          const text = await res.text();
+          if (url.includes('action=purchase')) calls.purchase++;
+          if (url.includes('action=holdings')) {
+            const j = JSON.parse(text);
+            const c = j.statement.coins.find((x) => x.coinId === rlb.id);
+            c.headIndex = idx; c.headHash = hash;
+            j.signature = b64u(crypto.sign('sha256', Buffer.from(canon(j.statement)), a.pair.privateKey));
+            return { status: 200, text: async () => JSON.stringify(j) };
+          }
+          if (url.includes('action=head')) {
+            const at = /index=(\d+)/.exec(url);
+            calls.head.push(at ? Number(at[1]) : null);
+            const answer = headAnswer(at ? Number(at[1]) : null, text, res);
+            return { status: answer.status || 200, text: async () => (typeof answer.body === 'string' ? answer.body : JSON.stringify(answer.body)) };
+          }
+          return { status: res.status, text: async () => text };
+        }
+      }));
+      return { w, state, calls, kept: () => state.domains.find((d) => d.domain === A).heads[rlb.id] };
+    };
+    const keptNow = daveState.domains.find((d) => d.domain === A).heads[rlb.id];
+    const otherHash = 'd'.repeat(64);
+
+    const fork = claimsHigher(5, 'c'.repeat(64), (at) => ({ body: headReply(at === null ? 5 : at, at === null ? 'c'.repeat(64) : otherHash) }));
+    await fork.w.lookup(A);
+    line(fork.kept().suspect && fork.kept().suspect.kind === 'history-conflict' && fork.kept().index === keptNow.index && fork.kept().hash === keptNow.hash, 'a higher head whose history holds another entry at the kept index is a conflict, and the kept head does not move', fork.kept());
+    line((await fork.w.prepareSend(A, rlb.id, bob.key, '1').catch((e) => e)).code === 'history-conflict', 'and a send on it is refused');
+
+    const silent = claimsHigher(5, 'c'.repeat(64), () => ({ status: 404, body: { ok: false, code: 'unknown-entry' } }));
+    await silent.w.lookup(A);
+    const silentSend = await silent.w.prepareSend(A, rlb.id, bob.key, '1').catch((e) => e);
+    line(silent.kept().index === keptNow.index && silent.kept().hash === keptNow.hash && !silent.kept().suspect && silentSend.code === 'history-unproven', 'a domain that will not show the kept entry is not believed: the kept head stays and a send is refused', [silent.kept(), silentSend.code]);
+    line((await silent.w.rows()).domains.find((d) => d.domain === A).problem === null && silent.calls.head.includes(keptNow.index), 'while the tab still shows the domain\'s answer, and the wallet asked for the kept entry');
+
+    const ignoring = claimsHigher(5, 'c'.repeat(64), () => ({ body: headReply(5, 'c'.repeat(64)) }));
+    await ignoring.w.lookup(A);
+    line(ignoring.kept().index === keptNow.index && !ignoring.kept().suspect && (await ignoring.w.prepareSend(A, rlb.id, bob.key, '1').catch((e) => e)).code === 'history-unproven', 'a domain that answers with its newest entry instead of the one asked for is not believed either');
+
+    const forgedSig = claimsHigher(5, 'c'.repeat(64), (at) => ({ body: headReply(at === null ? 5 : at, keptNow.hash, { privateKey: crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey }) }));
+    await forgedSig.w.lookup(A);
+    line(forgedSig.kept().index === keptNow.index && (await forgedSig.w.prepareSend(A, rlb.id, bob.key, '1').catch((e) => e)).code === 'history-unproven', 'an attestation signed by another key proves nothing');
+
+    const extend = claimsHigher(5, 'c'.repeat(64), (at, text) => ({ body: headReply(at === null ? 5 : at, at === null ? 'c'.repeat(64) : keptNow.hash) }));
+    await extend.w.lookup(A);
+    line(extend.kept().index === 5 && extend.kept().hash === 'c'.repeat(64) && !extend.kept().suspect, 'a higher head the domain shows to pass through the kept entry moves the kept head up');
+
+    console.log('\n== a purchase weighs the head now, before any Gold is sent');
+    const prep = { domain: A, coinId: rlb.id, credential: 'x', price: 5, requestId: 'a'.repeat(32), recipient: dave.key, units: '50', from: dave.key };
+    const lower = claimsHigher(5, 'c'.repeat(64), () => ({ body: headReply(1, 'e'.repeat(64)) }));
+    const lowerBuy = await lower.w.buy(prep).catch((e) => e);
+    line(lowerBuy.code === 'rollback-suspected' && lower.calls.purchase === 0, 'a lower newest head stops a purchase before the credential is sent', [lowerBuy.code, lower.calls.purchase]);
+    const forkBuy = claimsHigher(5, 'c'.repeat(64), (at) => ({ body: headReply(at === null ? 6 : at, at === null ? 'c'.repeat(64) : otherHash) }));
+    const forkBuyResult = await forkBuy.w.buy(prep).catch((e) => e);
+    line(forkBuyResult.code === 'history-conflict' && forkBuy.calls.purchase === 0, 'so does a higher head on another history', [forkBuyResult.code, forkBuy.calls.purchase]);
+    const noHead = claimsHigher(5, 'c'.repeat(64), () => ({ status: 503, body: { ok: false } }));
+    const noHeadBuy = await noHead.w.buy(prep).catch((e) => e);
+    line(noHeadBuy.code === 'history-unproven' && noHead.calls.purchase === 0, 'and so does a domain that will not state its head', [noHeadBuy.code, noHead.calls.purchase]);
 
     console.log('\n== a coin that disappears');
     const missingState = freshState();

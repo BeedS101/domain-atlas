@@ -67,7 +67,14 @@ Every check compares the database head with the floor (the highest `adopt`, `com
 | Database head lower than the floor | `rollback` | The coin stops: `rollback-detected` (503). |
 | Another hash at the floor's index, or a journal of another history | `conflict` | The coin stops: `checkpoint-conflict` (503). |
 | A line in the middle that does not match its sum | `checkpoint-corrupt` | The coin stops: `checkpoint-corrupt` (503). |
-| No checkpoint yet for an existing coin | `adopted` | The database's own head is recorded (see section 9). |
+| No checkpoint yet for an existing coin | `adopted` | The database's own head is recorded (see section 10). |
+
+The journal counts as a record of commits too. An entry is journaled only after the database has committed it, so a journal that holds
+an entry the database lacks is evidence of a rollback even when the crash came before the commit line was written. Journal appends
+from several processes are serialised (`<coin>.journal.lock`), so every entry is journaled once and in order. A line cut short by a crash
+is ignored and the entry written whole by the next check. The one window the guard cannot see is a crash after the database commit and
+before the journal write, followed by a restore of an older copy before any later request: the intent line alone cannot tell that from
+a crash before the commit, and the entry is then lost the way it would be without the guard.
 
 A stopped coin refuses new transfers, proposals, approvals and mirrored entries that are not replays of the lost history. It is shown
 to wallets and scanners as `frozen` (the database row is not changed). Reads, receipts and history stay readable.
@@ -99,11 +106,16 @@ does not stop the others.
   either the old head (the intent line is dangling, so it is a crash, not a rollback) or the new one (the commit line is repaired).
 - A restored backup is, by definition, older than the checkpoints, so it is reported as a rollback. That is intended. Restore it only to
   an offline domain, then follow section 6.
-- Back up the checkpoint folder together with the database, but remember that putting both back is exactly what section 8 cannot detect.
+- Back up the checkpoint folder together with the database, but remember that putting both back is exactly what section 9 cannot detect.
 
 ## 6. Recovery: what the operator does
 
-Every recovery step is an operator action on `spend34.php` (the existing operator token). None of them brings back spent funds.
+Every recovery step is an operator action on `spend34.php`, a POST that carries the operator token in its body (`adminToken`, 64 hex
+characters, compared in constant time). A missing, wrong or short token, a token only in the address, and a GET are all refused and change
+nothing; the public routes ignore a token. Recovery cannot erase the record that something went wrong: the checkpoint log keeps the stop
+(`halt`) and the way out (`restored`, `accept` or `reseal`) as lines, and the checks of each action refuse to be used as a way round another
+(a reseal needs a damaged file, a resume needs a frozen coin whose only evidence is a rollback, a restore needs entries to replay, and an
+accepted loss cannot be undone by any of them). None of them brings back spent funds.
 
 1. `integrity` (`coinId`): reads the verdict without changing anything, with both heads (the floor and the database's).
 2. `restore` (`coinId`): replays the journal through the normal entry checks, in order, from the database's head up to the floor, and,
@@ -131,19 +143,41 @@ compared:
 
 | Statement | Result |
 | --- | --- |
-| Higher index | The kept head moves up. When the domain can answer `GET head&coin=…&index=<kept index>` the wallet also checks that the same history passes through the kept entry. |
+| Higher index | The kept head moves up only when the domain shows, signed, that its history holds the kept entry (`GET head&coin=…&index=<kept index>` returns that entry's hash and it matches). Another hash there is `history-conflict`. A domain that does not answer, answers for another entry, or signs with another key is not believed: the kept head stays and a send or purchase is refused with `history-unproven` until it does. |
 | Same index, same hash | Nothing changes, and a mark from an earlier lower statement is cleared. |
 | Lower index | `rollback-suspected`: the coin is marked, the kept head does not move. |
 | Same index, another hash (or the domain's own attestation names another hash there) | `history-conflict`. |
 | A coin that was listed and no longer is | `coin-missing`. |
 | A statement dated before the kept head | Ignored: it is old, not a rollback. |
 
+A purchase spends Gold before anything else can be checked, so it weighs the domain's signed newest head against the kept one at that
+moment, not against what an earlier lookup left, and stops before the credential is sent.
+
 A marked coin takes no send and no purchase: the wallet refuses before anything is signed, and the tab says what was trusted and what
 is seen now. The mark clears when the domain shows the kept entry again on the same history (after a `restore`), or when the person
-chooses "Trust what it says now" (`acceptHead`), which replaces the kept head with what the domain now states. A wallet that has never
+chooses "Trust what it says now…". That opens a confirmation that says what was trusted and what is shown now, that old balances can come
+back and later be undone, and that nothing at the domain is repaired; only its button ("Trust the state it shows now") accepts. The
+wallet function `acceptHead(domain, coinId, { index, hash })` requires the state that was shown to be repeated exactly and refuses if the
+domain has said something else since, so nothing is accepted that the person did not see. Asking again, refreshing or redrawing the tab
+never accepts anything. A wallet that has never
 seen the coin takes the first head it is shown (trust on first use).
 
-## 8. What a same-account checkpoint does not do
+## 8. Sales under way
+
+The entry log is rebuilt by `restore`. Three kinds of state are kept beside it and are not in the log, so the journal does not bring them
+back: the sale journal (`ledger_purchases`), what a domain approved for a sale (`ledger_purchase_approvals`, `ledger_approved`) and the
+sales a domain witnessed as closed (`ledger_closed_sales`). What the checkpoint guard does about each, and what it leaves to the operator:
+
+| Situation | Result |
+| --- | --- |
+| A coin is stopped and a sale is journaled whose delivery entry was lost | Recovery, a new sale, the same request again, an operator's cancel and the closing of the sale are all refused with the guard's code, and nothing is released or abandoned. Before this was checked, a failed attempt counted as the ledger ruling the delivery out and the Gold credential was released while the delivery could still come back. |
+| The entries are replayed | The sales table is rebuilt from the log (`ledger_requests`, checked by `ledger_check`). A journaled sale then finds its delivery and finishes once: one delivery, the credential spent once. |
+| The sale journal row itself was lost with the rollback | The request cannot be delivered again (`duplicate-purchase`: the log holds it). The credential stays held, not released and not spent, and recovery has no row to finish. The operator finishes or releases it at the code that holds the credential, after reading the delivery in the ledger. This is the one case that needs a separate change (rebuilding the row from the entry) and it fails safe. |
+| A partner restored from an older copy | It is stopped and will not witness that a sale is closed, since it may have lost the entry. |
+| A partner or authority whose database lost only the approval or closed-sale rows, with no entry lost | Not detected by the guard, because the log is intact. The credential holder's own record (`begin`, `lock`, once-only `finish`) is what stops a second use. Treat any restore of a ledger database with sales in flight as needing a check of those sales at the credential holder before the coin sells again. |
+| A coin whose loss was accepted | Sales on it stay held; nothing is delivered or released. |
+
+## 9. What a same-account checkpoint does not do
 
 The checkpoint is on the same hosting account as the database. It stops an accident, a stale backup restored by mistake and a lazy
 restore. It does not stop an operator who can put back both the database and the checkpoint folder: the test "lost checkpoint
@@ -165,7 +199,7 @@ authority coin that nobody holds a wallet record for has no independent witness.
 operator (a roster partner that mirrors a single coin, a public append-only log, or a second hosting account polling `GET head`) is the
 step that closes this, and is a design decision for the operator rather than a change to the ledger.
 
-## 9. Compatibility
+## 10. Compatibility
 
 - No SQLite schema change. Existing coins, balances, wallets and entries are untouched.
 - An existing coin adopts its head the first time it is used after this is deployed (trust on first use). From then on it is
@@ -176,15 +210,18 @@ step that closes this, and is a design decision for the operator rather than a c
 - Wallets: the domain records gain a `heads` property. Older wallets ignore it, and older wallets keep working against the new domain; only
   the new wallet refuses on a rollback. The wallet reads the optional `index` of `GET head`; a domain that does not have it returns
   the newest head and the wallet treats the answer as unknown.
+- The wallet gains `history-unproven` (a higher head the domain does not show to continue the kept one) and `acceptHead` now takes the state
+  that was shown as its third argument.
 - New responses: `rollback-detected`, `checkpoint-conflict`, `checkpoint-corrupt` and `checkpoint-unavailable` (503); `not-halted`,
   `confirm-mismatch`, `not-damaged`, `database-invalid`, `entries-missing`, `not-frozen` and `not-resumable` (409); `reason-needed` (400).
-- Not covered: tables that are not part of the entry log (for example `ledger_purchases`) are not journaled, so a restore of an older
-  database does not bring them back through `restore`; they travel with the database backup.
+- Not covered: tables that are not part of the entry log (the sale journal and the approval and closed-sale rows, section 8) are not
+  journaled, so a restore of an older database does not bring them back through `restore`; they travel with the database backup.
 
-## 10. Checks
+## 11. Checks
 
 ```
 php test/chain-labs-rollback.php          # the guard in the library: rollback, crash, conflict, corruption, recovery, multi authority
 node test/chain-labs-rollback-http.js     # the same against the real endpoint and a killed server
-node test/chain-labs-wallet.js            # includes the wallet's kept heads
+php test/chain-labs-rollback-purchase.php # sales under way when a database is put back
+node test/chain-labs-wallet.js            # includes the wallet's kept heads and its refusal to trust a fork
 ```
