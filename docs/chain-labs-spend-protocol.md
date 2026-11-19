@@ -471,16 +471,21 @@ Each stage ships separately, with tests, on its own branch.
      with the `head` peer action.
    - Before an approver signs, and whenever the operator calls `compare`, a domain compares its head with every other roster
      domain, not only the authority. A domain that is behind catches up from the authority first.
-   - The coin freezes on evidence the receiving domain checks itself: `fork` (two statements from roster domains for one index
-     with different hashes), `rollback` (an entry the authority signed, held by a domain, and a statement from the authority
-     made after that entry was executed that holds fewer entries), `authority-equivocation` (two entries for one index, both
-     signed by the authority). The domain that finds it freezes and sends the evidence to the others, who verify it and freeze.
+   - The coin freezes on evidence the receiving domain checks itself, and only on what the authority signed: `fork` (two head
+     statements of roster domains for one index with different hashes, each carrying an entry the authority signed),
+     `authority-equivocation` (two entries for one index, both signed by the authority) and `rollback` (two head statements of the
+     authority, one that holds more entries and a later one, made within the last two minutes, that holds fewer). A statement a
+     roster domain signs by itself proves what that domain said and nothing else, and the time an entry was prepared at is not used
+     to order anything. The domain that finds the evidence freezes and sends it to the others, who verify it and freeze
+     (`docs/chain-labs-rollback-protection.md`, section 4).
    - An entry that fails a check during catch-up freezes that copy and is kept as `invalid-history` evidence; the others are
      told, and they pull and check the history themselves rather than freezing on the report.
    - A frozen copy approves nothing, catches up from nothing and compares nothing. History and receipts stay readable.
-     Resuming a frozen coin is an operator's review of the kept evidence. The only evidence that has a way back is a `rollback` of a domain that
-     has since been restored: `peer_resume_after_rollback` un-freezes the coin when the domains state the same history (none holds another one), the ledger checks clean and the
-     checkpoint guard is not stopped. A fork, an invalid history or an equivocation has none (`docs/chain-labs-rollback-protection.md`).
+     Resuming a frozen coin is an operator's review of the kept evidence. The evidence that has a way back is a `rollback` of a
+     domain that has since been restored, and a `fork` whose statements show no entry the authority signed (what one domain can sign
+     by itself): `peer_resume_after_rollback` un-freezes the coin when the domains state the same history (none holds another one),
+     the ledger checks clean and the checkpoint guard is not stopped. A fork that does prove two signed entries, an invalid history
+     or an equivocation has none (`docs/chain-labs-rollback-protection.md`).
    - A domain that claims entries nobody signed, or an old statement replayed as a new one, proves nothing and freezes nothing.
 7. Purchase with Gold, with the limits in the genesis, tested with crash injection at each step of 10.3.
    Built on the chain-labs side as `lib/purchase.php` and the `purchase`, `purchase-recover` and `purchase-cancel` routes of

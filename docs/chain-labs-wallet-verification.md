@@ -45,8 +45,28 @@ An unconfirmed transfer is never pushed off the pending list by newer ones. The 
 A purchase whose receipt fails stays in the pending purchases as `unconfirmed` or waiting. Asking again repeats the same request id, which the
 domain answers with the entry it already made, so the Gold is not delivered twice.
 
-Not covered: a `propose` request that gets no answer at all (a timeout) leaves no record, because the wallet has no digest of an answer it did not
-get; the person sees the failure and checks the coin's history.
+### 1.2 A transfer request that gets no answer
+
+`send` posts `{ authorization }` to `action=propose`. The authorization is the owner's signed transfer: type `atlas.ledger.transfer` v2, the coin,
+its authority and genesis digest, the sender, the recipient, the amount, the sender's `baseSeq` and `baseHead`, a one-use nonce, and a window of
+about 200 seconds (`issuedAt` five seconds back, `expiresAt` 200 seconds on). It is signed with the owner's key by the wallet before the request.
+
+When the request gets no answer (a timeout after 8 seconds, a dropped connection, a refused one) the wallet sees only status 0 and cannot tell
+whether the domain received it. So an unanswered `propose` may have transmitted a complete owner-signed authorization. What follows from that:
+
+- The domain, or anyone who obtains the request from it (its logs, say), can have the transfer made once, and only
+  that transfer: the authorization names the recipient, the amount, the coin, the authority and the genesis, and its nonce and `baseSeq` are
+  used once. It cannot be turned into another transfer or used on another coin or domain, and it stops being valid when its window ends. A
+  multi authority entry that was approved in time may still be written later, at its own time; it is still that one transfer.
+- The wallet keeps no record of such a request. `send` throws `network` ("The domain did not answer.") and no pending transfer is written, so
+  `checkPending` does not look for it, although its digest (the hash of the signed payload) is known to the wallet at that point.
+- If the domain did make the transfer, the balance shown after the next lookup is lower and the recipient holds it. A second `send` signs a new
+  authorization against the refreshed `baseSeq` and the domain accepts it as a different transfer, so a person who repeats the transfer without
+  looking at the balance first sends it twice. Nothing is taken beyond what the person signed in each authorization.
+- If the domain did not receive it, nothing happened, and the authorization lapses unused.
+
+The wallet never resubmits an unanswered request by itself; it asks again only by the person's choice. Keeping the digest as a waiting transfer
+for status 0, so that `checkPending` settles it, is a separate change that has not been made.
 
 ## 2. The genesis, and pinning
 

@@ -642,7 +642,7 @@ $bad = [
     'two statements that agree' => ['kind' => 'fork', 'items' => [$headA, $headB]],
     'two statements for different indexes' => ['kind' => 'fork', 'items' => [$headA, $first]],
     'a statement with a changed hash' => ['kind' => 'fork', 'items' => [$headA, array_replace_recursive($headB, ['payload' => ['hash' => str_repeat('c', 64)]])]],
-    'a rollback whose later statement is not fewer' => ['kind' => 'rollback', 'items' => [$headB, $headA]],
+    'a rollback whose later statement is not fewer' => ['kind' => 'rollback', 'items' => [$headA, $headA]],
     'a rollback from a partner instead of the authority' => ['kind' => 'rollback', 'items' => [$headA, $first]],
     'one item' => ['kind' => 'fork', 'items' => [$headA]],
     'an unknown kind' => ['kind' => 'because', 'items' => [$headA, $headB]],
@@ -684,13 +684,26 @@ $otherB = peer_head_attestation(ndb('b.example'), node('b.example'), $other['coi
 $sendFreeze = fn(array $evidence, ?array $sender = null) => transport('c.example', peer_envelope($sender ?? node('b.example'), 'c.example', 'freeze', ['coinId' => $c['coin'], 'evidence' => $evidence], $NOW));
 $refusedEvidence = fn(array $evidence) => str_starts_with(why(fn() => $sendFreeze($evidence)), 'bad-evidence') && state_of('c.example', $c) === 'active';
 t($refusedEvidence(['kind' => 'fork', 'items' => [$firstB, $otherB]]), 'evidence is refused: a statement about another coin');
-$badSig = $headB;
-$badSig['authoritySignature'] = strrev($headB['authoritySignature']);
-t($refusedEvidence(['kind' => 'rollback', 'items' => [$badSig, $firstA]]), 'evidence is refused: a rollback whose entry the authority did not sign');
-t($refusedEvidence(['kind' => 'rollback', 'items' => [$headB, $headA]]), 'evidence is refused: a rollback whose later statement holds as many entries');
-$sameTime = peer_head_attestation(ndb('a.example'), node('a.example'), $c['coin'], $NOW - 3, 0);
-t($refusedEvidence(['kind' => 'rollback', 'items' => [$headB, $sameTime]]), 'evidence is refused: a rollback whose later statement was made before the entry existed');
-t($refusedEvidence(['kind' => 'rollback', 'items' => [$headB, $firstC]]), 'evidence is refused: a rollback whose later statement is not the authority\'s');
+// The authority's own statements: one that holds the whole log, and a later one that holds fewer entries.
+$earlierA = $headA;
+$laterA = peer_head_attestation(ndb('a.example'), node('a.example'), $c['coin'], $NOW + 1, 0);
+$badSig = $earlierA;
+$badSig['signature'] = strrev($earlierA['signature']);
+t($refusedEvidence(['kind' => 'rollback', 'items' => [$badSig, $laterA]]), 'evidence is refused: a rollback whose earlier statement does not verify');
+t($refusedEvidence(['kind' => 'rollback', 'items' => [$headB, $laterA]]), 'evidence is refused: a rollback whose earlier statement is a partner\'s, whatever entry it shows');
+t($refusedEvidence(['kind' => 'rollback', 'items' => [$earlierA, $headA]]), 'evidence is refused: a rollback whose later statement holds as many entries');
+$sameTime = peer_head_attestation(ndb('a.example'), node('a.example'), $c['coin'], $NOW, 0);
+t($refusedEvidence(['kind' => 'rollback', 'items' => [$earlierA, $sameTime]]), 'evidence is refused: a rollback whose later statement was not made after the earlier one');
+$olderLater = peer_head_attestation(ndb('a.example'), node('a.example'), $c['coin'], $NOW - 3, 0);
+t($refusedEvidence(['kind' => 'rollback', 'items' => [$earlierA, $olderLater]]), 'evidence is refused: a rollback whose later statement was made before the earlier one');
+t($refusedEvidence(['kind' => 'rollback', 'items' => [$earlierA, $firstC]]), 'evidence is refused: a rollback whose later statement is not the authority\'s');
+$staleLater = peer_head_attestation(ndb('a.example'), node('a.example'), $c['coin'], $NOW - 500, 0);
+$staleEarlier = peer_head_attestation(ndb('a.example'), node('a.example'), $c['coin'], $NOW - 600);
+t($refusedEvidence(['kind' => 'rollback', 'items' => [$staleEarlier, $staleLater]]), 'evidence is refused: a rollback whose later statement is not recent');
+// An entry the authority signed is not a fork with an entry that nobody signed.
+$unsignedEntry = $headB;
+$unsignedEntry['authoritySignature'] = strrev($headB['authoritySignature']);
+t($refusedEvidence(['kind' => 'fork', 'items' => [$unsignedEntry, peer_head_attestation(ndb('a.example'), node('a.example'), $c['coin'], $NOW, 0)]]), 'evidence is refused: a statement whose entry the authority did not sign');
 $e1 = ledger_records_after(ndb('a.example'), $c['coin'], 0, 5)[0];
 $e2 = ledger_records_after(ndb('a.example'), $c['coin'], 1, 5)[0];
 $item = fn(array $r, ?array $public = null) => ['public' => $public ?? $r['public'], 'hash' => $r['hash'], 'authoritySignature' => $r['authoritySignature']];
@@ -704,8 +717,8 @@ $DOWN['c.example'] = true;
 pay($c, $alice, $bob['key'], '2');
 $DOWN['c.example'] = false;
 $headBefore = ledger_head(ndb('c.example'), $c['coin']);
-// Valid evidence from the same pieces freezes: a statement from the authority after the entry was executed that holds fewer entries.
-$r = $sendFreeze(['kind' => 'rollback', 'items' => [$headB, $firstA]]);
+// Valid evidence from the same pieces freezes: a statement of the authority that holds fewer entries, made after one that holds more.
+$r = $sendFreeze(['kind' => 'rollback', 'items' => [$earlierA, $laterA]]);
 t($r['state'] === 'frozen' && (ledger_evidence(ndb('c.example'), $c['coin'])[0]['kind'] ?? null) === 'rollback', 'and evidence that does prove a rollback freezes the receiver');
 // A frozen copy takes nothing from the authority.
 t(peer_catch_up(ndb('c.example'), node('c.example'), $c['coin'], 'transport', $NOW) === 0 && ledger_head(ndb('c.example'), $c['coin']) === $headBefore, 'a frozen copy does not catch up');

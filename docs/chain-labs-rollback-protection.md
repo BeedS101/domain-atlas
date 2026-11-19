@@ -91,9 +91,44 @@ to wallets and scanners as `frozen` (the database row is not changed). Reads, re
   each one is checked again.
 - A rolled back partner heals through catch-up from the authority; when it again holds its floor entry the guard writes `restored`.
 - A partner that has already frozen the coin on evidence of the authority's rollback (`rollback` evidence) runs it again with `resume`
-  once the authority is restored: `peer_resume_after_rollback` requires that the coin is frozen only for rollback evidence, the guard is
-  not stopped, `ledger_check` is clean, and the domains state the same history. A fork, an authority that signed two entries for one
-  index, an invalid history, or an accepted loss never qualify.
+  once the authority is restored: `peer_resume_after_rollback` requires that the coin is frozen only for rollback evidence (or for a
+  fork that proves nothing, see below), the guard is not stopped, `ledger_check` is clean, and the domains state the same history. A fork
+  that proves two signed entries, an authority that signed two entries for one index, an invalid history, or an accepted loss never qualify.
+
+### What freezes a multi authority coin
+
+A roster domain signs head statements (`atlas.ledger.head`: coin, domain, index, hash, time). Every domain can sign any statement it likes,
+so a statement proves only that the domain said it. What the roster can rely on is what the authority signed: it signs an entry's hash only
+when it writes the entry, and it signs a head statement only for an entry it holds. A domain freezes only on evidence it checks itself:
+
+| Evidence | What it contains | What it proves |
+|---|---|---|
+| `authority-equivocation` | two entries for one index, each with the authority's signature on its hash | the authority signed two entries for one place |
+| `fork` | two head statements of roster domains for one index with different hashes, each carrying an entry the authority signed | the same, as shown by two copies |
+| `rollback` | two head statements of the authority: one that holds more entries, a later one that holds fewer, made within the last two minutes | the authority went back |
+| `invalid-history` | not evidence: the domain that pulled the history checks it itself | the history failed a check on the copy that read it |
+
+What does not freeze a coin: two statements signed by one domain, a partner's statement of another hash for an index with no entry the
+authority signed behind it (reported as `unproven`), a partner that claims entries nobody signed (`ahead`), an old statement of the
+authority shown after a newer one, and an entry that is written late. The time an entry was prepared at (`executedAt`) says nothing about
+when the authority wrote it, because an entry the partners approved may be written much later, at its own time, so it is not compared with
+the time of a statement. A statement the authority made before it wrote an entry, shown beside a copy that holds the entry, is older
+than the statement the authority made after, and the order of the two statements is what is checked.
+
+To tell a rollback, a domain keeps the highest and the newest head statement of the authority it has verified (table
+`ledger_authority_heads`), taken from the authority's own answers: the head statement that `sync` now carries and the `head` answer. A
+partner's `head` answer carries the highest it has kept (`seen`), so that a domain that never held a lost entry can still be shown the
+proof. Evidence of a step back is not accepted again once the receiving domain has seen the authority state as many entries since.
+
+A copy that froze on evidence that does not prove anything (a `fork` of two statements with no entry behind them, which an earlier
+version accepted) is lifted by `resume` under the checks above. The evidence stays in the table with a `resumed` record beside it.
+`resume` never lifts a freeze whose evidence does prove two signed entries, and it does not replace the checkpoint guard, the checker or
+the other domains' statements, which are asked for every time.
+
+Limits. The authority's clock orders its own statements, so a clock that is set back by more than the two minutes the evidence stays
+fresh could be read as a step back; the freeze is then lifted by `resume`. A domain that holds entries from before this change has no
+statement of the authority for them until its next catch-up, so it cannot show a rollback of those entries until then. The scanner
+(`scan35.php`) shows a partner's different hash as `fork` without checking for the entry behind it; it only displays and changes nothing.
 
 Single and multi coins are judged independently on one database: each coin has its own files and its own verdict, and a stopped coin
 does not stop the others.
@@ -205,7 +240,8 @@ step that closes this, and is a design decision for the operator rather than a c
 
 ## 10. Compatibility
 
-- No SQLite schema change. Existing coins, balances, wallets and entries are untouched.
+- One SQLite table is added, `ledger_authority_heads`, created when the database is opened (`CREATE TABLE IF NOT EXISTS`). Existing coins, balances, wallets and entries are untouched.
+- The peer `sync` answer of the authority gains a `head` field and a partner's `head` answer gains `seen`; older domains ignore them, and a domain that does not send them just gives its peers no statement to show.
 - An existing coin adopts its head the first time it is used after this is deployed (trust on first use). From then on it is
   protected; a rollback that happened before that cannot be seen.
 - The checkpoint folder is created beside the database on first use, so the private folder must be writable by the web user. When it is
@@ -228,5 +264,6 @@ php test/chain-labs-rollback.php          # the guard in the library: rollback, 
 node test/chain-labs-rollback-http.js     # the same against the real endpoint and a killed server
 php test/chain-labs-rollback-purchase.php # sales under way when a database is put back
 php test/chain-labs-approvals.php         # approvals kept across a restored database (docs/chain-labs-approvals.md)
+php test/chain-labs-evidence.php          # what freezes a multi authority coin, forged evidence, slow commits and the way back
 node test/chain-labs-wallet.js            # includes the wallet's kept heads and its refusal to trust a fork
 ```
