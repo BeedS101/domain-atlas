@@ -51,8 +51,9 @@ issuers with their own keys and state; no live domain was contacted.
   `_KEY_RATE`, `_KEY_RATE_ALL`, `_KEY_CACHE_MS`, `_USER_AGENT`. A peer's key is cached for 60 s by default, so a rotated
   key can stay trusted that long. The budgets are shared out between callers and kinds of operation (key lookups,
   revocation checks, world-drop relays, other relays): `ATLAS_OUTBOUND_RESERVE` (default 0.15; 0 turns it off) and
-  `ATLAS_OUTBOUND_FAIR_SHARE` (default 0.25). Callers are told apart by socket address, so behind a reverse proxy set
-  `ATLAS_OUTBOUND_RESERVE=0` (see `docs/security-follow-ups.md`).
+  `ATLAS_OUTBOUND_FAIR_SHARE` (default 0.25). Callers are told apart by socket address. Behind a reverse proxy that hides it, keep the defaults:
+  per-caller fairness is then idle, but the budgets and the per-class floors still hold (`0` would remove the floors
+  too). Fix the proxy's address pass-through instead (see `docs/security-follow-ups.md`).
 - **Repeated requests.** An identical repeat of reissue, clawback or legacy transfer within the replay window
   (`ATLAS_REPLAY_TTL_HOURS`, default 168) now returns the recorded result instead of "already revoked". The same request
   with a different recipient is refused.

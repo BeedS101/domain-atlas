@@ -45,9 +45,13 @@ can use at most about 85% of a budget (17 of 20 for one domain, 102 of 120 key l
 
 Remaining:
 
-- The caller is the socket address. Behind a reverse proxy every visitor shares the proxy's address and so one share:
-  one busy visitor then looks like the whole site, and the unused 15% reserved slice is all the headroom others have.
-  Set `ATLAS_OUTBOUND_RESERVE=0` there, or fix the proxy setup, until callers can be told apart.
+- The caller is the socket address. Behind a reverse proxy that does not pass the visitor's address on, every visitor
+  shares the proxy's address and so one fair share: the per-caller rule then does nothing useful (it neither helps nor
+  harms), while the budgets and each operation class's reserved floor still hold. Keep the defaults. Do not set
+  `ATLAS_OUTBOUND_RESERVE=0` as a workaround: it also removes the class floors, so one kind of lookup could again use
+  up the budget that credential checks depend on. Fix the address instead (for Apache, `mod_remoteip` with the proxy's
+  address trusted, so `REMOTE_ADDR` is the visitor's). Site Doctor's "Visitor address handling" check shows whether
+  visitors can be told apart.
 - Several callers (several addresses) that each stay under their share can still use a whole budget together; the
   protection is against one caller, not a botnet. The overall caps still bound the traffic, and what stays guaranteed
   is each class's floor.

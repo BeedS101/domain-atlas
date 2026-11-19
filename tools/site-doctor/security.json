@@ -1,0 +1,69 @@
+{
+  "_about": "What the Issuer Security & Deployment Health section looks for. Each file is compared with the repository by SHA-256 like every other file; when it differs, the 'needs' texts say whether it still has the security changes (modified) or not (outdated). tools/site-doctor-build.js checks that every text below occurs in the repository's copy of the file and that the owner-proof classes match lib/owner-proof.php, so a refactor cannot leave a stale check behind.",
+  "files": [
+    {
+      "path": "lib/outbound.php",
+      "component": "core",
+      "critical": true,
+      "role": "Limits and polices this issuer's requests to other domains",
+      "matters": "An older copy shares one outbound budget between all visitors, so one caller can use up the key lookups or one peer's revocation checks and make legitimate cross-domain claims fail.",
+      "needs": [
+        { "label": "caller-aware fair share", "text": "atlas_outbound_caller" },
+        { "label": "separate verify, drop and relay budgets", "text": "['verify', 'drop', 'relay']" },
+        { "label": "reserve and fair-share settings", "text": "ATLAS_OUTBOUND_FAIR_SHARE" }
+      ]
+    },
+    {
+      "path": "lib/bootstrap.php",
+      "component": "core",
+      "critical": true,
+      "role": "The issuer's shared library: names the budget class of each outbound lookup and holds the drop-expiry rules",
+      "matters": "Without the class names every lookup is counted as 'relay', so credential checks are not protected by their own reserved budget. Without the drop-expiry rules a relayed claim is accepted for an owner authorisation of any age.",
+      "needs": [
+        { "label": "revocation list lookups counted as verify", "text": "atlas-revocations.json', null, 'verify'" },
+        { "label": "suspension list lookups counted as verify", "text": "atlas-suspensions.json', null, 'verify'" },
+        { "label": "drop-intent expiry rules", "text": "atlas_drop_intent_expiry_problem" }
+      ]
+    },
+    {
+      "path": "atlas/world/drops/claim.php",
+      "component": "drops",
+      "critical": true,
+      "role": "Claims a world drop, relaying to the issuing domain when the item is foreign",
+      "matters": "An older copy counts drop relays with trade and mail relays, and does not tell the issuing domain when the drop was accepted.",
+      "needs": [
+        { "label": "drop relays counted as drop", "text": "=> $intent]," },
+        { "label": "acceptance time sent with the claim", "text": "droppedAt" }
+      ]
+    },
+    {
+      "path": "atlas/world/drop.php",
+      "component": "drops",
+      "critical": true,
+      "role": "Places a credential in a world as a drop",
+      "matters": "An older copy accepts an owner's drop authorisation of any age.",
+      "needs": [
+        { "label": "drop-intent expiry rules", "text": "atlas_drop_intent_expiry_problem" }
+      ]
+    },
+    {
+      "path": "atlas/world/drops/relay-claim.php",
+      "component": "drops",
+      "critical": false,
+      "role": "Receives a claim relayed from another domain for an item this issuer issued",
+      "matters": "Its own code was not changed by the recent hardening; a difference matters only if the file is an old copy that predates the owner-intent checks.",
+      "needs": [
+        { "label": "owner and claimant intent checks", "text": "atlas_world_drop_relay_problem" }
+      ]
+    }
+  ],
+  "ownerProofClasses": ["atlas.membership", "atlas.postoffice.membership", "atlas.tradingstation.membership"],
+  "outbound": {
+    "classes": [
+      { "id": "key", "label": "key (published-key lookups)", "limiter": "'key'", "caller": { "file": "lib/bootstrap.php", "text": "atlas-key.json', null, 'key'" } },
+      { "id": "verify", "label": "verify (revocation and suspension lists)", "limiter": "'verify'", "caller": { "file": "lib/bootstrap.php", "text": "atlas-revocations.json', null, 'verify'" } },
+      { "id": "drop", "label": "drop (world-drop relays)", "limiter": "'drop'", "caller": { "file": "atlas/world/drops/claim.php", "text": "=> $intent],", "component": "drops" } },
+      { "id": "relay", "label": "relay (trade, mail and other relays)", "limiter": "'relay'", "caller": { "file": "lib/bootstrap.php", "text": "atlas_peer_post_json($domain, '/atlas/trade/relay-lock'" } }
+    ]
+  }
+}

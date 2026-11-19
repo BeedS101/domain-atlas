@@ -1122,6 +1122,48 @@ function doctor_json_count($path, $key, $maxParse) {
   return ['ok', $n, $size];
 }
 
+// The membership owner-proof verdict: [status, title, detail, fix] plus what it was judged from. One function for the
+// services list and the Issuer Security & Deployment Health section, so the two cannot disagree.
+function doctor_owner_proof_check($root, $lib, $private, $now) {
+  $issueText = is_file($root . '/atlas/asset/issue.php') ? (string)@file_get_contents($root . '/atlas/asset/issue.php', false, null, 0, 400000) : '';
+  $capText = is_file($root . '/atlas/capabilities.php') ? (string)@file_get_contents($root . '/atlas/capabilities.php', false, null, 0, 100000) : '';
+  $hasLib = is_file($lib . '/owner-proof.php');
+  $inIssue = strpos($issueText, 'atlas_owner_proof_verdict') !== false;
+  $inCaps = strpos($capText, 'atlas_owner_proof_mode') !== false;
+  list($opMode, $opFrom, $opBad) = doctor_owner_proof_mode($root);
+  $statsDoc = null;
+  list($sst, $sdoc, $ssize) = doctor_json_file($private . '/owner-proof/stats.json', 1048576);
+  if ($sst === 'ok') $statsDoc = $sdoc;
+  $ready = doctor_owner_proof_readiness($statsDoc, $opMode, $now, 7);
+  $parts = [];
+  foreach ([['subscribers', 'atlas-subscribers-store.json', 'subscribers'], ['Global Mail members', 'atlas-postoffice-members-store.json', 'members'], ['Trading Station members', 'atlas-tradingstation-members-store.json', 'members'], ['stored messages', 'atlas-mail-store.json', 'messages']] as $r) {
+    list($cs, $cn) = doctor_json_count($lib . '/' . $r[1], $r[2], 8388608);
+    if ($cs === 'ok' && $cn !== null) $parts[] = $cn . ' ' . $r[0];
+  }
+  $counts = [];
+  foreach ($ready['classes'] as $cls => $c) if (is_array($c)) $counts[] = $cls . ': ' . (int)(isset($c['signed']) ? $c['signed'] : 0) . ' signed, ' . (int)(isset($c['unsigned']) ? $c['unsigned'] : 0) . ' unsigned, ' . (int)(isset($c['refused']) ? $c['refused'] : 0) . ' refused';
+  $countText = $counts ? implode('; ', $counts) : 'no counts recorded yet';
+  $detailOp = 'Mode ' . $opMode . ' (' . $opFrom . '). ' . $countText . '.' . ($parts ? ' Right now: ' . implode(', ', $parts) . '.' : '');
+  $res = function ($status, $title, $detail, $fix, $installed) use ($opMode, $opFrom, $opBad, $ready) {
+    return ['status' => $status, 'title' => $title, 'detail' => $detail, 'fix' => $fix, 'installed' => $installed, 'mode' => $opMode, 'from' => $opFrom, 'bad' => $opBad, 'ready' => $ready];
+  };
+  if (!is_file($root . '/atlas/asset/issue.php')) return $res('na', 'Membership owner proof: no issue route here', '', '', null);
+  if (!$hasLib || !$inIssue || !$inCaps) {
+    $missing = [];
+    if (!$hasLib) $missing[] = 'lib/owner-proof.php';
+    if (!$inIssue) $missing[] = 'atlas/asset/issue.php (old version)';
+    if (!$inCaps) $missing[] = 'atlas/capabilities.php (old version)';
+    return $res('fail', 'Membership owner proof is not fully installed', 'Missing or old: ' . implode(', ', $missing) . '. Anyone can ask this issuer for a membership card for a key they do not hold.', 'Upload lib/owner-proof.php, atlas/asset/issue.php, atlas/capabilities.php and lib/webauthn.php from the repository together.', false);
+  }
+  if ($opBad) return $res('warn', 'The owner-proof setting is not off, accept or require', 'The issuer falls back to accept. ' . $detailOp, 'Correct the value in ' . $opFrom . '.', true);
+  if ($opMode === 'off') return $res('fail', 'Membership owner proof is switched off', $detailOp, 'Set ATLAS_OWNER_PROOF (or lib/atlas-owner-proof-config.json) to accept, and to require once ready.', true);
+  if ($opMode === 'accept') {
+    $why = ['ready' => 'Signed requests have been seen and no unsigned one in the last 7 days: it can be switched to require.', 'not-ready' => 'An unsigned request arrived in the last 7 days (' . implode(', ', $ready['unsignedRecent']) . '): switching now would turn a wallet away.', 'no-signed-yet' => 'No signed issuance has been seen yet, so the signed path is not proven on this domain.'];
+    return $res('warn', 'Membership owner proof is in accept mode (temporary): not enforcing yet', (isset($why[$ready['state']]) ? $why[$ready['state']] . ' ' : '') . $detailOp, 'Switch to require when ready: set ATLAS_OWNER_PROOF=require, or put {"mode": "require"} in lib/atlas-owner-proof-config.json.', true);
+  }
+  return $res('ok', 'Membership owner proof is enforcing (require)', $detailOp, '', true);
+}
+
 function doctor_services($root, $host, $states, $mounts) {
   $checks = [];
   $add = function ($comp, $id, $status, $title, $detail = '', $fix = '') use (&$checks) {
@@ -1194,44 +1236,9 @@ function doctor_services($root, $host, $states, $mounts) {
     else $add('core', 'dir-' . $d[0], 'ok', $d[1] . ': ' . $n . ' file(s), ' . doctor_size($bytes), 'Writable' . (($inside($dir) ? ', inside the web root' : ', outside the web root')) . '.');
   }
 
-  // -- core: membership owner proof
-  $issueText = is_file($root . '/atlas/asset/issue.php') ? (string)@file_get_contents($root . '/atlas/asset/issue.php', false, null, 0, 400000) : '';
-  $capText = is_file($root . '/atlas/capabilities.php') ? (string)@file_get_contents($root . '/atlas/capabilities.php', false, null, 0, 100000) : '';
-  $hasLib = is_file($lib . '/owner-proof.php');
-  $inIssue = strpos($issueText, 'atlas_owner_proof_verdict') !== false;
-  $inCaps = strpos($capText, 'atlas_owner_proof_mode') !== false;
-  list($opMode, $opFrom, $opBad) = doctor_owner_proof_mode($root);
-  $statsDoc = null;
-  list($sst, $sdoc, $ssize) = doctor_json_file($private . '/owner-proof/stats.json', 1048576);
-  if ($sst === 'ok') $statsDoc = $sdoc;
-  $ready = doctor_owner_proof_readiness($statsDoc, $opMode, $now, 7);
-  $parts = [];
-  foreach ([['subscribers', 'atlas-subscribers-store.json', 'subscribers'], ['Global Mail members', 'atlas-postoffice-members-store.json', 'members'], ['Trading Station members', 'atlas-tradingstation-members-store.json', 'members'], ['stored messages', 'atlas-mail-store.json', 'messages']] as $r) {
-    list($cs, $cn) = doctor_json_count($lib . '/' . $r[1], $r[2], 8388608);
-    if ($cs === 'ok' && $cn !== null) $parts[] = $cn . ' ' . $r[0];
-  }
-  $counts = [];
-  foreach ($ready['classes'] as $cls => $c) if (is_array($c)) $counts[] = $cls . ': ' . (int)(isset($c['signed']) ? $c['signed'] : 0) . ' signed, ' . (int)(isset($c['unsigned']) ? $c['unsigned'] : 0) . ' unsigned, ' . (int)(isset($c['refused']) ? $c['refused'] : 0) . ' refused';
-  $countText = $counts ? implode('; ', $counts) : 'no counts recorded yet';
-  $detailOp = 'Mode ' . $opMode . ' (' . $opFrom . '). ' . $countText . '.' . ($parts ? ' Right now: ' . implode(', ', $parts) . '.' : '');
-  if (!is_file($root . '/atlas/asset/issue.php')) {
-    $add('core', 'owner-proof', 'na', 'Membership owner proof: no issue route here', '');
-  } elseif (!$hasLib || !$inIssue || !$inCaps) {
-    $missing = [];
-    if (!$hasLib) $missing[] = 'lib/owner-proof.php';
-    if (!$inIssue) $missing[] = 'atlas/asset/issue.php (old version)';
-    if (!$inCaps) $missing[] = 'atlas/capabilities.php (old version)';
-    $add('core', 'owner-proof', 'fail', 'Membership owner proof is not fully installed', 'Missing or old: ' . implode(', ', $missing) . '. Anyone can ask this issuer for a membership card for a key they do not hold.', 'Upload lib/owner-proof.php, atlas/asset/issue.php, atlas/capabilities.php and lib/webauthn.php from the repository together.');
-  } elseif ($opBad) {
-    $add('core', 'owner-proof', 'warn', 'The owner-proof setting is not off, accept or require', 'The issuer falls back to accept. ' . $detailOp, 'Correct the value in ' . $opFrom . '.');
-  } elseif ($opMode === 'off') {
-    $add('core', 'owner-proof', 'fail', 'Membership owner proof is switched off', $detailOp, 'Set ATLAS_OWNER_PROOF (or lib/atlas-owner-proof-config.json) to accept, and to require once ready.');
-  } elseif ($opMode === 'accept') {
-    $why = ['ready' => 'Signed requests have been seen and no unsigned one in the last 7 days: it can be switched to require.', 'not-ready' => 'An unsigned request arrived in the last 7 days (' . implode(', ', $ready['unsignedRecent']) . '): switching now would turn a wallet away.', 'no-signed-yet' => 'No signed issuance has been seen yet, so the signed path is not proven on this domain.'];
-    $add('core', 'owner-proof', 'warn', 'Membership owner proof is in accept mode (temporary): not enforcing yet', (isset($why[$ready['state']]) ? $why[$ready['state']] . ' ' : '') . $detailOp, 'Switch to require when ready: set ATLAS_OWNER_PROOF=require, or put {"mode": "require"} in lib/atlas-owner-proof-config.json.');
-  } else {
-    $add('core', 'owner-proof', 'ok', 'Membership owner proof is enforcing (require)', $detailOp);
-  }
+  // -- core: membership owner proof (the Issuer Security section shows the same verdict, class by class)
+  $op = doctor_owner_proof_check($root, $lib, $private, $now);
+  $add('core', 'owner-proof', $op['status'], $op['title'], $op['detail'], $op['fix']);
 
   // -- stores of each installed component: valid JSON, size, counts
   foreach (doctor_component_list() as $c) {
@@ -1389,6 +1396,386 @@ function doctor_services($root, $host, $states, $mounts) {
   return ['checks' => $checks];
 }
 
+// ---- Issuer Security & Deployment Health ------------------------------------------------------------------------
+// Read-only. One answer for the section of that name: which security-relevant files match the repository (and, when one
+// does not, whether it still has the current security changes), the effective domain pin, the owner-proof state class by
+// class, the outbound limiter, and whether PHP can tell visitors apart. Every row is [status, label, title, detail, fix];
+// nothing here prints a key, a token, a record, an address or anything derived from one: only names, counts and settings.
+// The files are compared with the same check as the file scan (doctor_check_entry), the owner-proof verdict is the one
+// the services list shows, and the registry of what to look for is tools/site-doctor/security.json.
+
+function doctor_sec_registry() {
+  global $DOCTOR;
+  $r = isset($DOCTOR['security']) && is_array($DOCTOR['security']) ? $DOCTOR['security'] : [];
+  foreach (['files', 'ownerProofClasses', 'outboundClasses'] as $k) if (!isset($r[$k]) || !is_array($r[$k])) $r[$k] = [];
+  return $r;
+}
+
+// The text of a file under the root with CRLF folded to LF, or null.
+function doctor_sec_text($root, $rel) {
+  static $cache = [];
+  $key = $root . '|' . $rel;
+  if (array_key_exists($key, $cache)) return $cache[$key];
+  $f = $root . '/' . $rel;
+  $text = null;
+  if (!is_link($f) && is_file($f)) {
+    $size = @filesize($f);
+    if ($size !== false && $size <= 2097152) {
+      $c = @file_get_contents($f);
+      if (is_string($c)) $text = str_replace("\r\n", "\n", $c);
+    }
+  }
+  return $cache[$key] = $text;
+}
+
+function doctor_sec_row($status, $label, $title, $detail = '', $fix = '') {
+  return ['status' => $status, 'label' => $label, 'title' => $title, 'detail' => $detail, 'fix' => $fix];
+}
+
+function doctor_sec_worst($rows) {
+  $worst = 'ok'; $any = false;
+  foreach ($rows as $r) {
+    if ($r['status'] === 'fail') return 'fail';
+    if ($r['status'] === 'warn') $worst = 'warn';
+    if ($r['status'] !== 'na' && $r['status'] !== 'info') $any = true;
+  }
+  return $any || $worst !== 'ok' ? $worst : 'info';
+}
+
+// 1. The security files against the repository. State: matching | modified | outdated | differs | missing |
+// not-installed | unreadable. 'modified' has every current security change but a different hash (edited on purpose, or
+// a newer release); 'outdated' lacks one; 'differs' is a file with nothing to look for.
+function doctor_sec_files($root, $entries, $states, $reg) {
+  $rows = []; $files = []; $n = ['matching' => 0, 'modified' => 0, 'outdated' => 0, 'missing' => 0, 'not-installed' => 0];
+  foreach ($reg['files'] as $f) {
+    $path = $f['path']; $comp = $f['component'];
+    $active = $comp === 'core' || (isset($states[$comp]) && $states[$comp]['active']);
+    $full = $root . '/' . $path;
+    $needs = []; $state = '';
+    if (!file_exists($full) && !is_link($full)) $state = $active ? 'missing' : 'not-installed';
+    elseif (is_link($full) || !is_file($full)) $state = 'unreadable';
+    else {
+      $text = doctor_sec_text($root, $path);
+      foreach ($f['needs'] as $nd) $needs[] = ['label' => $nd['label'], 'present' => $text !== null && strpos($text, $nd['text']) !== false];
+      $hit = false; $seen = false;
+      foreach ($entries as $e) {
+        if ($e[0] !== $path) continue;
+        $seen = true;
+        if (doctor_check_entry($root, $e) === 'ok') { $hit = true; break; }
+      }
+      if ($hit) $state = 'matching';
+      elseif (!$seen || $text === null) $state = 'unreadable';
+      else {
+        $allHave = true;
+        foreach ($needs as $nd) if (!$nd['present']) $allHave = false;
+        $state = !$needs ? 'differs' : ($allHave ? 'modified' : 'outdated');
+      }
+    }
+    if (isset($n[$state])) $n[$state]++;
+    $have = []; $lack = [];
+    foreach ($needs as $nd) { if ($nd['present']) $have[] = $nd['label']; else $lack[] = $nd['label']; }
+    $up = 'Upload issuer-php/' . $path . ' from the repository. This page never changes a file.';
+    if ($state === 'matching') $row = doctor_sec_row('ok', 'MATCHING', $path . ': matches the repository', $f['role'] . '.');
+    elseif ($state === 'not-installed') $row = doctor_sec_row('na', 'NOT INSTALLED', $path . ': not installed (optional component)', 'This file belongs to an optional part of Domain Atlas that is not installed here, so it is not expected.');
+    elseif ($state === 'missing') $row = doctor_sec_row('fail', 'MISSING', $path . ': missing', 'Needed by an installed part. ' . $f['matters'], $up);
+    elseif ($state === 'unreadable') $row = doctor_sec_row('warn', 'UNREADABLE', $path . ': could not be compared', 'It is not a regular readable file here (a link, a folder or too large).', 'Replace it with the repository file.');
+    elseif ($state === 'outdated') $row = doctor_sec_row($f['critical'] ? 'fail' : 'warn', 'OUTDATED', $path . ': an older version', 'Lacks: ' . implode('; ', $lack) . '.' . ($have ? ' Has: ' . implode('; ', $have) . '.' : '') . ' ' . $f['matters'], $up);
+    elseif ($state === 'modified') $row = doctor_sec_row('warn', 'MODIFIED', $path . ': differs from the repository but has the current security changes', 'Has: ' . implode('; ', $have) . '. It is either edited on purpose or a different release than this page was built from.', 'Nothing is required if you made the change. Re-upload only if you did not.');
+    else $row = doctor_sec_row('warn', 'DIFFERS', $path . ': differs from the repository', $f['matters'], 'Re-upload it if you did not edit it on purpose.');
+    $rows[] = $row;
+    $files[] = ['path' => $path, 'state' => $state];
+  }
+  $summary = $n['matching'] . ' matching, ' . ($n['modified'] + $n['outdated'] + (count($rows) - array_sum($n))) . ' outdated or modified, ' . $n['missing'] . ' missing' . ($n['not-installed'] ? ', ' . $n['not-installed'] . ' not installed (optional)' : '');
+  return ['rows' => $rows, 'files' => $files, 'counts' => $n, 'summary' => $summary];
+}
+
+// 2. The domain pin. Mirrors lib/domain.php's atlas_configured_domain() precedence: ATLAS_DOMAIN in the environment, then
+// the web server's setting of it, then "domain" in lib/atlas-domain-config.json. test/site-doctor-security.js runs this
+// and the issuer's own function over the same fixtures so the two cannot drift apart.
+function doctor_normalize_domain($value) {
+  if (!is_string($value)) return null;
+  $value = strtolower(trim($value));
+  $label = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
+  $port = '(?::[1-9][0-9]{0,4})?';
+  if (!preg_match('/^(?:' . $label . '(?:\.' . $label . ')*|\[[0-9a-f:]+\])' . $port . '$/D', $value)) return null;
+  if (preg_match('/:([0-9]+)$/', $value, $m) && (int)$m[1] > 65535) return null;
+  return $value;
+}
+
+// ['pinned'|'unpinned'|'invalid', domain or null, where it came from, a note about the file or null]
+function doctor_domain_effective($root) {
+  $raw = getenv('ATLAS_DOMAIN');
+  $from = 'the ATLAS_DOMAIN environment variable';
+  if (!is_string($raw) || trim($raw) === '') {
+    $raw = isset($_SERVER['ATLAS_DOMAIN']) ? $_SERVER['ATLAS_DOMAIN'] : (isset($_SERVER['REDIRECT_ATLAS_DOMAIN']) ? $_SERVER['REDIRECT_ATLAS_DOMAIN'] : '');
+    $from = 'the web server\'s ATLAS_DOMAIN setting';
+  }
+  $fileNote = null;
+  $file = $root . '/lib/atlas-domain-config.json';
+  $fileDomain = false; // false: no usable value in the file
+  if (is_file($file)) {
+    $doc = json_decode((string)@file_get_contents($file, false, null, 0, 65536), true);
+    if (!is_array($doc)) $fileNote = 'lib/atlas-domain-config.json is present but is not valid JSON, so the issuer ignores it';
+    elseif (!isset($doc['domain'])) $fileNote = 'lib/atlas-domain-config.json is present but has no "domain" value, so the issuer ignores it';
+    else $fileDomain = is_string($doc['domain']) ? $doc['domain'] : null;
+  }
+  if (!is_string($raw) || trim($raw) === '') {
+    if ($fileDomain === false) return ['unpinned', null, 'nothing', $fileNote];
+    $from = 'lib/atlas-domain-config.json';
+    $raw = $fileDomain === null ? false : $fileDomain;
+  } elseif ($fileDomain !== false && is_string($fileDomain) && doctor_normalize_domain($fileDomain) !== doctor_normalize_domain($raw)) {
+    $fileNote = 'lib/atlas-domain-config.json names a different domain, but the setting above takes precedence over it';
+  }
+  if ($raw === '') return ['unpinned', null, 'nothing', $fileNote];
+  $norm = doctor_normalize_domain($raw);
+  return $norm === null ? ['invalid', null, $from, $fileNote] : ['pinned', $norm, $from, $fileNote];
+}
+
+function doctor_sec_domain($root, $expectedRaw) {
+  $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
+  $expected = doctor_normalize_domain($expectedRaw);
+  $expectedFrom = 'the domain you typed';
+  if ($expected === null) {
+    $h = doctor_normalize_domain($host);
+    $expected = $h === null ? null : preg_replace('/^www\./', '', $h);
+    $expectedFrom = 'this host (without a leading www.)';
+  }
+  $rows = [];
+  $text = doctor_sec_text($root, 'lib/domain.php');
+  if ($text === null) {
+    $rows[] = doctor_sec_row('fail', 'FAIL', 'lib/domain.php is missing', 'The issuer cannot work out which domain it is without it.', 'Upload issuer-php/lib/domain.php from the repository.');
+    return ['rows' => $rows, 'expected' => $expected, 'effective' => null];
+  }
+  if (strpos($text, 'atlas_configured_domain') === false) {
+    $rows[] = doctor_sec_row('fail', 'FAIL', 'The deployed lib/domain.php cannot be pinned', 'This version always takes the issuer\'s identity from the HTTP Host header of each request, which a client chooses.', 'Upload issuer-php/lib/domain.php and lib/bootstrap.php from the repository, then set the domain.');
+    return ['rows' => $rows, 'expected' => $expected, 'effective' => null];
+  }
+  list($state, $domain, $from, $fileNote) = doctor_domain_effective($root);
+  $facts = 'Expected: ' . ($expected === null ? 'unknown (this host is not a valid name; type the domain above)' : $expected . ' (' . $expectedFrom . ')') . '. Effective configured domain: ' . ($domain === null ? 'none' : $domain) . '. Configuration source: ' . $from . '.' . ($fileNote ? ' Note: ' . $fileNote . '.' : '');
+  if ($state === 'invalid') $rows[] = doctor_sec_row('fail', 'FAIL', 'The configured domain is not a valid host name', $facts . ' The issuer stops answering rather than guess, so every request is refused.', 'Correct ' . $from . ' to the bare domain (letters, digits, hyphens and dots, with an optional :port).');
+  elseif ($state === 'unpinned') $rows[] = doctor_sec_row('warn', 'WARNING', 'The domain is not pinned: the issuer falls back to the HTTP Host header', $facts . ' Every credential it signs and every signed request it accepts is then tied to whatever Host a request names.', 'Set ATLAS_DOMAIN, or put {"domain": "your-domain"} in lib/atlas-domain-config.json (cPanel cannot set environment variables, so the file is the usual route).');
+  elseif ($expected === null) $rows[] = doctor_sec_row('info', 'PINNED', 'The domain is pinned; there is no expected value to compare it with', $facts, '');
+  elseif ($domain !== $expected) $rows[] = doctor_sec_row('fail', 'FAIL', 'The pinned domain does not match the expected domain', $facts . ' Credentials would carry the wrong issuer domain and other domains would fetch the wrong key.', 'Correct the value in ' . $from . ', or type the right expected domain above if this page is on an alias.');
+  else $rows[] = doctor_sec_row('ok', 'PASS', 'The domain is explicitly pinned and matches', $facts);
+  return ['rows' => $rows, 'expected' => $expected, 'effective' => $domain, 'source' => $from, 'state' => $state];
+}
+
+// 3. Membership owner proof, class by class. The verdict is the one the services list shows.
+function doctor_sec_owner_proof($root, $reg, $now) {
+  $lib = $root . '/lib';
+  $base = doctor_private_base($root);
+  $private = $base === '' ? $lib : $base;
+  $op = doctor_owner_proof_check($root, $lib, $private, $now);
+  $pill = ['ok' => 'PASS', 'warn' => 'WARNING', 'fail' => 'FAIL', 'na' => 'NOT INSTALLED'];
+  $rows = [doctor_sec_row($op['status'], $pill[$op['status']], $op['title'], $op['detail'], $op['fix'])];
+  $rows[0]['dup'] = true; // the services list already carries this verdict into the to-do list and the tally
+  if ($op['status'] === 'na') return ['rows' => $rows, 'mode' => $op['mode']];
+  $win = 7 * 86400;
+  foreach ($reg['ownerProofClasses'] as $cls) {
+    $c = isset($op['ready']['classes'][$cls]) && is_array($op['ready']['classes'][$cls]) ? $op['ready']['classes'][$cls] : [];
+    $signed = (int)(isset($c['signed']) ? $c['signed'] : 0);
+    $unsigned = (int)(isset($c['unsigned']) ? $c['unsigned'] : 0);
+    $refused = (int)(isset($c['refused']) ? $c['refused'] : 0);
+    $t = isset($c['lastUnsignedAt']) && is_string($c['lastUnsignedAt']) ? strtotime($c['lastUnsignedAt']) : false;
+    $recent = $t !== false && $now - $t < $win;
+    $counts = $signed . ' signed, ' . $unsigned . ' unsigned, ' . $refused . ' refused.';
+    if ($op['installed'] === false) { $rows[] = doctor_sec_row('fail', 'NOT INSTALLED', $cls . ': the check is not fully installed', $counts); continue; }
+    if ($op['bad']) { $rows[] = doctor_sec_row('warn', 'ACCEPT', $cls . ': the setting is not valid, so the issuer accepts unsigned requests', $counts); continue; }
+    if ($op['mode'] === 'require') $rows[] = doctor_sec_row('ok', 'ENFORCING', $cls . ': enforcing (signed requests only)', $counts);
+    elseif ($op['mode'] === 'off') $rows[] = doctor_sec_row('fail', 'OFF', $cls . ': not checked', $counts);
+    elseif ($recent) $rows[] = doctor_sec_row('warn', 'NOT READY', $cls . ': accepting, and an unsigned request arrived in the last 7 days', $counts . ' Switching to require now would turn that wallet away.');
+    elseif ($signed < 1) $rows[] = doctor_sec_row('warn', 'NO SIGNED YET', $cls . ': accepting, no signed request seen yet', $counts . ' The signed path is not proven for this class.');
+    else $rows[] = doctor_sec_row('warn', 'READY', $cls . ': accepting; ready to switch to require', $counts);
+  }
+  return ['rows' => $rows, 'mode' => $op['mode'], 'from' => $op['from']];
+}
+
+// 4. The outbound limiter. These readers mirror lib/outbound.php's atlas_outbound_env_number() and
+// atlas_outbound_env_fraction(), which read the process environment only (there is no config-file route).
+function doctor_ob_number($name, $fallback) {
+  $v = getenv($name);
+  if (is_string($v) && is_numeric($v) && (float)$v > 0) return [(int)(float)$v, 'environment', null];
+  return [(int)$fallback, 'default', is_string($v) && $v !== '' ? 'is set but is not a positive number, so the default applies' : null];
+}
+function doctor_ob_fraction($name, $fallback, $min, $max) {
+  $v = getenv($name);
+  if (!is_string($v) || $v === '') return [$fallback, 'default', null];
+  if (!is_numeric($v)) return [$fallback, 'default', 'is set but is not a number, so the default applies'];
+  $n = (float)$v;
+  if ($n >= $min && $n <= $max) return [$n, 'environment', null];
+  return [$fallback, 'default', 'is set but is outside ' . $min . ' to ' . $max . ', so the default applies'];
+}
+
+function doctor_sec_outbound($root, $files, $states, $reg) {
+  $rows = [];
+  $lib = $root . '/lib';
+  $byPath = [];
+  foreach ($files['files'] as $f) $byPath[$f['path']] = $f['state'];
+  $text = doctor_sec_text($root, 'lib/outbound.php');
+  // installed: the limiter file has every marker of the caller-aware version
+  $limiter = false; $lacks = [];
+  foreach ($reg['files'] as $f) {
+    if ($f['path'] !== 'lib/outbound.php') continue;
+    $limiter = $text !== null;
+    foreach ($f['needs'] as $nd) if ($text === null || strpos($text, $nd['text']) === false) { $limiter = false; $lacks[] = $nd['label']; }
+  }
+  if ($text === null) $rows[] = doctor_sec_row('fail', 'FAIL', 'Installed: lib/outbound.php is missing', 'Without it the issuer cannot make requests to other domains at all.', 'Upload issuer-php/lib/outbound.php from the repository.');
+  elseif (!$limiter) $rows[] = doctor_sec_row('fail', 'FAIL', 'Installed: an older limiter, without the caller-aware budgets', 'Lacks: ' . implode('; ', $lacks) . '. One visitor can use up the shared outbound budget.', 'Upload issuer-php/lib/outbound.php, lib/bootstrap.php, atlas/world/drops/claim.php and atlas/world/drop.php from the repository, in that order.');
+  else $rows[] = doctor_sec_row('ok', 'PASS', 'Installed: the caller-aware limiter is in lib/outbound.php', 'All of its markers are present' . (isset($byPath['lib/outbound.php']) && $byPath['lib/outbound.php'] === 'matching' ? ' and the file matches the repository.' : '; the file differs from the repository.'));
+  // request classes: accepted by the limiter, and used by its callers
+  $classOk = true; $classNames = [];
+  foreach ($reg['outboundClasses'] as $c) {
+    $accepts = $text !== null && strpos($text, $c['limiter']) !== false;
+    $comp = isset($c['caller']['component']) ? $c['caller']['component'] : 'core';
+    $active = $comp === 'core' || (isset($states[$comp]) && $states[$comp]['active']);
+    $callerText = $active ? doctor_sec_text($root, $c['caller']['file']) : null;
+    $uses = $callerText !== null && strpos($callerText, $c['caller']['text']) !== false;
+    $label = $c['id'];
+    if (!$accepts) { $classOk = false; $classNames[] = $label . ': not supported by the limiter'; }
+    elseif (!$active) $classNames[] = $label . ': supported (its caller is an optional part that is not installed)';
+    elseif (!$uses) { $classOk = false; $classNames[] = $label . ': supported, but ' . $c['caller']['file'] . ' does not use it (old copy)'; }
+    else $classNames[] = $label . ': supported and used';
+  }
+  $rows[] = doctor_sec_row($classOk ? 'ok' : 'fail', $classOk ? 'PASS' : 'FAIL', 'Request classes key, verify, drop and relay', implode('. ', $classNames) . '.', $classOk ? '' : 'Upload lib/outbound.php, lib/bootstrap.php and atlas/world/drops/claim.php from the same release.');
+  // effective settings
+  list($reserve, $reserveSrc, $reserveProblem) = doctor_ob_fraction('ATLAS_OUTBOUND_RESERVE', 0.15, 0, 0.3);
+  list($share, $shareSrc, $shareProblem) = doctor_ob_fraction('ATLAS_OUTBOUND_FAIR_SHARE', 0.25, 0.01, 1);
+  $num = [];
+  foreach ([['perDomain', 'ATLAS_OUTBOUND_RATE', 120], ['perDomainKey', 'ATLAS_OUTBOUND_KEY_RATE', 20], ['overall', 'ATLAS_OUTBOUND_RATE_ALL', 600], ['overallKey', 'ATLAS_OUTBOUND_KEY_RATE_ALL', 120], ['window', 'ATLAS_OUTBOUND_RATE_WINDOW_MS', 60000]] as $s) $num[$s[0]] = array_merge(doctor_ob_number($s[1], $s[2]), [$s[1]]);
+  $problems = [];
+  if ($reserveProblem) $problems[] = 'ATLAS_OUTBOUND_RESERVE ' . $reserveProblem;
+  if ($shareProblem) $problems[] = 'ATLAS_OUTBOUND_FAIR_SHARE ' . $shareProblem;
+  foreach ($num as $v) if ($v[2]) $problems[] = $v[3] . ' ' . $v[2];
+  $zero = [];
+  foreach ($num as $k => $v) if ($k !== 'window' && $v[0] < 1) $zero[] = $v[3];
+  $src = function ($s) { return $s === 'environment' ? 'set in the environment' : 'default'; };
+  $slice = function ($b) use ($reserve) { return (int)floor($b * $reserve); };
+  $fair = function ($b) use ($share) { return max(1, (int)ceil($b * $share)); };
+  $settings = [
+    ['Reserve fraction', $reserve, $src($reserveSrc), 'The slice of each budget held back for callers that have not used their fair share, and the floor each operation class keeps (' . $slice($num['overall'][0]) . ' of ' . $num['overall'][0] . ' lookups a window for each class other than key). 0 switches both off.'],
+    ['Fair-share fraction', $share, $src($shareSrc), 'A caller that has used this much of a budget (' . $fair($num['overall'][0]) . ' of ' . $num['overall'][0] . ' overall, ' . $fair($num['perDomain'][0]) . ' of ' . $num['perDomain'][0] . ' for one domain) cannot take the reserved slice.'],
+    ['Per-domain budget', $num['perDomain'][0], $src($num['perDomain'][1]), 'Requests to one other domain per window, for each of verify, drop and relay (ATLAS_OUTBOUND_RATE).'],
+    ['Per-domain key-lookup budget', $num['perDomainKey'][0], $src($num['perDomainKey'][1]), 'Published-key lookups for one other domain per window (ATLAS_OUTBOUND_KEY_RATE).'],
+    ['Overall budget', $num['overall'][0], $src($num['overall'][1]), 'Requests to all other domains per window for verify, drop and relay together (ATLAS_OUTBOUND_RATE_ALL).'],
+    ['Overall key-lookup budget', $num['overallKey'][0], $src($num['overallKey'][1]), 'Published-key lookups to all other domains per window (ATLAS_OUTBOUND_KEY_RATE_ALL).'],
+    ['Rate window', $num['window'][0] . ' ms', $src($num['window'][1]), 'How long an attempt counts against a budget (ATLAS_OUTBOUND_RATE_WINDOW_MS).'],
+  ];
+  $settingRows = [];
+  foreach ($settings as $s) $settingRows[] = doctor_sec_row('info', 'INFO', $s[0] . ': ' . $s[1] . ' (' . $s[2] . ')', $s[3]);
+  // configured: the settings are usable and the limiter can record its attempts
+  $store = $lib . '/atlas-outbound-rate-store.json';
+  $storeOk = is_file($store) ? (!is_link($store) && is_writable($store)) : (is_dir($lib) && is_writable($lib));
+  $cfgFail = [];
+  if ($zero) $cfgFail[] = implode(', ', $zero) . ' works out to less than 1, so every outbound request would be refused';
+  if ($num['window'][0] < 1) $cfgFail[] = $num['window'][3] . ' works out to less than 1, so no attempt would ever be counted and the limiter would do nothing';
+  if (!$storeOk) $cfgFail[] = 'PHP cannot write ' . (is_file($store) ? 'lib/atlas-outbound-rate-store.json' : 'in lib/') . ', and a limiter that cannot record its attempts refuses every request';
+  if ($cfgFail) $rows[] = doctor_sec_row('fail', 'FAIL', 'Configured: the outbound settings would refuse requests', implode('. ', $cfgFail) . '.', 'Correct the value, or make lib/ writable by your hosting account.');
+  elseif ($problems || $reserve === 0.0) {
+    $rows[] = doctor_sec_row('warn', 'WARNING', 'Configured: check the outbound settings', ($problems ? implode('. ', $problems) . '. ' : '') . ($reserve === 0.0 ? 'ATLAS_OUTBOUND_RESERVE is 0, which turns off both the caller fair-share rule and the floors that keep one operation class from using another\'s budget.' : ''), 'Remove the setting to use the defaults, unless 0 is intended.');
+  } else $rows[] = doctor_sec_row('ok', 'PASS', 'Configured: the settings are valid and the limiter can record its attempts', 'The settings below are read from the environment only; PHP has no config-file route for them, so the defaults are normal.');
+  foreach ($settingRows as $r) $rows[] = $r;
+  // ready: installed, every class wired, configured
+  $ready = $limiter && $classOk && !$cfgFail;
+  $rows[] = $ready ? doctor_sec_row('ok', 'READY', 'Ready: the code, the call sites and the settings are all in place', 'This is a reading of the files and settings. Whether the limiter has run is shown next.')
+    : doctor_sec_row('fail', 'NOT READY', 'Not ready: see the failed rows above', '');
+  // observed: what the limiter has actually recorded in the last window
+  list($st, $doc) = doctor_json_file($store, 2097152);
+  $shape = 'none'; $byClass = []; $callers = [];
+  if ($st === 'ok') {
+    foreach (['other', 'key'] as $b) {
+      if (!isset($doc[$b]) || !is_array($doc[$b])) continue;
+      if (isset($doc[$b]['all']) || isset($doc[$b]['by'])) { $shape = $shape === 'caller-aware' ? $shape : 'old'; continue; }
+      foreach ($doc[$b] as $e) {
+        if (!is_array($e) || count($e) !== 4 || !is_string($e[1])) continue;
+        $shape = 'caller-aware';
+        $byClass[$e[1]] = (isset($byClass[$e[1]]) ? $byClass[$e[1]] : 0) + 1;
+        if (is_string($e[3]) && preg_match('/^[0-9a-f]{16}$/', $e[3])) $callers[$e[3]] = true;
+      }
+    }
+  }
+  if ($shape === 'caller-aware') {
+    $parts = [];
+    foreach (['key', 'verify', 'drop', 'relay'] as $c) if (isset($byClass[$c])) $parts[] = $c . ' ' . $byClass[$c];
+    $rows[] = doctor_sec_row('ok', 'OBSERVED', 'In use: the limiter has recorded caller-aware attempts', 'Attempts held for the current window: ' . ($parts ? implode(', ', $parts) : 'none of the four classes') . '. These records are short-lived.');
+  } elseif ($shape === 'old') $rows[] = doctor_sec_row('warn', 'OLD RECORDS', 'In use: the rate file is in the older format', 'The last limiter that wrote it kept one shared budget, so the deployed code has not run since, or is an older copy.', 'Make a cross-domain request after uploading and check again.');
+  else $rows[] = doctor_sec_row('info', 'NOT YET OBSERVED', 'In use: no outbound attempts are recorded for the current window', 'This is normal on a quiet issuer: the file only holds the last minute. Do one cross-domain action (a drop claim or a trade) and check again to see the limiter at work.');
+  return ['rows' => $rows, 'callers' => $callers, 'ready' => $ready];
+}
+
+// 5. Can PHP tell visitors apart? Reads this request's socket address (never shown) and the distinct client records the
+// issuer already keeps for its own rate limits (counted, never shown). Nothing is written and no endpoint is added.
+function doctor_sec_visitors($root, $outboundCallers) {
+  $rows = [];
+  $addr = isset($_SERVER['REMOTE_ADDR']) && is_string($_SERVER['REMOTE_ADDR']) ? preg_replace('/^::ffff:/', '', $_SERVER['REMOTE_ADDR']) : '';
+  $valid = $addr !== '' && filter_var($addr, FILTER_VALIDATE_IP) !== false;
+  $kind = '';
+  if ($valid) {
+    $isV4 = strpos($addr, ':') === false;
+    if ($addr === '::1' || ($isV4 && strpos($addr, '127.') === 0)) $kind = 'loopback';
+    elseif ($isV4 && preg_match('/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./', $addr)) $kind = 'shared';
+    elseif (filter_var($addr, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) $kind = 'private';
+    else $kind = 'public';
+  }
+  $names = [];
+  foreach (['HTTP_X_FORWARDED_FOR' => 'X-Forwarded-For', 'HTTP_FORWARDED' => 'Forwarded', 'HTTP_X_REAL_IP' => 'X-Real-IP', 'HTTP_CF_CONNECTING_IP' => 'CF-Connecting-IP', 'HTTP_TRUE_CLIENT_IP' => 'True-Client-IP'] as $k => $label) {
+    if (!isset($_SERVER[$k]) || !is_string($_SERVER[$k]) || $_SERVER[$k] === '') continue;
+    $names[] = $label;
+  }
+  $differs = false;
+  foreach (['HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP', 'HTTP_CF_CONNECTING_IP', 'HTTP_TRUE_CLIENT_IP'] as $k) {
+    if (!isset($_SERVER[$k]) || !is_string($_SERVER[$k]) || $_SERVER[$k] === '') continue;
+    $first = trim(explode(',', $_SERVER[$k])[0]);
+    if ($valid && filter_var($first, FILTER_VALIDATE_IP) !== false && preg_replace('/^::ffff:/', '', $first) !== $addr) $differs = true;
+  }
+  // the client records the issuer already keeps: the outbound limiter's and the admin routes' per-client rate records
+  $ids = $outboundCallers;
+  list($st, $doc) = doctor_json_file($root . '/lib/atlas-admin-ratelimit-store.json', 2097152);
+  if ($st === 'ok') foreach (['failures', 'nonceIssues', 'moderationStatus'] as $b) {
+    if (!isset($doc[$b]) || !is_array($doc[$b])) continue;
+    foreach ($doc[$b] as $k => $v) if (is_string($k) && preg_match('/^[0-9a-f]{16}$/', $k)) $ids[$k] = true;
+  }
+  $distinct = count($ids);
+  $route = is_file($root . '/atlas/moderation/status.php') ? '/atlas/moderation/status' : (is_file($root . '/atlas/admin/session/nonce.php') ? '/atlas/admin/session/nonce' : '');
+  $how = $route === '' ? 'No route on this issuer records a per-visitor entry, so it cannot be tested this way.' : 'To test it: from two different networks (a phone on mobile data and a computer on Wi-Fi), open ' . $route . ' once each within a minute, then press "Check again". The route answers an error or a short message; it only makes the issuer\'s own rate limiter note each caller.';
+  if (!$valid) $rows[] = doctor_sec_row('warn', 'WARNING', 'PHP cannot see a visitor address', 'REMOTE_ADDR is empty or not an address on this request. The outbound limiter then treats every request as having no caller and never holds one to a fair share.', 'Ask the host why PHP is not given the connecting address.');
+  else {
+    $rows[] = doctor_sec_row('ok', 'PASS', 'PHP sees a connecting address (' . (strpos($addr, ':') === false ? 'IPv4' : 'IPv6') . ', ' . $kind . ' range)', 'Only its kind is shown here: the address itself and anything derived from it are never displayed or kept.');
+  }
+  $proxy = $valid && ($kind !== 'public' || $differs);
+  if ($proxy) {
+    $why = [];
+    if ($kind !== 'public') $why[] = 'the address PHP sees is in a ' . $kind . ' range, which a public visitor never has';
+    if ($names) $why[] = 'a forwarded-address header (' . implode(', ', $names) . ') is present' . ($differs ? ' and names a different address' : '');
+    $rows[] = doctor_sec_row('warn', 'WARNING', 'A reverse proxy probably sits in front of PHP', implode('; ', $why) . '. If so every visitor shares the proxy\'s address, so one caller cannot be told from another. The budgets and the operation-class floors still hold; only the per-visitor fair share is idle. The limiter deliberately ignores forwarded headers, which a client can write.', 'Have the host pass the real address to PHP (an Apache mod_remoteip or LiteSpeed setting), then check again. Do not set ATLAS_OUTBOUND_RESERVE=0 for this: it also removes the class floors.');
+  } elseif ($valid && $names) $rows[] = doctor_sec_row('info', 'INFO', 'A forwarded-address header is present but agrees with the connecting address', implode(', ', $names) . '. No sign that visitors share an address.');
+  if ($valid && !$proxy) {
+    if ($distinct >= 2) $rows[] = doctor_sec_row('ok', 'VERIFIED', 'Different visitors can be told apart', $distinct . ' distinct client records are held by the issuer\'s rate limits right now, so PHP does see more than one address. The records themselves are never shown.');
+    else $rows[] = doctor_sec_row('info', 'NOT YET VERIFIED', 'Not yet verified: ' . ($distinct === 1 ? 'only one visitor has been recorded' : 'no visitor records are held right now'), 'This is not a sign of a proxy: the records are short-lived and a quiet issuer holds few. ' . $how);
+  } elseif ($valid && $proxy) {
+    $rows[] = doctor_sec_row('info', 'NOT VERIFIED', 'Not verified while the signs of a proxy above stand', ($distinct >= 2 ? 'The issuer holds ' . $distinct . ' distinct client records, but behind a proxy or a content network those can be its own servers rather than visitors. ' : '') . $how);
+  }
+  return ['rows' => $rows, 'distinct' => $distinct, 'proxy' => $proxy];
+}
+
+function doctor_security($root, $host, $entries, $states, $expectedRaw) {
+  $reg = doctor_sec_registry();
+  $now = time();
+  $files = doctor_sec_files($root, $entries, $states, $reg);
+  $domain = doctor_sec_domain($root, $expectedRaw);
+  $owner = doctor_sec_owner_proof($root, $reg, $now);
+  $ob = doctor_sec_outbound($root, $files, $states, $reg);
+  $vis = doctor_sec_visitors($root, $ob['callers']);
+  $groups = [
+    ['id' => 'files', 'title' => 'Security files compared with the repository', 'intro' => 'The same SHA-256 comparison as the file scan, for the files that carry the outbound and drop protections. Matching, outdated or modified, missing; a file of an optional part that is not installed is not expected. Nothing here overwrites a file.', 'summary' => $files['summary'], 'rows' => $files['rows']],
+    ['id' => 'domain', 'title' => 'Domain pinning', 'intro' => 'The issuer takes its identity from configuration, never from the request. The order is the issuer\'s own: ATLAS_DOMAIN in the environment, then the web server\'s setting of it, then lib/atlas-domain-config.json. This page cannot see a setting made only inside a sub-folder\'s .htaccess; the check against the issuer\'s own answer below covers that.', 'summary' => '', 'rows' => $domain['rows']],
+    ['id' => 'owner', 'title' => 'Membership owner proof', 'intro' => 'Mode and counts for the three membership classes, from the counters the issuer keeps. Refused counts only requests the owner-proof check itself refused: a request turned away earlier for a missing or foreign Origin is not counted here.', 'summary' => '', 'rows' => $owner['rows']],
+    ['id' => 'outbound', 'title' => 'Outbound request protection', 'intro' => 'Whether the limiter for this issuer\'s requests to other domains is installed, wired to every kind of request, configured and ready, and whether it has run. A function name alone is not taken as proof.', 'summary' => '', 'rows' => $ob['rows']],
+    ['id' => 'visitors', 'title' => 'Visitor address handling', 'intro' => 'The limiter tells callers apart by the connecting address PHP is given. No address, and nothing derived from one, is shown or kept, and no endpoint is added.', 'summary' => '', 'rows' => $vis['rows']],
+  ];
+  foreach ($groups as $i => $g) $groups[$i]['status'] = doctor_sec_worst($g['rows']);
+  return ['groups' => $groups, 'domain' => ['expected' => $domain['expected'], 'effective' => $domain['effective'], 'state' => isset($domain['state']) ? $domain['state'] : null]];
+}
+
 // ---- request handling --------------------------------------------------------------------------------------
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -1453,6 +1840,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $r = doctor_services($DOCTOR_ROOT, $host, $states, $ents['mounts']);
     $r['ok'] = true;
     $r['opMode'] = doctor_owner_proof_mode($DOCTOR_ROOT)[0];
+    doctor_json($r);
+  }
+  if ($action === 'security') {
+    $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
+    $forced = preg_replace('/[^a-z]/', '', isset($_POST['mods']) ? (string)$_POST['mods'] : '');
+    $ents = doctor_entries($DOCTOR_ROOT);
+    $states = doctor_component_states($DOCTOR_ROOT, $host, $ents['entries'], $forced);
+    $r = doctor_security($DOCTOR_ROOT, $host, $ents['entries'], $states, substr(isset($_POST['expected']) ? (string)$_POST['expected'] : '', 0, 255));
+    $r['ok'] = true;
     doctor_json($r);
   }
   if ($action === 'scan') {
@@ -1568,6 +1964,11 @@ label.modlabel { display:inline-block; margin-right:14px; }
       <span>Expect these even if no file of them is here yet:</span>
       <span id="modBoxes" class="muted">(listed after the first check)</span>
     </div>
+    <div class="row">
+      <label for="expectedDomain">This issuer's domain:</label>
+      <input type="text" id="expectedDomain" autocomplete="off" spellcheck="false" placeholder="blank = this host without www." style="width:20em;max-width:100%">
+      <span class="muted">Used only by the domain-pinning check.</span>
+    </div>
     <div class="row"><button class="secondary" id="rerun">Check again</button></div>
   </div>
   <div id="sections"></div>
@@ -1636,6 +2037,7 @@ label.modlabel { display:inline-block; margin-right:14px; }
   function step(msg) { $('progress').textContent = msg; }
 
   function currentSite() { var r = document.querySelector('input[name=site]:checked'); return r ? r.value : 'none'; }
+  function currentExpected() { var i = $('expectedDomain'); return i ? i.value.trim() : ''; }
   function currentMods() { return Array.prototype.map.call(document.querySelectorAll('input[name=mod]:checked'), function (c) { return c.value; }).join(''); }
   // One tick box per optional component. Ticking one makes the doctor expect all of its files even when none is here.
   function buildModBoxes(list) {
@@ -1653,7 +2055,7 @@ label.modlabel { display:inline-block; margin-right:14px; }
   var envCache = null;
   function full(first) {
     $('rerun').disabled = true; $('verdict').textContent = 'Checking…';
-    var st = { missing: [], differs: [], expected: [], odd: [], counts: {}, total: 0, extras: null, probes: [], adminProbes: [], health: [], features: [], manifest: null, env: envCache, components: [], services: [], endpoints: [], opMode: null };
+    var st = { missing: [], differs: [], expected: [], odd: [], counts: {}, total: 0, extras: null, probes: [], adminProbes: [], health: [], features: [], manifest: null, env: envCache, components: [], services: [], endpoints: [], opMode: null, security: null };
     var chain = Promise.resolve();
     if (first) {
       chain = chain.then(function () { step('Checking the server…'); return call('env'); }).then(function (env) {
@@ -1692,7 +2094,8 @@ label.modlabel { display:inline-block; margin-right:14px; }
       .then(function (x) { if (!x.ok) throw new Error(x.error || 'extras-failed'); st.extras = x; step('Checking what the web can read…'); return probes(); })
       .then(function (pr) { st.probes = pr; step('Checking each installed service…'); return call('services', { mods: currentMods() }); })
       .then(function (sv) { if (!sv.ok) throw new Error(sv.error || 'services-failed'); st.services = sv.checks; st.opMode = sv.opMode; step('Asking each service whether it answers…'); return endpointProbes(st.components); })
-      .then(function (ep) { st.endpoints = ep; step('Reading the feature switches…'); return call('features'); })
+      .then(function (ep) { st.endpoints = ep; step('Checking issuer security and deployment health…'); return call('security', { mods: currentMods(), expected: currentExpected() }); })
+      .then(function (sc) { if (!sc.ok) throw new Error(sc.error || 'security-failed'); st.security = sc; step('Reading the feature switches…'); return call('features'); })
       .then(function (f) { if (!f.ok) throw new Error(f.error || 'features-failed'); st.features = f.features; step('Checking housekeeping, permissions and administrator state…'); return call('health'); })
       .then(function (h) { if (!h.ok) throw new Error(h.error || 'health-failed'); st.health = h.checks; step('Checking that administrator routes refuse strangers…'); return adminProbes(); })
       .then(function (ap) { st.adminProbes = ap; step('Reading the manifest…'); return call('manifest'); })
@@ -1833,6 +2236,7 @@ label.modlabel { display:inline-block; margin-right:14px; }
     state.endpoints.forEach(function (e) { if (e.state === 'fail') t.push(['fail', 'Service does not answer properly: ' + e.method + ' ' + e.path + ' - ' + e.note, 'Upload the missing or old file, or look at the PHP error log.', 3]); });
     serviceExtra().forEach(function (c) { if (c.status === 'fail') t.push(['fail', c.title, c.fix || c.detail, 3]); });
     state.services.forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, 5]); });
+    securityGroups().forEach(function (g) { g.rows.forEach(function (r) { if (!r.dup && (r.status === 'fail' || r.status === 'warn')) t.push([r.status, g.title + ': ' + r.title, r.fix || r.detail, r.status === 'fail' ? 3 : 5]); }); });
     state.endpoints.forEach(function (e) { if (e.state === 'warn') t.push(['warn', 'Service answer to look at: ' + e.method + ' ' + e.path + ' - ' + e.note, '', 5]); });
     serviceExtra().forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, 5]); });
     state.features.forEach(function (f) { if (f.state === 'problem') t.push(['warn', 'Feature needs attention: ' + f.label, f.reasons.join('; '), 6]); });
@@ -1875,6 +2279,40 @@ label.modlabel { display:inline-block; margin-right:14px; }
     }
     return out;
   }
+  // The Issuer Security & Deployment Health section: groups of rows the server built, plus one check only the browser can
+  // make (what the issuer's own routes announce as their domain, against what this page reads as the pin).
+  function secWorst(rows) {
+    var any = false, warn = false;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].status === 'fail') return 'fail';
+      if (rows[i].status === 'warn') warn = true;
+      if (rows[i].status === 'ok') any = true;
+    }
+    return warn ? 'warn' : (any ? 'ok' : 'info');
+  }
+  function securityGroups() {
+    var sec = state && state.security;
+    if (!sec) return [];
+    var groups = sec.groups.map(function (g) { return { id: g.id, title: g.title, intro: g.intro, summary: g.summary, rows: g.rows.slice() }; });
+    var dom = sec.domain || {};
+    var cat = state.endpoints.filter(function (e) { return e.path === '/atlas/trade/catalog' && e.state === 'ok' && e.json && typeof e.json.domain === 'string'; })[0];
+    var g = groups.filter(function (x) { return x.id === 'domain'; })[0];
+    if (g && dom.effective && cat) {
+      var announced = cat.json.domain.toLowerCase();
+      if (announced === dom.effective) g.rows.push({ status: 'ok', label: 'PASS', title: 'The issuer\'s own routes announce the same domain', detail: 'GET /atlas/trade/catalog reports ' + announced + ', as this page reads it.', fix: '' });
+      else g.rows.push({ status: 'fail', label: 'FAIL', title: 'The issuer\'s own routes announce a different domain', detail: 'GET /atlas/trade/catalog reports ' + announced + ' but this page reads ' + dom.effective + '. A setting made only inside a sub-folder (for example atlas/.htaccess) or a different PHP handler is overriding the pin there.', fix: 'Find the other ATLAS_DOMAIN setting and make it agree.' });
+    }
+    groups.forEach(function (x) { x.status = secWorst(x.rows); });
+    return groups;
+  }
+  function secItem(r) {
+    return el('div', { 'class': 'item ' + r.status }, [el('div', { 'class': 't' }, [pill(r.status, r.label), ' ', r.title]), r.detail ? el('div', { 'class': 'd', text: r.detail }) : null, r.fix ? el('div', { 'class': 'f', text: 'To do: ' + r.fix }) : null]);
+  }
+  function secCounts() {
+    var n = { fail: 0, warn: 0 };
+    securityGroups().forEach(function (g) { g.rows.forEach(function (r) { if (n[r.status] !== undefined) n[r.status]++; }); });
+    return n;
+  }
   var LABEL = { ok: 'PASS', warn: 'WARNING', fail: 'FAIL', na: 'NOT INSTALLED', info: 'INFO' };
   function tally() {
     var n = { ok: 0, warn: 0, fail: 0, na: 0 };
@@ -1886,6 +2324,7 @@ label.modlabel { display:inline-block; margin-right:14px; }
     state.endpoints.forEach(function (e) { add(e.state); });
     compRows().forEach(function (c) { add(c.status); });
     state.probes.forEach(function (p) { add(p.exposed ? 'fail' : 'ok'); });
+    securityGroups().forEach(function (g) { g.rows.forEach(function (r) { if (!r.dup) add(r.status); }); });
     return n;
   }
   function tallyText() { var n = tally(); return n.ok + ' PASS, ' + n.warn + ' WARNING, ' + n.fail + ' FAIL, ' + n.na + ' NOT INSTALLED'; }
@@ -1909,6 +2348,17 @@ label.modlabel { display:inline-block; margin-right:14px; }
     section('To do - fix-it checklist', fails ? 'fail' : (warns ? 'warn' : 'ok'), problems.length ? problems.length + ' item(s)' : 'all clear', problems.length > 0, kids);
 
     $('tally').textContent = tallyText();
+    var sg = securityGroups();
+    var sc = secCounts();
+    var sBody = [el('p', { 'class': 'muted', text: 'Read-only. Reuses the file comparison, the owner-proof counters and the issuer\'s own configuration order. No key, token, record, wallet identity or visitor address is read out or shown.' })];
+    sg.forEach(function (g) {
+      sBody.push(el('div', { 'class': 'gh', text: g.title + (g.summary ? ' - ' + g.summary : '') }));
+      sBody.push(el('p', { 'class': 'muted', text: g.intro }));
+      g.rows.forEach(function (r) { sBody.push(secItem(r)); });
+    });
+    var sWorst = secWorst(sg.reduce(function (a, g) { return a.concat(g.rows); }, []));
+    section('Issuer Security & Deployment Health', sWorst === 'info' ? 'ok' : sWorst, sc.fail || sc.warn ? sc.fail + ' to fix, ' + sc.warn + ' to look at' : 'all clear', sc.fail > 0 || sc.warn > 0, sBody);
+
     var cr = compRows();
     var installed = cr.filter(function (r) { return r.status !== 'na'; }).length;
     section('Components (what is installed here)', worstOf(cr), installed + ' installed, ' + (cr.length - installed) + ' not installed', cr.some(function (r) { return r.status === 'fail'; }),
@@ -2074,6 +2524,11 @@ label.modlabel { display:inline-block; margin-right:14px; }
     lines.push('', 'SERVICES AND DEPLOYMENT');
     state.services.concat(serviceExtra()).forEach(function (c) { lines.push('  [' + (LABEL[c.status] || c.status) + '] ' + c.title + (c.detail ? ' - ' + c.detail : '')); });
     state.endpoints.forEach(function (e) { lines.push('  [' + (LABEL[e.state] || e.state) + '] ' + e.method + ' ' + e.path + ' - ' + e.note); });
+    lines.push('', 'ISSUER SECURITY AND DEPLOYMENT HEALTH');
+    securityGroups().forEach(function (g) {
+      lines.push('  ' + g.title + (g.summary ? ' - ' + g.summary : ''));
+      g.rows.forEach(function (r) { lines.push('    [' + r.label + '] ' + r.title + (r.detail ? ' - ' + r.detail : '')); });
+    });
     lines.push('', 'SERVER'); env.checks.forEach(function (x) { lines.push('  [' + x.status + '] ' + x.title + (x.detail ? ' - ' + x.detail : '')); });
     lines.push('', 'MISSING (' + state.missing.length + ')'); state.missing.forEach(function (x) { lines.push('  ' + x.path); });
     lines.push('', 'DIFFERENT (' + state.differs.length + ')'); state.differs.forEach(function (x) { lines.push('  ' + x.path + (x.size !== null && x.size !== undefined ? '  [' + x.size + ' bytes here, ' + x.n + ' in the repository]' : '')); });
@@ -2137,6 +2592,7 @@ label.modlabel { display:inline-block; margin-right:14px; }
   $('go').addEventListener('click', start);
   $('token').addEventListener('keydown', function (e) { if (e.key === 'Enter') start(); });
   $('rerun').addEventListener('click', function () { full(false); });
+  $('expectedDomain').addEventListener('change', function () { if (state) full(false); });
   Array.prototype.forEach.call(document.querySelectorAll('input[name=site]'), function (r) { r.addEventListener('change', function () { full(false); }); });
   $('saveReport').addEventListener('click', saveReport);
   $('copy').addEventListener('click', function () { if (state) copy(report(), function (ok) { said(ok, 'Report'); }); });

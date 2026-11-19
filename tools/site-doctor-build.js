@@ -31,6 +31,7 @@ const READERS_MARKER = '/*@@SITE_FEATURES@@*/';
 const REGISTRY = JSON.parse(fs.readFileSync(path.join(__dirname, 'site-doctor', 'components.json'), 'utf8'));
 const SOURCES = REGISTRY.sources.map((s) => [s.dir, s.tag, s.mount || '']);
 const COMPONENTS = REGISTRY.components;
+const SECURITY = JSON.parse(fs.readFileSync(path.join(__dirname, 'site-doctor', 'security.json'), 'utf8'));
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(n);
@@ -170,13 +171,41 @@ const features = JSON.parse(fs.readFileSync(FEATURES, 'utf8')).features;
   }
 }
 
+// The security registry: every text it looks for must occur in the repository's copy of its file, so a refactor cannot
+// leave a check that would call a current file outdated, and the owner-proof classes must be the ones the issuer names.
+{
+  const fail = (m) => { console.error('security registry: ' + m); process.exit(1); };
+  const repoText = (rel) => fs.readFileSync(path.join(ROOT, 'issuer-php', rel), 'utf8').replace(/\r\n/g, '\n');
+  const compIds = new Set(COMPONENTS.map((c) => c.id));
+  const seen = new Set();
+  for (const f of SECURITY.files) {
+    if (seen.has(f.path)) fail('duplicate file ' + f.path);
+    seen.add(f.path);
+    if (!compIds.has(f.component)) fail('unknown component for ' + f.path);
+    if (!list.some((e) => e.p === f.path)) fail(f.path + ' is not in the manifest');
+    if (typeof f.role !== 'string' || typeof f.matters !== 'string' || typeof f.critical !== 'boolean' || !Array.isArray(f.needs)) fail('incomplete entry for ' + f.path);
+    const text = repoText(f.path);
+    for (const n of f.needs) if (typeof n.label !== 'string' || typeof n.text !== 'string' || !text.includes(n.text)) fail(f.path + ' does not contain: ' + (n && n.text));
+  }
+  const ownerSrc = repoText('lib/owner-proof.php');
+  const named = (ownerSrc.match(/const ATLAS_OWNER_PROOF_CLASSES = \[([^\]]*)\]/) || [])[1];
+  const issuerClasses = named ? Array.from(named.matchAll(/'([^']+)'/g)).map((m) => m[1]) : [];
+  if (JSON.stringify(issuerClasses) !== JSON.stringify(SECURITY.ownerProofClasses)) fail('ownerProofClasses differ from lib/owner-proof.php');
+  const outboundSrc = repoText('lib/outbound.php');
+  for (const c of SECURITY.outbound.classes) {
+    if (!outboundSrc.includes(c.limiter)) fail('lib/outbound.php does not name class ' + c.id);
+    if (!repoText(c.caller.file).includes(c.caller.text)) fail(c.caller.file + ' does not contain: ' + c.caller.text);
+    if (c.caller.component && !compIds.has(c.caller.component)) fail('unknown component for class ' + c.id);
+  }
+}
+
 // The access token is shown once and only its hash is embedded.
 const rawToken = crypto.randomBytes(16).toString('hex');
 const token = rawToken.match(/.{4}/g).join('-');
 const expires = Math.floor(Date.now() / 1000) + Math.round(hours * 3600);
 const publicComponents = COMPONENTS.map((c) => ({ id: c.id, label: c.label, kind: c.kind, code: c.code || '', source: c.source || '', advertisedBy: c.advertisedBy || [], stores: c.stores || [], findMount: c.findMount || null,
   mount: (SOURCES.find((s) => s[1] === c.source) || [0, 0, ''])[2] }));
-const header = { v: 2, components: publicComponents, built: new Date().toISOString(), commit, clean: gitOk && !dirty.length, expires, tokenSha256: crypto.createHash('sha256').update(rawToken).digest('hex'), features, trustedGroups };
+const header = { v: 2, components: publicComponents, built: new Date().toISOString(), commit, clean: gitOk && !dirty.length, expires, tokenSha256: crypto.createHash('sha256').update(rawToken).digest('hex'), features, trustedGroups, security: { files: SECURITY.files, ownerProofClasses: SECURITY.ownerProofClasses, outboundClasses: SECURITY.outbound.classes } };
 const json = JSON.stringify(header).slice(0, -1) + ',"entries":[\n' + list.map((e) => JSON.stringify([e.p, e.h, e.n, e.g, e.f, e.tags, e.c])).join(',\n') + '\n]}';
 if (json.includes('ATLAS_DOCTOR_JSON')) { console.error('manifest contains the heredoc marker'); process.exit(1); }
 
