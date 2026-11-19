@@ -2113,16 +2113,31 @@ label.modlabel { display:inline-block; margin-right:14px; }
     return /Index of|Parent Directory|\.json/.test(text.slice(0, 4000)) && !/<title>[^<]*(not found|404)/i.test(text.slice(0, 2000));
   }
 
+  // What each private path did when asked, as an outcome:
+  //   exposed  the data or code came back (a failure)
+  //   served   HTTP 200 but with nothing private in it (a custom page, an empty file)
+  //   denied   refused or not there (4xx), or sent elsewhere (a redirect that is not followed)
+  //   unclear  a server error (5xx) or no answer. Nothing was served, but a 500 does not show the path is refused:
+  //            a path the server tried to run and could not, or a folder whose access rules are themselves broken,
+  //            answers the same way, so it is a warning to look at, not a pass.
   function probes() {
     return Promise.all(PROBES.map(function (p) {
+      var out = function (outcome, status, extra) { var o = { path: p[0], what: p[1], exposed: outcome === 'exposed', outcome: outcome, status: status }; if (extra) o.empty = extra.empty; return o; };
       return fetch(p[0], { cache: 'no-store', redirect: 'manual', credentials: 'omit' }).then(function (r) {
-        if (r.status !== 200) return { path: p[0], what: p[1], exposed: false, status: r.status };
+        if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400)) return out('denied', r.status);
+        if (r.status >= 500) return out('unclear', r.status);
+        if (r.status !== 200) return out('denied', r.status);
         return r.text().then(function (t) {
           var leak = /<\?php|PRIVATE KEY|\/home\//.test(t.slice(0, 4000)) || (p[2] === 'data' && looksLikeData(p[0], t));
-          return { path: p[0], what: p[1], exposed: leak, status: 200, empty: t.length === 0 };
+          return out(leak ? 'exposed' : 'served', 200, { empty: t.length === 0 });
         });
-      }).catch(function () { return { path: p[0], what: p[1], exposed: false, status: 0 }; });
+      }).catch(function () { return out('unclear', 0); });
     }));
+  }
+  function probeAdvice(p) {
+    return /\.php$/.test(p.path)
+      ? 'The server tried to run this file and it failed, which is not the same as refusing the request: the folder\'s .htaccess should block it with a 403. Check that the .htaccess in that folder is uploaded, and look in the host\'s error log for the line for this request.'
+      : 'The server answered with an error instead of refusing the request. The file was not served, but a folder whose access rules are broken (an .htaccess the server cannot read, or a directive it does not support) answers like this too. Open that folder\'s .htaccess, compare it with the repository copy, and look in the host\'s error log for the line for this request. A 403 is the expected answer.';
   }
 
   // Administrator routes asked with no credentials at all: a stranger must be refused. Only routes that read are
@@ -2138,8 +2153,12 @@ label.modlabel { display:inline-block; margin-right:14px; }
   }
 
   // Each installed service is asked one safe question: a read that is public by design (GET), or an empty request that
-  // must be refused (POST {} with no credentials). Nothing here changes anything: a refused request is decided before any
-  // credential is minted, any state written or any mail sent. [component, method, path, accepted statuses, what comes back]
+  // must be refused (POST {} with no credentials). A refused request is decided before any credential is minted, any
+  // state written or any mail sent. The reads name a world that does not exist ("site-doctor-probe") and, for presence,
+  // this host as the domain, so they come back empty; the world-drops listing is asked with its trailing slash because
+  // the web server redirects the bare folder name, which this page does not follow. The presence count is the one read
+  // that also tidies its own store (it drops members whose time has run out), as it does for any visitor who asks.
+  // [component, method, path, accepted statuses, what comes back]
   var ENDPOINTS = [
     ['core', 'GET', '/atlas/capabilities', [200], 'json:requestIds'],
     ['core', 'GET', '/.well-known/atlas-key.json', [200], 'json:keys'],
@@ -2150,14 +2169,14 @@ label.modlabel { display:inline-block; margin-right:14px; }
     ['mail', 'POST', '/atlas/mail/check', [400, 401, 403, 422], 'refuse'],
     ['trade', 'GET', '/atlas/trade/catalog', [200], 'json'],
     ['trade', 'GET', '/atlas/trade/listings', [200], 'json'],
-    ['drops', 'GET', '/atlas/world/drops', [200, 400], 'json'],
+    ['drops', 'GET', '/atlas/world/drops/?world=site-doctor-probe', [200], 'json:drops'],
     ['studio', 'GET', '/atlas/studio/', [200], 'html'],
     ['directory', 'GET', '/atlas/directory/stats.php', [200], 'json'],
     ['directory', 'GET', '/atlas/directory/search.php', [200, 400], 'json'],
     ['chainlabs', 'GET', '/chain-labs/index.html', [200], 'html'],
     ['chainlabs', 'GET', '/chain-labs/spend34.php?action=coins', [200, 503], 'json'],
     ['verifier', 'GET', '@verifier/verify.php', [200], 'json:configured'],
-    ['presence', 'GET', '/presence/status.php', [200], 'json'],
+    ['presence', 'GET', '/presence/status.php?domain=@host&world=site-doctor-probe', [200], 'json:count'],
     ['call', 'GET', '/atlas/call/info.php', [200], 'json']
   ];
   function endpointProbes(components) {
@@ -2165,7 +2184,7 @@ label.modlabel { display:inline-block; margin-right:14px; }
     components.forEach(function (c) { active[c.id] = c.kind === 'core' || c.status !== 'not-installed'; mount[c.id] = c.mount; });
     var jobs = ENDPOINTS.filter(function (e) { return active[e[0]]; });
     return Promise.all(jobs.map(function (e) {
-      var path = e[2].indexOf('@verifier/') === 0 ? '/' + (mount.verifier ? mount.verifier + '/' : '') + e[2].slice(10) : e[2];
+      var path = (e[2].indexOf('@verifier/') === 0 ? '/' + (mount.verifier ? mount.verifier + '/' : '') + e[2].slice(10) : e[2]).replace('@host', encodeURIComponent(location.host));
       var opts = { method: e[1], cache: 'no-store', redirect: 'manual', credentials: 'omit' };
       if (e[1] === 'POST') { opts.headers = { 'Content-Type': 'application/json' }; opts.body = '{}'; }
       var out = { component: e[0], method: e[1], path: path, accept: e[3], kind: e[4], status: 0, state: 'fail', note: 'no response', json: null };
@@ -2215,37 +2234,42 @@ label.modlabel { display:inline-block; margin-right:14px; }
     return out;
   }
 
-  // The fix-it checklist: every problem the checks found, most urgent first. The last number on each entry is
-  // its place in the order (exposed secrets, then anything that stops the issuer, then settings, then tidying).
+  // The fix-it checklist: every problem the checks found, most urgent first. Each entry is
+  // [status, title, detail, place in the order, section]. The order puts exposed secrets first, then anything that
+  // stops the issuer, then settings, then tidying. The summary counts WARNING and FAIL from this same list, so the two
+  // cannot disagree; the section says where each one came from.
+  var HEALTH_SECTION = { housekeeping: 'Housekeeping', permissions: 'Permissions', admin: 'Administrator side' };
   function todo() {
     var t = [];
+    var add = function (section, status, title, detail, order) { t.push([status, title, detail, order, section]); };
     var codeMissing = state.missing.filter(function (x) { return x.group === 'c'; });
     var pageMissing = state.missing.filter(function (x) { return x.group === 'p'; });
     var codeDiffers = state.differs.filter(function (x) { return x.group === 'c'; });
-    state.probes.forEach(function (p) { if (p.exposed) t.push(['fail', 'Readable over the web: ' + p.path, 'Block it (check the .htaccess in that folder is uploaded and honoured) and treat any secret in it as exposed.', 0]); });
-    state.adminProbes.forEach(function (p) { if (p.open) t.push(['fail', 'Administrator route answers without a sign-in: ' + p.path + ' (HTTP ' + p.status + ')', 'Replace the PHP file or server.js from the repository: an old copy has none of the newer access checks.', 0]); });
-    (state.health || []).forEach(function (c) { if (c.status === 'fail') t.push(['fail', c.title, c.fix || c.detail, c.group === 'permissions' ? 1 : 3]); });
-    if (codeMissing.length) t.push(['fail', 'Upload ' + codeMissing.length + ' missing code file(s). The issuer or Studio will not work without them.', 'See "Files compared with the repository".', 2]);
-    if (codeDiffers.length) t.push(['fail', 'Re-upload ' + codeDiffers.length + ' code file(s) that differ from the repository.', 'An old or edited copy is the usual cause of "internal-error" responses.', 2]);
-    (state.env ? state.env.checks : []).forEach(function (c) { if (c.status === 'fail') t.push(['fail', c.title, c.fix || c.detail, 3]); });
-    (state.health || []).forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, c.group === 'permissions' ? 4 : 5]); });
-    (state.env ? state.env.checks : []).forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, 5]); });
-    state.adminProbes.forEach(function (p) { if (p.broken) t.push(['warn', 'Administrator route fails with a server error: ' + p.path + ' (HTTP ' + p.status + ')', 'Look at the PHP error log; the file is probably an old or damaged copy.', 5]); });
-    compRows().forEach(function (r) { if (r.status === 'fail' && r.kind !== 'files') t.push(['fail', r.title, r.fix || r.detail, 2]); });
-    state.services.forEach(function (c) { if (c.status === 'fail') t.push(['fail', c.title, c.fix || c.detail, 3]); });
-    state.endpoints.forEach(function (e) { if (e.state === 'fail') t.push(['fail', 'Service does not answer properly: ' + e.method + ' ' + e.path + ' - ' + e.note, 'Upload the missing or old file, or look at the PHP error log.', 3]); });
-    serviceExtra().forEach(function (c) { if (c.status === 'fail') t.push(['fail', c.title, c.fix || c.detail, 3]); });
-    state.services.forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, 5]); });
-    securityGroups().forEach(function (g) { g.rows.forEach(function (r) { if (!r.dup && (r.status === 'fail' || r.status === 'warn')) t.push([r.status, g.title + ': ' + r.title, r.fix || r.detail, r.status === 'fail' ? 3 : 5]); }); });
-    state.endpoints.forEach(function (e) { if (e.state === 'warn') t.push(['warn', 'Service answer to look at: ' + e.method + ' ' + e.path + ' - ' + e.note, '', 5]); });
-    serviceExtra().forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, 5]); });
-    state.features.forEach(function (f) { if (f.state === 'problem') t.push(['warn', 'Feature needs attention: ' + f.label, f.reasons.join('; '), 6]); });
-    if (state.manifest) state.manifest.problems.forEach(function (p) { t.push([p[0], 'Manifest: ' + p[1], '', p[0] === 'fail' ? 3 : 6]); });
-    if (pageMissing.length) t.push(['warn', 'Upload ' + pageMissing.length + ' missing page/config file(s).', '', 7]);
+    state.probes.forEach(function (p) { if (p.outcome === 'exposed') add('Web exposure', 'fail', 'Readable over the web: ' + p.path, 'Block it (check the .htaccess in that folder is uploaded and honoured) and treat any secret in it as exposed.', 0); });
+    state.adminProbes.forEach(function (p) { if (p.open) add('Administrator routes', 'fail', 'Administrator route answers without a sign-in: ' + p.path + ' (HTTP ' + p.status + ')', 'Replace the PHP file or server.js from the repository: an old copy has none of the newer access checks.', 0); });
+    (state.health || []).forEach(function (c) { if (c.status === 'fail') add(HEALTH_SECTION[c.group] || 'Health', 'fail', c.title, c.fix || c.detail, c.group === 'permissions' ? 1 : 3); });
+    if (codeMissing.length) add('Files', 'fail', 'Upload ' + codeMissing.length + ' missing code file(s). The issuer or Studio will not work without them.', 'See "Files compared with the repository".', 2);
+    if (codeDiffers.length) add('Files', 'fail', 'Re-upload ' + codeDiffers.length + ' code file(s) that differ from the repository.', 'An old or edited copy is the usual cause of "internal-error" responses.', 2);
+    (state.env ? state.env.checks : []).forEach(function (c) { if (c.status === 'fail') add('Server', 'fail', c.title, c.fix || c.detail, 3); });
+    (state.health || []).forEach(function (c) { if (c.status === 'warn') add(HEALTH_SECTION[c.group] || 'Health', 'warn', c.title, c.fix || c.detail, c.group === 'permissions' ? 4 : 5); });
+    (state.env ? state.env.checks : []).forEach(function (c) { if (c.status === 'warn') add('Server', 'warn', c.title, c.fix || c.detail, 5); });
+    state.adminProbes.forEach(function (p) { if (p.broken) add('Administrator routes', 'warn', 'Administrator route fails with a server error: ' + p.path + ' (HTTP ' + p.status + ')', 'Look at the PHP error log; the file is probably an old or damaged copy.', 5); });
+    state.probes.forEach(function (p) { if (p.outcome === 'unclear') add('Web exposure', 'warn', 'Not confirmed as refused: ' + p.path + ' (' + (p.status ? 'HTTP ' + p.status : 'no response') + ')', probeAdvice(p), 5); });
+    compRows().forEach(function (r) { if (r.status === 'fail' && r.kind !== 'files') add('Components', 'fail', r.title, r.fix || r.detail, 2); });
+    state.services.forEach(function (c) { if (c.status === 'fail') add('Services', 'fail', c.title, c.fix || c.detail, 3); });
+    state.endpoints.forEach(function (e) { if (e.state === 'fail') add('Service answers', 'fail', 'Service does not answer properly: ' + e.method + ' ' + e.path + ' - ' + e.note, 'Upload the missing or old file, or look at the PHP error log.', 3); });
+    serviceExtra().forEach(function (c) { if (c.status === 'fail') add('Services', 'fail', c.title, c.fix || c.detail, 3); });
+    state.services.forEach(function (c) { if (c.status === 'warn') add('Services', 'warn', c.title, c.fix || c.detail, 5); });
+    securityGroups().forEach(function (g) { g.rows.forEach(function (r) { if (!r.dup && (r.status === 'fail' || r.status === 'warn')) add('Issuer security', r.status, g.title + ': ' + r.title, r.fix || r.detail, r.status === 'fail' ? 3 : 5); }); });
+    state.endpoints.forEach(function (e) { if (e.state === 'warn') add('Service answers', 'warn', 'Service answer to look at: ' + e.method + ' ' + e.path + ' - ' + e.note, '', 5); });
+    serviceExtra().forEach(function (c) { if (c.status === 'warn') add('Services', 'warn', c.title, c.fix || c.detail, 5); });
+    state.features.forEach(function (f) { if (f.state === 'problem') add('Features', 'warn', 'Feature needs attention: ' + f.label, f.reasons.join('; '), 6); });
+    if (state.manifest) state.manifest.problems.forEach(function (p) { add('Manifest', p[0], 'Manifest: ' + p[1], '', p[0] === 'fail' ? 3 : 6); });
+    if (pageMissing.length) add('Files', 'warn', 'Upload ' + pageMissing.length + ' missing page/config file(s).', '', 7);
     var pageDiffers = state.differs.filter(function (x) { return x.group === 'p'; });
-    if (pageDiffers.length) t.push(['warn', pageDiffers.length + ' page/config file(s) differ from the repository.', 'Fine if you edited them on purpose; otherwise re-upload.', 7]);
-    state.odd.forEach(function (o) { t.push(['warn', 'Not a regular file: ' + o.path + ' (' + o.what + ')', 'Replace it with the repository file.', 7]); });
-    if (state.extras && state.extras.phpTotal) t.push(['warn', state.extras.phpTotal + ' PHP file(s) here are not in the repository.', 'Look at each one under "Unexpected files". An old copy of a route that was later removed has none of the newer security checks and should be deleted; your own files are fine.', 8]);
+    if (pageDiffers.length) add('Files', 'warn', pageDiffers.length + ' page/config file(s) differ from the repository.', 'Fine if you edited them on purpose; otherwise re-upload.', 7);
+    state.odd.forEach(function (o) { add('Files', 'warn', 'Not a regular file: ' + o.path + ' (' + o.what + ')', 'Replace it with the repository file.', 7); });
+    if (state.extras && state.extras.phpTotal) add('Files', 'warn', state.extras.phpTotal + ' PHP file(s) here are not in the repository.', 'Look at each one under "Unexpected files". An old copy of a route that was later removed has none of the newer security checks and should be deleted; your own files are fine.', 8);
     return t.map(function (x, i) { return [x, i]; }).sort(function (a, b) {
       var fa = a[0][0] === 'fail' ? 0 : 1, fb = b[0][0] === 'fail' ? 0 : 1;
       return fa - fb || a[0][3] - b[0][3] || a[1] - b[1];
@@ -2314,18 +2338,27 @@ label.modlabel { display:inline-block; margin-right:14px; }
     return n;
   }
   var LABEL = { ok: 'PASS', warn: 'WARNING', fail: 'FAIL', na: 'NOT INSTALLED', info: 'INFO' };
+  // PASS and NOT INSTALLED count the checks that came out fine. WARNING and FAIL are the to-do list, entry for entry,
+  // so the summary, the verdict and the checklist always agree; tallyWhere says which sections they come from.
   function tally() {
     var n = { ok: 0, warn: 0, fail: 0, na: 0 };
-    var add = function (s) { if (n[s] !== undefined) n[s]++; };
+    var add = function (s) { if (s === 'ok' || s === 'na') n[s]++; };
     state.env.checks.forEach(function (c) { add(c.status); });
     state.health.forEach(function (c) { add(c.status); });
     state.services.forEach(function (c) { add(c.status); });
     serviceExtra().forEach(function (c) { add(c.status); });
     state.endpoints.forEach(function (e) { add(e.state); });
     compRows().forEach(function (c) { add(c.status); });
-    state.probes.forEach(function (p) { add(p.exposed ? 'fail' : 'ok'); });
+    state.probes.forEach(function (p) { add(p.outcome === 'exposed' || p.outcome === 'unclear' ? '' : 'ok'); });
+    state.adminProbes.forEach(function (p) { add(p.open || p.broken ? '' : 'ok'); });
     securityGroups().forEach(function (g) { g.rows.forEach(function (r) { if (!r.dup) add(r.status); }); });
+    todo().forEach(function (x) { n[x[0] === 'fail' ? 'fail' : 'warn']++; });
     return n;
+  }
+  function tallyWhere(status) {
+    var by = {}, order = [];
+    todo().forEach(function (x) { if (x[0] !== status) return; if (!by[x[4]]) { by[x[4]] = 0; order.push(x[4]); } by[x[4]]++; });
+    return order.map(function (k) { return k + ' ' + by[k]; }).join(', ');
   }
   function tallyText() { var n = tally(); return n.ok + ' PASS, ' + n.warn + ' WARNING, ' + n.fail + ' FAIL, ' + n.na + ' NOT INSTALLED'; }
 
@@ -2342,7 +2375,8 @@ label.modlabel { display:inline-block; margin-right:14px; }
 
     var kids = [];
     if (!problems.length) kids.push(el('p', { text: 'Nothing to do.' }));
-    else kids.push(el('p', { 'class': 'muted', text: 'In this order: anything that exposes a secret first, then what stops the issuer working, then settings, then tidying. Fix from the top and press "Check again".' }));
+    else kids.push(el('p', { 'class': 'muted', text: [fails ? fails + ' to fix (' + tallyWhere('fail') + ')' : '', warns ? warns + ' to look at (' + tallyWhere('warn') + ')' : ''].filter(Boolean).join('; ') + '.' }));
+    if (problems.length) kids.push(el('p', { 'class': 'muted', text: 'In this order: anything that exposes a secret first, then what stops the issuer working, then settings, then tidying. Fix from the top and press "Check again".' }));
     problems.forEach(function (x, i) { kids.push(item(x[0], (i + 1) + '. ' + x[1], x[2])); });
     if (problems.length) kids.push(el('div', { 'class': 'row' }, [(function () { var b = el('button', { 'class': 'secondary', id: 'saveReportInline', text: 'Save this report as a file' }); b.addEventListener('click', saveReport); return b; })()]));
     section('To do - fix-it checklist', fails ? 'fail' : (warns ? 'warn' : 'ok'), problems.length ? problems.length + ' item(s)' : 'all clear', problems.length > 0, kids);
@@ -2403,9 +2437,10 @@ label.modlabel { display:inline-block; margin-right:14px; }
     section('Unexpected files', x.phpTotal ? 'warn' : 'info', x.scanned + ' files scanned', x.phpTotal > 0, xb);
 
     var pb = state.probes.map(function (p) {
+      if (p.outcome === 'unclear') return item('warn', p.path, 'Not confirmed as refused: ' + (p.status ? 'the server answered HTTP ' + p.status : 'there was no response') + '. The ' + p.what + ' was not served, but an error is not the same as a refusal.', probeAdvice(p));
       return item(p.exposed ? 'fail' : 'ok', p.path, p.exposed ? 'The ' + p.what + ' can be read over the web.' : 'Not readable (' + (p.status ? 'HTTP ' + p.status : 'no response') + (p.empty ? ', empty page' : '') + ').');
     });
-    section('What the web can read', state.probes.some(function (p) { return p.exposed; }) ? 'fail' : 'ok', 'private helper files must not be served', false, pb);
+    section('What the web can read', state.probes.some(function (p) { return p.exposed; }) ? 'fail' : (state.probes.some(function (p) { return p.outcome === 'unclear'; }) ? 'warn' : 'ok'), 'private helper files must not be served', state.probes.some(function (p) { return p.outcome === 'unclear'; }), pb);
 
     [['housekeeping', 'Housekeeping and health', 'lists, holdings and state files'], ['permissions', 'File permissions and PHP limits', 'who can read the keys, what PHP allows']].forEach(function (g) {
       var list = state.health.filter(function (c) { return c.group === g[0]; });
@@ -2520,6 +2555,7 @@ label.modlabel { display:inline-block; margin-right:14px; }
     var t = todo();
     lines.push('TO DO (most urgent first)'); if (!t.length) lines.push('  nothing'); t.forEach(function (x, i) { lines.push('  ' + (i + 1) + '. [' + x[0] + '] ' + x[1] + (x[2] ? ' - ' + x[2] : '')); });
     lines.push('', 'SUMMARY  ' + tallyText());
+    ['fail', 'warn'].forEach(function (k) { var w = tallyWhere(k); if (w) lines.push('  ' + LABEL[k] + ' by section: ' + w); });
     lines.push('', 'COMPONENTS'); compRows().forEach(function (r) { lines.push('  [' + (LABEL[r.status] || r.status) + '] ' + r.title + ' - ' + r.detail); });
     lines.push('', 'SERVICES AND DEPLOYMENT');
     state.services.concat(serviceExtra()).forEach(function (c) { lines.push('  [' + (LABEL[c.status] || c.status) + '] ' + c.title + (c.detail ? ' - ' + c.detail : '')); });
@@ -2532,7 +2568,7 @@ label.modlabel { display:inline-block; margin-right:14px; }
     lines.push('', 'SERVER'); env.checks.forEach(function (x) { lines.push('  [' + x.status + '] ' + x.title + (x.detail ? ' - ' + x.detail : '')); });
     lines.push('', 'MISSING (' + state.missing.length + ')'); state.missing.forEach(function (x) { lines.push('  ' + x.path); });
     lines.push('', 'DIFFERENT (' + state.differs.length + ')'); state.differs.forEach(function (x) { lines.push('  ' + x.path + (x.size !== null && x.size !== undefined ? '  [' + x.size + ' bytes here, ' + x.n + ' in the repository]' : '')); });
-    lines.push('', 'WEB EXPOSURE'); state.probes.forEach(function (p) { lines.push('  ' + (p.exposed ? 'EXPOSED ' : 'ok      ') + p.path + ' (HTTP ' + p.status + ')'); });
+    lines.push('', 'WEB EXPOSURE'); state.probes.forEach(function (p) { lines.push('  ' + (p.exposed ? 'EXPOSED ' : (p.outcome === 'unclear' ? 'UNCLEAR ' : 'ok      ')) + p.path + ' (HTTP ' + p.status + ')'); });
     lines.push('', 'MANIFEST (' + state.manifest.state + ', ' + state.manifest.worlds.length + ' world(s))');
     state.manifest.problems.forEach(function (p) { lines.push('  [' + p[0] + '] ' + p[1]); });
     state.manifest.worlds.forEach(function (w) { lines.push('  world ' + w.id + (w.default ? ' (default)' : '') + (w.playable ? '' : ' (not enterable)')); w.facts.forEach(function (x) { lines.push('        ' + x); }); w.portals.forEach(function (x) { lines.push('        portal ' + x); }); });

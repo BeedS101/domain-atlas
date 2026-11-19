@@ -67,7 +67,7 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
   page.on('console', (m) => { if (['error', 'warning'].includes(m.type()) && !/Failed to load resource: the server responded with a status of (400|401|403|404|500)/.test(m.text())) problems.push(m.type() + ': ' + m.text()); });
   page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
   // The endpoint probes post an empty request to a few routes; this fixture's planted unusable key makes them answer 500, which the report must show, so only a 5xx anywhere else is a problem.
-  page.on('response', (r) => { if (r.status() >= 400 && ![401, 403, 404].includes(r.status()) && !/\/atlas\/(asset\/issue|mail\/check|world\/drops)$/.test(new URL(r.url()).pathname)) problems.push('HTTP ' + r.status() + ' ' + r.url()); });
+  page.on('response', (r) => { if (r.status() >= 400 && ![401, 403, 404].includes(r.status()) && !/\/atlas\/(asset\/issue|mail\/check|world\/drops\/?)$/.test(new URL(r.url()).pathname)) problems.push('HTTP ' + r.status() + ' ' + r.url()); });
   let dialogText = null;
   page.on('dialog', async (d) => { dialogText = d.message(); await d.accept(); });
 
@@ -171,7 +171,7 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
     assert.ok(/private state file\(s\) or folder\(s\) can be changed/.test(pm) && /lib\/replay\/r\.json \(0666\)/.test(pm));
     const todoText = await page.locator('details', { hasText: 'To do - fix-it checklist' }).first().textContent();
     assert.ok(/rewritten by any account/.test(todoText), 'also in the checklist');
-    const ad = await page.locator('details', { hasText: 'Administrator side' }).first().textContent();
+    const ad = await page.locator('details', { has: page.locator('summary h2', { hasText: 'Administrator side' }) }).first().textContent();
     assert.ok(/No administrator keys are registered/.test(ad));
     assert.ok(/\/atlas\/admin\/suspensions[\s\S]*Refused without a sign-in \(HTTP 401\)/.test(ad), ad.slice(0, 600));
     assert.ok(/\/atlas\/admin\/visits[\s\S]*Answered HTTP 200 to a request with no sign-in/.test(ad));
