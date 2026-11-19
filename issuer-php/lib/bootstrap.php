@@ -1368,6 +1368,48 @@ function atlas_settle_world_drop_claim($kp, $credential, $claimantPublicKey, $dr
   atlas_send_committed($responseJson);
 }
 
+// The owner's signed drop intent is an authorization with a short lifetime: `expiresAt` must be a canonical UTC
+// timestamp no more than ATLAS_DROP_INTENT_MAX_TTL_MS after the moment the hosting domain accepts the drop, and not more
+// than ATLAS_DROP_INTENT_SKEW_MS before it. The expiry limits when a credential may be PLACED; a drop the hosting domain
+// accepted in time stays listed and claimable however long ago the authorization lapsed. Intents without `expiresAt`
+// (written by wallets that predate it) are accepted only for drops accepted before atlas_drop_legacy_until_ms()
+// (ATLAS_DROP_LEGACY_UNTIL, a canonical UTC timestamp; a date in the past turns strict enforcement on at once).
+// Mirrors server.js's dropIntentExpiryProblem().
+const ATLAS_DROP_INTENT_SKEW_MS = 120000;
+const ATLAS_DROP_INTENT_MAX_TTL_MS = 900000;
+const ATLAS_DROP_LEGACY_UNTIL_DEFAULT = '2027-03-31T00:00:00.000Z';
+
+// Milliseconds for a canonical UTC timestamp with milliseconds, or null; the round trip refuses dates that roll over and
+// any other spelling, so every implementation reads the same instant (server.js's parseDropTimestamp()).
+function atlas_drop_parse_timestamp($value) {
+  if (!is_string($value) || !preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/D', $value)) return null;
+  $d = DateTimeImmutable::createFromFormat('Y-m-d\TH:i:s.v\Z', $value, new DateTimeZone('UTC'));
+  if ($d === false || $d->format('Y-m-d\TH:i:s.v\Z') !== $value) return null;
+  return (int) $d->format('U') * 1000 + (int) $d->format('v');
+}
+
+function atlas_drop_legacy_until_ms() {
+  $raw = getenv('ATLAS_DROP_LEGACY_UNTIL');
+  $ms = (is_string($raw) && $raw !== '') ? atlas_drop_parse_timestamp($raw) : null;
+  return $ms === null ? atlas_drop_parse_timestamp(ATLAS_DROP_LEGACY_UNTIL_DEFAULT) : $ms;
+}
+
+// null, or 'required' | 'invalid' | 'expired' | 'unbounded'. $acceptedMs is the moment the drop was accepted, or null when
+// it is unknown (a relaying domain that predates the attestation field): $nowMs then stands in for it and, until the
+// compatibility date, a dated intent is not held to the window.
+function atlas_drop_intent_expiry_problem($payload, $nowMs, $acceptedMs) {
+  $dated = $acceptedMs !== null;
+  $at = $dated ? $acceptedMs : $nowMs;
+  $legacyUntil = atlas_drop_legacy_until_ms();
+  if (!array_key_exists('expiresAt', $payload)) return $at < $legacyUntil ? null : 'required';
+  $ms = atlas_drop_parse_timestamp($payload['expiresAt']);
+  if ($ms === null) return 'invalid';
+  if (!$dated && $nowMs < $legacyUntil) return null;
+  if ($at - $ms > ATLAS_DROP_INTENT_SKEW_MS) return 'expired';
+  if ($ms - $at > ATLAS_DROP_INTENT_MAX_TTL_MS) return 'unbounded';
+  return null;
+}
+
 // Domains whose relayed claims may omit the owner's and claimant's signed intents (drops listed before wallets signed
 // them). Empty unless an operator sets ATLAS_LEGACY_DROP_PEERS.
 function atlas_legacy_drop_peers() {
@@ -1395,6 +1437,17 @@ function atlas_world_drop_relay_problem($credential, $attestation, $dropIntent, 
   $ownerKey = $dropIntent['proof']['publicKey'] ?? null;
   if (!is_string($ownerKey) || !verify_envelope($d, $dropIntent['proof'])) return $deny("The owner's drop intent signature does not check out.", 'owner-signature-invalid');
   if (($credential['owner']['publicKey'] ?? null) !== $ownerKey) return $deny('The drop intent was not signed by the owner of this credential.', 'not-owner');
+  // The authorization must have been valid when the hosting domain accepted the drop, not when the claim arrives.
+  $nowMs = atlas_now_ms();
+  $acceptedMs = null;
+  if (array_key_exists('droppedAt', $attestation)) {
+    $acceptedMs = atlas_drop_parse_timestamp($attestation['droppedAt']);
+    if ($acceptedMs === null || $acceptedMs - $nowMs > ATLAS_DROP_INTENT_SKEW_MS) return $deny('The relaying domain gave no usable time for when it accepted this drop.', 'drop-time-invalid');
+  }
+  $expiry = atlas_drop_intent_expiry_problem($d, $nowMs, $acceptedMs);
+  if ($expiry === 'required') return $deny("The owner's drop intent carries no expiresAt.", 'drop-intent-expiry-required');
+  if ($expiry === 'invalid') return $deny("The owner's drop intent carries a malformed expiresAt.", 'drop-intent-expiry-invalid');
+  if ($expiry !== null) return $deny("The owner's drop intent had expired, or was written to last too long, when the drop was accepted.", 'drop-intent-expired');
   if (!is_array($claimIntent) || !is_array($claimIntent['payload'] ?? null) || !is_array($claimIntent['proof'] ?? null)) return $deny('This claim carries no claim intent signed by the claimant.');
   $c = $claimIntent['payload'];
   if (($c['action'] ?? null) !== 'claim' || ($c['dropId'] ?? null) !== $attestation['dropId'] || (array_key_exists('domain', $c) && $c['domain'] !== $attestation['relayingDomain'])) {

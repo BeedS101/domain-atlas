@@ -72,6 +72,9 @@ $attestation = [
   'credentialId' => $credential['id'],
   'claimantPublicKey' => $claimantPub,
 ];
+// When this domain accepted the drop: it tells the issuer the owner's authorization was still valid at that moment,
+// however long ago that was.
+if (is_string($won['droppedAt'] ?? null)) $attestation['droppedAt'] = $won['droppedAt'];
 $attestationSignature = atlas_sign($kp['privateKey'], $attestation);
 try {
   $relayResult = atlas_peer_post_json(

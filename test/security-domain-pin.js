@@ -55,7 +55,7 @@ async function adminStatus(issuer, identity, domain, host) {
   return post(issuer.base, '/atlas/admin/site-status', { payload, proof: await S.signPayload(identity, payload) }, host);
 }
 async function dropAs(issuer, owner, credential, domain, host) {
-  const payload = { action: 'drop', credentialId: credential.id, world: 'world-pin', domain, dropId: 'urn:atlas:worlddrop:' + crypto.randomUUID(), droppedAt: new Date().toISOString() };
+  const payload = { action: 'drop', credentialId: credential.id, world: 'world-pin', domain, dropId: 'urn:atlas:worlddrop:' + crypto.randomUUID(), droppedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() };
   return post(issuer.base, '/atlas/world/drop', { credential, world: 'world-pin', position: [1, 0, 1], intent: { payload, proof: await S.signPayload(owner, payload) } }, host);
 }
 

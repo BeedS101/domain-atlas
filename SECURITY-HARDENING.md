@@ -22,6 +22,14 @@ issuers with their own keys and state; no live domain was contacted.
   cross-domain drops.
 - **Legacy drops.** Drops listed before wallets signed intents carry none. An operator may list the relaying domains
   allowed to omit them in `ATLAS_LEGACY_DROP_PEERS` (comma separated). The default is empty.
+- **Drop intent expiry.** A new drop needs an owner intent whose `expiresAt` is a canonical UTC timestamp no more than two
+  minutes past and no more than fifteen minutes ahead; the wallet signs ten minutes. Intents without `expiresAt`
+  (older wallets) are accepted until `ATLAS_DROP_LEGACY_UNTIL` (default `2027-03-31T00:00:00.000Z`) and refused for drops
+  accepted after it; a drop the hosting domain accepted before then stays claimable. A placed drop never expires: the
+  issuer judges the owner's intent against the time the hosting domain says it accepted the drop (`droppedAt` in the
+  signed attestation). Hosting domains and issuers must be updated before the date; an older hosting domain sends no
+  `droppedAt`, so an issuer past the date judges its intents against the claim time. Set `ATLAS_DROP_LEGACY_UNTIL` to a
+  past date to enforce at once.
 - **Peers.** Non-443 public peers and URL-shaped domain strings are now rejected. A foreign issuer that publishes no
   revocation document is refused. `ATLAS_ALLOW_LOCAL_PEERS=1` re-enables loopback peers for development; it is off by
   default and implied only by the built-in development servers.
@@ -120,6 +128,7 @@ issuers with their own keys and state; no live domain was contacted.
 
 ```
 node test/security-world-drop-relay.js        # STACK=node|php
+node test/security-world-drop-expiry.js       # STACK=node|php
 node test/security-webauthn-envelope.js ; php test/security-webauthn-envelope.php
 node test/security-replacement-recovery.js both
 node test/security-world-drop-settlement.js both

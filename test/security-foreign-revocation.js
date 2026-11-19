@@ -24,7 +24,7 @@ function check(name, ok, detail) {
     const cred = await F.issue(alice);
     if (setup) setup(cred);
     const dropId = 'urn:atlas:worlddrop:' + require('crypto').randomUUID();
-    const payload = { action: 'drop', credentialId: cred.id, world, domain: H.domain, dropId, droppedAt: new Date().toISOString() };
+    const payload = { action: 'drop', credentialId: cred.id, world, domain: H.domain, dropId, droppedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() };
     const res = await S.post(H.base, '/atlas/world/drop', { credential: cred, world, position: [0, 0, 0], intent: { payload, proof: await S.signPayload(alice, payload) } });
     const listed = (await S.get(H.base, '/atlas/world/drops?world=' + world)).body.drops.some((d) => d.dropId === dropId);
     return { status: res.status, error: (res.body && res.body.error) || '', listed };

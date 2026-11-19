@@ -1,5 +1,5 @@
 <?php
-// POST /atlas/world/drop (task #250, SPEC.md §5.5) — mirrors issuer-server/
+// POST /atlas/world/drop (SPEC.md §5.5) — mirrors issuer-server/
 // server.js's own /atlas/world/drop handler exactly. Drops a fully-signed
 // credential into a world hosted by THIS domain, for any visitor to see
 // (GET /atlas/world/drops, world.php) and pick up (POST
@@ -54,6 +54,15 @@ if (array_key_exists('dropId', $payload) && (!is_string($payload['dropId']) || !
 $envelopeOk = verify_envelope($payload, $intent['proof']);
 if (!$envelopeOk) send_json(400, ['error' => 'intent signature does not check out']);
 $dropperPub = $intent['proof']['publicKey'];
+
+$nowMs = atlas_now_ms();
+$expiry = atlas_drop_intent_expiry_problem($payload, $nowMs, $nowMs);
+if ($expiry === 'required') send_json(403, ['error' => 'the drop intent must carry an expiresAt - update the wallet', 'code' => 'drop-intent-expiry-required']);
+if ($expiry === 'invalid') send_json(400, ['error' => 'expiresAt must be a UTC timestamp such as 2030-01-01T00:00:00.000Z', 'code' => 'drop-intent-expiry-invalid']);
+if ($expiry !== null) {
+  send_json(401, ['error' => 'the drop intent is outside its allowed time window', 'code' => 'stale-request',
+    'serverTime' => gmdate('Y-m-d\TH:i:s', intdiv($nowMs, 1000)) . sprintf('.%03dZ', $nowMs % 1000)]);
+}
 
 $problem = check_presented_transferable_asset($kp['publicKeyB64url'], $credential, $dropperPub, $credential['asset']['class'] ?? null);
 if ($problem) send_json(400, ['error' => $problem]);

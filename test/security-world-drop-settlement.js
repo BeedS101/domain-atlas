@@ -33,7 +33,7 @@ async function issue(issuer, owner) {
 }
 async function dropAt(host, owner, credential) {
   const dropId = 'urn:atlas:worlddrop:' + crypto.randomUUID();
-  const payload = { action: 'drop', credentialId: credential.id, world: WORLD, domain: host.domain, dropId, droppedAt: new Date().toISOString() };
+  const payload = { action: 'drop', credentialId: credential.id, world: WORLD, domain: host.domain, dropId, droppedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() };
   const r = await api(host).post('/atlas/world/drop', { credential, world: WORLD, position: [1, 0, 1], intent: { payload, proof: proofFor(owner, payload) } });
   if (r.status !== 200) throw new Error('could not drop: ' + JSON.stringify(r.body));
   return dropId;

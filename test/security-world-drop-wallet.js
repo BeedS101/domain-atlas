@@ -25,7 +25,13 @@ const BASE_PORT = STACK === 'php' ? 8460 : 8450;
     const held = await page.evaluate(async () => (await AtlasWallet.getWallet((await AtlasWallet.getIdentity()).publicKey)).filter((e) => e.credential.asset.class === 'atlas.trophy.chess').map((e) => e.credential));
     check('the wallet holds a trophy issued by A', held.length === 1 && held[0].issuer.domain === A.domain, held.length);
 
+    const sentDrops = [];
+    page.on('request', (r) => { if (r.method() === 'POST' && r.url().endsWith('/atlas/world/drop')) sentDrops.push(JSON.parse(r.postData())); });
+    const before = Date.now();
     await page.evaluate(([c, dom]) => AtlasWallet.dropItem(c, dom, 'wallet-world', [1, 0, 1]), [held[0], B.domain]);
+    const signed = sentDrops.length === 1 && sentDrops[0].intent.payload;
+    const expiresMs = signed && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(signed.expiresAt || '') ? Date.parse(signed.expiresAt) : NaN;
+    check('the wallet signs a bounded expiresAt with the drop intent (about ten minutes ahead)', expiresMs - before > 8 * 60 * 1000 && expiresMs - Date.now() < 11 * 60 * 1000, signed);
     const listed = await S.get(B.base, '/atlas/world/drops?world=wallet-world');
     check('B\'s world lists the item', listed.body.drops.length === 1 && listed.body.drops[0].credential.id === held[0].id, listed.body);
     check('it left the wallet', (await page.evaluate(async () => (await AtlasWallet.getWallet((await AtlasWallet.getIdentity()).publicKey)).length)) === 0);

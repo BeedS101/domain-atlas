@@ -18,7 +18,7 @@ const uuid = () => require('crypto').randomUUID();
 async function relayAttempt(issuer, peer, owner, claimant, credential, signer) {
   const dropId = 'urn:atlas:worlddrop:' + uuid();
   const world = 'world-' + uuid();
-  const drop = { action: 'drop', credentialId: credential.id, world, domain: peer.domain, dropId, droppedAt: new Date().toISOString() };
+  const drop = { action: 'drop', credentialId: credential.id, world, domain: peer.domain, dropId, droppedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() };
   const claim = { action: 'claim', dropId, domain: peer.domain, claimedAt: new Date().toISOString() };
   const attestation = { relayingDomain: peer.domain, world, dropId, credentialId: credential.id, claimantPublicKey: claimant.publicKey };
   return S.post(issuer.base, '/atlas/world/drops/relay-claim', {

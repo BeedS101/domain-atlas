@@ -27,7 +27,7 @@ async function revokedIds(issuer) {
 }
 // What the wallet signs and sends to drop an item into `host`'s world.
 async function ownerDrop(host, owner, credential, world, dropId) {
-  const payload = { action: 'drop', credentialId: credential.id, world, domain: host.domain, dropId, droppedAt: new Date().toISOString() };
+  const payload = { action: 'drop', credentialId: credential.id, world, domain: host.domain, dropId, droppedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() };
   const proof = await S.signPayload(owner, payload);
   return { payload, proof };
 }

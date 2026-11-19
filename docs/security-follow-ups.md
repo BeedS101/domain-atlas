@@ -23,10 +23,36 @@ purpose so one purpose cannot starve the others, keeping the global cap.
 
 ## Drop intents without expiry
 
-Reported in the review and not yet reproduced or fixed. Trade intents are refused once their `expiresAt` has
-passed (`issuer-server/server.js`, the trade submit and claim handlers); a drop intent without an `expiresAt`
-would stay valid until the drop is consumed. Next step: confirm which drop paths accept an intent with no expiry,
-then require an `expiresAt` within a bounded window, with a compatibility period for existing wallets.
+Fixed, with a compatibility period still to close. Reproduced first (`test/security-world-drop-expiry.js`, Node and
+PHP): the owner's drop intent had no `expiresAt` and its `droppedAt` was signed but never read, so a hosting domain
+accepted any intent however old, and an issuer settled a relayed claim for an intent signed years earlier.
+
+What expires and what does not: the owner's signed intent is an authorization to *place* the credential, and it now
+lapses (`expiresAt`, enforced by the hosting domain at `POST /atlas/world/drop`: at most two minutes past and fifteen
+minutes ahead of its own clock; the wallet signs ten minutes). A drop the hosting domain accepted stays listed and
+claimable indefinitely. To let the issuer judge the authorization without making accepted drops die, the hosting
+domain adds `droppedAt` (the time it accepted the drop) to the attestation it signs, and the issuer requires the
+intent to have been valid at that moment (`drop-intent-expired`, `drop-intent-expiry-required`,
+`drop-intent-expiry-invalid`, `drop-time-invalid`). Changing `expiresAt` after signing fails the signature check.
+Claim intents and same-domain claims are unchanged.
+
+Compatibility: intents without `expiresAt` (older wallets) are accepted for drops accepted before
+`ATLAS_DROP_LEGACY_UNTIL` (default `2027-03-31T00:00:00.000Z`), and a drop accepted before it stays claimable after it.
+After it, a missing expiry is refused. A dated intent relayed by a hosting domain that sends no `droppedAt` is not
+held to the window until that date either; afterwards the issuer judges it against the claim time.
+
+Remaining:
+
+- The cut-off date is a deployment decision: update hosts, issuers and the wallet first, and move the date if wallet
+  rollout needs longer. Setting it to a past date enforces strictly at once.
+- A hosting domain that predates `droppedAt` and is never updated cannot vouch for when it accepted a drop, so after
+  the cut-off its cross-domain drops whose intent has lapsed are refused by an updated issuer. Update the hosts.
+- The accepted-at time is the hosting domain's word, signed with its own key: a hosting domain that lies can back-date
+  `droppedAt` to make a stale intent look valid. It could equally have fabricated a drop, which the owner's signed intent
+  already limits to the credential, world, domain and drop id the owner named. `ATLAS_LEGACY_DROP_PEERS` (relays that
+  omit both intents) is unchanged and remains an operator opt-in bypass.
+- The wallet does not yet retry with the server's clock when a hosting domain answers `stale-request` for a drop; a
+  device clock more than two minutes out surfaces as a failed drop with the server's message.
 
 ## Wallet domain references: what remains
 

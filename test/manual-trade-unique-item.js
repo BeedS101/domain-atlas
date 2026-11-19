@@ -235,7 +235,7 @@ async function mailCheckAs(base, identity, credential) {
     const dropRing = await issueAsset(NODE_BASE, poster.publicKey, 'atlas.wearable.ring', 1);
     const dropOriginalEnchantments = dropRing.asset.properties['com.example.enchantments'];
     const dropOriginalSerial = dropRing.asset.properties['atlas.serial'];
-    const dropPayload = { action: 'drop', credentialId: dropRing.id, world: 'trade-unique-item-test-world', droppedAt: new Date().toISOString() };
+    const dropPayload = { action: 'drop', credentialId: dropRing.id, world: 'trade-unique-item-test-world', droppedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() };
     const dropProof = await signPayload(poster, dropPayload);
     const dropRes = await post(NODE_BASE, '/atlas/world/drop', { credential: dropRing, world: 'trade-unique-item-test-world', position: [0, 0, 0], intent: { payload: dropPayload, proof: dropProof } });
     if (dropRes.status !== 200 || !dropRes.body.dropId) throw new Error('Expected the ring drop to succeed, got: ' + JSON.stringify(dropRes));

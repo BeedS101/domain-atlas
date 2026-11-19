@@ -466,6 +466,40 @@ const WORLD_DROP_ID_PATTERN = /^urn:atlas:worlddrop:[0-9a-f]{8}-[0-9a-f]{4}-[0-9
 // Domains whose relayed claims may omit the owner's and claimant's signed intents (drops listed before wallets signed
 // them). Empty unless an operator sets ATLAS_LEGACY_DROP_PEERS.
 const LEGACY_DROP_PEERS = new Set((process.env.ATLAS_LEGACY_DROP_PEERS || '').split(',').map((d) => d.trim()).filter(Boolean));
+// The owner's signed drop intent is an authorization with a short lifetime: `expiresAt` must be a canonical UTC
+// timestamp no more than DROP_INTENT_MAX_TTL_MS after the moment the hosting domain accepts the drop, and not more than
+// DROP_INTENT_SKEW_MS before it. The expiry limits when a credential may be PLACED; a drop the hosting domain accepted in
+// time stays listed and claimable however long ago the authorization lapsed. Intents without `expiresAt` (written by
+// wallets that predate it) are accepted only for drops accepted before DROP_LEGACY_UNTIL (ATLAS_DROP_LEGACY_UNTIL, a
+// canonical UTC timestamp; a date in the past turns strict enforcement on at once).
+const DROP_INTENT_SKEW_MS = 2 * 60 * 1000;
+const DROP_INTENT_MAX_TTL_MS = 15 * 60 * 1000;
+const DROP_LEGACY_UNTIL_DEFAULT = '2027-03-31T00:00:00.000Z';
+function parseDropTimestamp(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) && new Date(ms).toISOString() === value ? ms : null;
+}
+const DROP_LEGACY_UNTIL_MS = (() => {
+  const raw = process.env.ATLAS_DROP_LEGACY_UNTIL;
+  const ms = raw === undefined || raw === '' ? null : parseDropTimestamp(raw);
+  if (raw !== undefined && raw !== '' && ms === null) console.warn('ATLAS_DROP_LEGACY_UNTIL is not a canonical UTC timestamp; using', DROP_LEGACY_UNTIL_DEFAULT);
+  return ms === null ? parseDropTimestamp(DROP_LEGACY_UNTIL_DEFAULT) : ms;
+})();
+// Judges one owner drop intent against the moment its drop was accepted. `acceptedMs` is that moment, or null when
+// it is unknown (a relaying domain that predates the attestation field), in which case `nowMs` stands in for it
+// and, until the compatibility date, a dated intent is not held to the window. Returns null or {problem, ms}.
+function dropIntentExpiryProblem(payload, nowMs, acceptedMs) {
+  const dated = acceptedMs !== null && acceptedMs !== undefined;
+  const at = dated ? acceptedMs : nowMs;
+  if (!Object.prototype.hasOwnProperty.call(payload, 'expiresAt')) return at < DROP_LEGACY_UNTIL_MS ? null : { problem: 'required' };
+  const ms = parseDropTimestamp(payload.expiresAt);
+  if (ms === null) return { problem: 'invalid' };
+  if (!dated && nowMs < DROP_LEGACY_UNTIL_MS) return null;
+  if (at - ms > DROP_INTENT_SKEW_MS) return { problem: 'expired', ms };
+  if (ms - at > DROP_INTENT_MAX_TTL_MS) return { problem: 'unbounded', ms };
+  return null;
+}
 // The journal key for settling one drop of one credential: the same drop and credential always map to the same id.
 function worldDropRequestId(dropId, credentialId) {
   return 'wd-' + createHash('sha256').update(String(dropId) + '\n' + String(credentialId)).digest('hex').slice(0, 48);
@@ -6082,6 +6116,19 @@ async function main() {
     try { ownerOk = typeof dropIntent.proof.publicKey === 'string' && await verifyEnvelope(d, dropIntent.proof); } catch (err) { ownerOk = false; }
     if (!ownerOk) return deny('The owner\'s drop intent signature does not check out.', 'owner-signature-invalid');
     if (!credential.owner || dropIntent.proof.publicKey !== credential.owner.publicKey) return deny('The drop intent was not signed by the owner of this credential.', 'not-owner');
+    // The authorization must have been valid when the hosting domain accepted the drop, not when the claim arrives.
+    const nowMs = Date.now();
+    let acceptedMs = null;
+    if (attestation.droppedAt !== undefined) {
+      acceptedMs = parseDropTimestamp(attestation.droppedAt);
+      if (acceptedMs === null || acceptedMs - nowMs > DROP_INTENT_SKEW_MS) return deny('The relaying domain gave no usable time for when it accepted this drop.', 'drop-time-invalid');
+    }
+    const expiry = dropIntentExpiryProblem(d, nowMs, acceptedMs);
+    if (expiry) {
+      if (expiry.problem === 'required') return deny('The owner\'s drop intent carries no expiresAt.', 'drop-intent-expiry-required');
+      if (expiry.problem === 'invalid') return deny('The owner\'s drop intent carries a malformed expiresAt.', 'drop-intent-expiry-invalid');
+      return deny('The owner\'s drop intent had expired, or was written to last too long, when the drop was accepted.', 'drop-intent-expired');
+    }
     if (!isObject(claimIntent) || !isObject(claimIntent.payload) || !isObject(claimIntent.proof)) return deny('This claim carries no claim intent signed by the claimant.');
     const c = claimIntent.payload;
     if (c.action !== 'claim' || c.dropId !== attestation.dropId || (c.domain !== undefined && c.domain !== attestation.relayingDomain)) {
@@ -10229,25 +10276,14 @@ async function main() {
         return sendJson(res, 200, { status: 'canceled' });
       }
 
-      // --- World Drops (task #250, SPEC.md §5.5): "others can see it and
-      // pick it up" — the shared half of dropping an item that self-only
-      // dropping (wallet.js's dropItem/getDroppedItemsInWorld) explicitly
-      // punted on. A world is inherently this domain's own concern (same
-      // as its scene.json), so this domain hosts the drop for VISIBILITY
-      // and CLAIM-RESERVATION no matter which domain actually issued the
-      // item — but only the item's own issuer can legitimately re-sign it
-      // to a new owner, so a claim on a cross-domain item is relayed to
-      // that issuer via /atlas/world/drops/relay-claim below, the exact
-      // same "sign an attestation, let the home domain verify it against
-      // my own published key" trust model /atlas/postoffice/relay already
-      // uses for federated mail (SPEC.md §11.4) — this is the second use
-      // of that same primitive, not a new one.
+      // --- World drops (SPEC.md §5.5): a drop is visible to everyone in the world and can be picked up by anyone.
+      // This domain hosts the listing and reserves claims no matter which domain issued the item, but only the
+      // item's own issuer can re-sign it to a new owner, so a claim on another domain's item is relayed to that issuer
+      // via /atlas/world/drops/relay-claim below: a signed attestation the issuer verifies against this domain's
+      // published key, the same trust model /atlas/postoffice/relay uses for federated mail (SPEC.md §11.4).
       //
-      // Proof-of-identity shape throughout (`intent.payload`/`intent.proof`)
-      // deliberately mirrors /atlas/trade/submit and /claim: a small signed
-      // envelope over just enough to authorize the one action it accompanies
-      // and nothing else, verified with the same verifyEnvelope() used
-      // everywhere else in this file.
+      // The intent shape (`intent.payload`/`intent.proof`) mirrors /atlas/trade/submit and /claim: a small signed
+      // envelope over just enough to authorize the one action it accompanies, verified with verifyEnvelope().
       if (req.method === 'POST' && req.url === '/atlas/world/drop') {
         const { credential, world, position, intent } = JSON.parse((await readBody(req)) || '{}');
         if (!credential || !world || !position || !intent) return sendJson(res, 400, { error: 'credential, world, position, and intent are all required' });
@@ -10266,6 +10302,14 @@ async function main() {
 
         const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
         if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+
+        const nowMs = Date.now();
+        const expiry = dropIntentExpiryProblem(intent.payload, nowMs, nowMs);
+        if (expiry) {
+          if (expiry.problem === 'required') return sendJson(res, 403, { error: 'the drop intent must carry an expiresAt - update the wallet', code: 'drop-intent-expiry-required' });
+          if (expiry.problem === 'invalid') return sendJson(res, 400, { error: 'expiresAt must be a UTC timestamp such as 2030-01-01T00:00:00.000Z', code: 'drop-intent-expiry-invalid' });
+          return sendJson(res, 401, { error: 'the drop intent is outside its allowed time window', code: 'stale-request', serverTime: new Date(nowMs).toISOString() });
+        }
 
         const dropperPub = intent.proof.publicKey;
         const problem = await checkPresentedTransferableAsset(credential, dropperPub, credential.asset && credential.asset.class);
@@ -10331,7 +10375,10 @@ async function main() {
         // /atlas/postoffice/send already uses to reach a different home
         // domain (SPEC.md §11.4 step 3), just naming a drop instead of a
         // mail envelope.
+        // `droppedAt` is when this domain accepted the drop: it tells the issuer the owner's authorization was still
+        // valid at that moment, however long ago that was.
         const attestation = { relayingDomain: DOMAIN, world, dropId, credentialId: credential.id, claimantPublicKey: claimantPub };
+        if (typeof won.droppedAt === 'string') attestation.droppedAt = won.droppedAt;
         const attestationSignature = await sign(attestation);
         let relayRes;
         try {

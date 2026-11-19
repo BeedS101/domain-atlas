@@ -45,6 +45,9 @@ async function waitUp(base, ms) {
 }
 
 // stack: 'node' or 'php'. Returns { base, domain, dir, stop(), env }.
+// Drop intents without an expiry are served only until this date by default; test issuers keep it far away so suites that
+// sign older-style intents do not start failing when the real date passes the production default.
+const DROP_LEGACY_UNTIL = '2099-01-01T00:00:00.000Z';
 async function startIssuer(stack, port, extraEnv) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-sec-' + stack + '-' + port + '-'));
   const domain = 'localhost:' + port;
@@ -57,14 +60,14 @@ async function startIssuer(stack, port, extraEnv) {
     for (const f of fs.readdirSync(path.join(docroot, '.well-known'))) if (/^atlas-.*\.json$/.test(f)) fs.rmSync(path.join(docroot, '.well-known', f), { force: true });
     proc = spawn('node', [path.join(REPO, 'issuer-server', 'server.js')], {
       cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'],
-      env: Object.assign({}, process.env, { ATLAS_PRIVATE_MINT: 'off', PORT: String(port), ATLAS_DOMAIN: domain, ATLAS_DOCROOT: docroot, ATLAS_STATE_DIR: path.join(dir, 'state') }, extraEnv || {})
+      env: Object.assign({}, process.env, { ATLAS_PRIVATE_MINT: 'off', ATLAS_DROP_LEGACY_UNTIL: DROP_LEGACY_UNTIL, PORT: String(port), ATLAS_DOMAIN: domain, ATLAS_DOCROOT: docroot, ATLAS_STATE_DIR: path.join(dir, 'state') }, extraEnv || {})
     });
   } else {
     const bundle = path.join(dir, 'bundle');
     fs.cpSync(path.join(REPO, 'issuer-php'), bundle, { recursive: true });
     proc = spawn('php', ['-S', 'localhost:' + port, 'test-router.php'], {
       cwd: bundle, stdio: ['ignore', 'pipe', 'pipe'],
-      env: Object.assign({}, process.env, { ATLAS_PRIVATE_MINT: 'off', PHP_CLI_SERVER_WORKERS: '4' }, extraEnv || {})
+      env: Object.assign({}, process.env, { ATLAS_PRIVATE_MINT: 'off', ATLAS_DROP_LEGACY_UNTIL: DROP_LEGACY_UNTIL, PHP_CLI_SERVER_WORKERS: '4' }, extraEnv || {})
     });
   }
   const log = [];

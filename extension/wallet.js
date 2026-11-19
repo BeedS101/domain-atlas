@@ -4386,6 +4386,9 @@ const AtlasWallet = (() => {
     return done.data.sent;
   }
 
+  // How long the owner's signed authorization to place a credential in a world is usable, from the moment it is signed.
+  const DROP_INTENT_LIFETIME_MS = 10 * 60 * 1000;
+
   // `credential` is the FULL signed credential being dropped (server needs
   // the whole thing to verify + store for other visitors to render);
   // `worldDomain` is whichever domain's world this is happening in — NOT
@@ -4400,9 +4403,12 @@ const AtlasWallet = (() => {
     await assertSettled(dropper, [credential.id]);
     const holdingsBefore = await holdingsSnapshot(dropper);
     // The signed intent names the hosting domain and the drop id, so the credential's issuer can later tell that its
-    // owner authorized exactly this drop when the hosting domain relays a claim to it.
+    // owner authorized exactly this drop when the hosting domain relays a claim to it. `expiresAt` bounds how long the
+    // authorization to place the credential stays usable; once the hosting domain has accepted the drop, the drop itself
+    // does not expire.
     const dropId = 'urn:atlas:worlddrop:' + crypto.randomUUID();
-    const payload = { action: 'drop', credentialId: credential.id, world, domain: worldDomain, dropId, droppedAt: new Date().toISOString() };
+    const signedAt = Date.now();
+    const payload = { action: 'drop', credentialId: credential.id, world, domain: worldDomain, dropId, droppedAt: new Date(signedAt).toISOString(), expiresAt: new Date(signedAt + DROP_INTENT_LIFETIME_MS).toISOString() };
     const proof = await signWithSelf(payload);
     const res = await fetch(baseUrl(worldDomain) + '/atlas/world/drop', {
       method: 'POST',
