@@ -11,6 +11,7 @@ const PEER_MAX_AGE_SECONDS = 120;
 const PEER_MAX_PENDING_COINS = 100;
 const PEER_SYNC_PAGE = 50;
 const PEER_MAX_ATTEMPTS = 12;
+const PEER_MAX_REFUSAL_RECORDS = 200;
 // Failures of applying an entry that say nothing about the authority's history.
 const PEER_NOT_EVIDENCE = ['wrong-index', 'wrong-prev', 'not-pending', 'not-active', 'busy'];
 
@@ -230,8 +231,11 @@ function peer_notify_all(PDO $db, array $node, string $coinId, callable $send, i
 // ---------- approvals ----------
 
 // A co-approver is asked to approve an entry the authority prepared. It first catches up, then runs every check against
-// its own copy, not the authority's word, and signs only if its head is the one the entry extends. It never signs two
-// different entries for one index while the first could still be committed.
+// its own copy, not the authority's word, and signs only if its head is the one the entry extends. It signs one entry for
+// an index, for good: the authority could still commit an approved entry at any later time, and the other domains do not
+// check time when they accept history, so a second approval for the index could be committed next to the first. The
+// approval is kept as it was given (database row and checkpoint line), asking again for the same entry returns it, and a
+// request for a different entry is refused and recorded.
 function peer_on_approve(PDO $db, array $node, string $from, array $body, int $now, callable $send): array
 {
     $coinId = $body['coinId'] ?? null;
@@ -242,7 +246,19 @@ function peer_on_approve(PDO $db, array $node, string $from, array $body, int $n
     if (ledger_roster_key($coin['genesis'], $node['domain']) === null) ledger_fail('not-in-roster', 'this domain is not in the roster');
     peer_catch_up($db, $node, $coinId, $send, $now);
     peer_compare_heads($db, $node, $coinId, $send, $now);
-    $checked = ledger_validate_prepared($db, $coinId, $prepared, $now);
+    if (ledger_coin($db, $coinId)['state'] !== 'active') ledger_fail('not-active', 'the coin is ' . ledger_coin($db, $coinId)['state']);
+    ledger_guard_require($db, $coinId);
+    $answer = fn(string $signature) => ['decision' => 'approve', 'domain' => $node['domain'], 'signature' => $signature];
+    try {
+        $checked = ledger_validate_prepared($db, $coinId, $prepared, $now);
+    } catch (LedgerError $e) {
+        // An entry this domain already approved is answered again when only the clock has moved on: the signature was given once.
+        if (!in_array($e->reason, ['bad-time', 'expired'], true)) throw $e;
+        [$framePublic, , $frameHash] = ledger_check_frame($db, ledger_coin($db, $coinId), $prepared);
+        $given = ledger_approval_memory($db, $coinId, $framePublic['index']);
+        if (!isset($given[$frameHash]) || count($given) !== 1) throw $e;
+        return $answer($given[$frameHash]['signature'] ?? ledger_sign($node['private'], ledger_approval_bytes($coinId, $framePublic['index'], $frameHash)));
+    }
     $saleId = $checked['public']['purchase']['requestId'] ?? null;
     if ($saleId !== null) {
         $closedSale = $db->prepare('SELECT 1 FROM ledger_closed_sales WHERE coin_id=? AND request_id=?');
@@ -260,21 +276,43 @@ function peer_on_approve(PDO $db, array $node, string $from, array $body, int $n
             $closed = $db->prepare('SELECT 1 FROM ledger_closed_sales WHERE coin_id=? AND request_id=?');
             $closed->execute([$coinId, $requestId]);
             if ($closed->fetchColumn() !== false) ledger_fail('sale-closed', 'this sale was closed; this domain approves nothing for it');
-            $db->prepare('INSERT OR IGNORE INTO ledger_purchase_approvals(coin_id,request_id,idx,hash) VALUES(?,?,?,?)')->execute([$coinId, $requestId, $index, $hash]);
         }
-        $prior = $db->prepare('SELECT hash,executed_at FROM ledger_approved WHERE coin_id=? AND idx=?');
-        $prior->execute([$coinId, $index]);
-        $row = $prior->fetch(PDO::FETCH_ASSOC);
-        if ($row && $row['hash'] !== $hash && (int) $row['executed_at'] > $now - 2 * LEDGER_CLOCK_SKEW_SECONDS) {
-            ledger_fail('equivocation', 'a different entry for this index was approved and could still be committed');
+        // Looked up again under the write lock: another request may have approved an entry for this index since.
+        $given = ledger_approval_memory($db, $coinId, $index);
+        if (isset($given[$hash]) && count($given) === 1) {
+            $db->exec('COMMIT');
+            return $answer($given[$hash]['signature'] ?? ledger_sign($node['private'], ledger_approval_bytes($coinId, $index, $hash)));
         }
-        $db->prepare('INSERT OR REPLACE INTO ledger_approved(coin_id,idx,hash,executed_at) VALUES(?,?,?,?)')->execute([$coinId, $index, $hash, $at]);
+        if ($given) {
+            $db->exec('COMMIT');
+            peer_refuse_second_approval($db, $coinId, $index, array_key_first($given), $hash, $from, $now);
+        }
+        $signature = ledger_sign($node['private'], ledger_approval_bytes($coinId, $index, $hash));
+        // The approval is written down outside the database before the row exists and before the signature leaves this domain.
+        ledger_approval_note($db, $coinId, $index, $hash, $signature, $now);
+        if ($requestId !== null) $db->prepare('INSERT OR IGNORE INTO ledger_purchase_approvals(coin_id,request_id,idx,hash) VALUES(?,?,?,?)')->execute([$coinId, $requestId, $index, $hash]);
+        $db->prepare('INSERT OR IGNORE INTO ledger_approved(coin_id,idx,hash,executed_at,signature,approved_at,requester) VALUES(?,?,?,?,?,?,?)')->execute([$coinId, $index, $hash, $at, $signature, $now, $from]);
         $db->exec('COMMIT');
     } catch (Throwable $e) {
         ledger_rollback($db);
         throw $e;
     }
-    return ['decision' => 'approve', 'domain' => $node['domain'], 'signature' => ledger_sign($node['private'], ledger_approval_bytes($coinId, $index, $hash))];
+    return $answer($signature);
+}
+
+// Records that the authority asked for a second entry for an index this domain already approved, and refuses. The record is
+// evidence only: the coin is not stopped by it, and it is written in a transaction of its own so that refusing keeps it.
+function peer_refuse_second_approval(PDO $db, string $coinId, int $index, string $approvedHash, string $refusedHash, string $requester, int $now): never
+{
+    try {
+        $count = $db->prepare('SELECT COUNT(*) FROM ledger_approval_refusals WHERE coin_id=?');
+        $count->execute([$coinId]);
+        if ((int) $count->fetchColumn() < PEER_MAX_REFUSAL_RECORDS) {
+            $db->prepare('INSERT OR IGNORE INTO ledger_approval_refusals(coin_id,idx,approved_hash,refused_hash,requester,refused_at) VALUES(?,?,?,?,?,?)')->execute([$coinId, $index, $approvedHash, $refusedHash, $requester, $now]);
+        }
+    } catch (Throwable $e) {
+    }
+    ledger_fail('equivocation', 'a different entry for this index was already approved; this domain approves one entry per index');
 }
 
 // The authority asks a roster domain to witness that a sale is closed: this domain never approved an entry for the request and now
@@ -353,16 +391,28 @@ function peer_collect_approvals(PDO $db, array $node, string $coinId, array $pre
 
 // ---------- executing on a multi authority coin ----------
 
-// The entry and approvals a pending proposal already holds, if the entry still extends the head and is recent enough to
-// be committed.
-function peer_stored_entry(array $row, array $head, int $now): ?array
+// The entry and approvals a pending proposal already holds, as long as the entry still extends the head. It is kept however old
+// it is: a partner that approved it signs no other entry for that index, so asking for a new one would end in a refusal, and
+// the entry can be written at its own time.
+function peer_stored_entry(array $row, array $head): ?array
 {
     $stored = $row['prepared_json'] === null ? null : json_decode($row['prepared_json'], true);
     if (!is_array($stored) || ($stored['public']['index'] ?? null) !== $head['index'] + 1 || ($stored['public']['prevHash'] ?? null) !== $head['hash']) return null;
-    $at = is_string($stored['public']['executedAt'] ?? null) ? strtotime($stored['public']['executedAt']) : false;
-    if ($at === false || abs($at - $now) > LEDGER_CLOCK_SKEW_SECONDS - 10) return null;
+    if (!is_string($stored['public']['executedAt'] ?? null) || strtotime($stored['public']['executedAt']) === false) return null;
     $approvals = $row['approvals_json'] === null ? [] : json_decode($row['approvals_json'], true);
     return ['prepared' => $stored, 'approvals' => is_array($approvals) ? $approvals : []];
+}
+
+// The digest of another pending proposal whose entry for the next index is already with the partners, if there is one. Only one
+// entry for an index is put to the partners at a time: two entries asked for at once could each win approvals from different
+// partners, and no partner would sign the other.
+function peer_in_flight(PDO $db, string $coinId, string $except): ?string
+{
+    $head = ledger_head($db, $coinId);
+    $rows = $db->prepare("SELECT digest,prepared_json,approvals_json FROM ledger_proposals WHERE coin_id=? AND status='pending' AND prepared_json IS NOT NULL AND digest<>? ORDER BY created_at, rowid");
+    $rows->execute([$coinId, $except]);
+    foreach ($rows->fetchAll(PDO::FETCH_ASSOC) as $row) if (peer_stored_entry($row, $head) !== null) return $row['digest'];
+    return null;
 }
 
 function peer_store_entry(PDO $db, string $coinId, string $digest, ?array $prepared, array $approvals): void
@@ -389,23 +439,46 @@ function peer_execute(PDO $db, array $node, string $coinId, string $digest, call
         $authorization = json_decode($row['authorization_json'], true);
         try {
             $clock = max($now, ledger_head_time($db, $coinId));
-            $held = peer_stored_entry($row, ledger_head($db, $coinId), $clock);
+            $held = peer_stored_entry($row, ledger_head($db, $coinId));
             if ($held) {
                 $prepared = $held['prepared'];
                 $approvals = $held['approvals'];
+                // An entry older than the window is written at its own time: its approvals were given for it.
+                $entryAt = strtotime($prepared['public']['executedAt']);
+                if (abs($entryAt - $clock) > LEDGER_CLOCK_SKEW_SECONDS - 10) $clock = $entryAt;
             } else {
-                $prepared = ledger_prepare_transfer($db, $coinId, $authorization, $clock);
-                $approvals = [];
-                peer_store_entry($db, $coinId, $digest, $prepared, $approvals);
+                $db->exec('BEGIN IMMEDIATE');
+                try {
+                    $other = peer_in_flight($db, $coinId, $digest);
+                    if ($other === null) {
+                        $prepared = ledger_prepare_transfer($db, $coinId, $authorization, $clock);
+                        $approvals = [];
+                        peer_store_entry($db, $coinId, $digest, $prepared, $approvals);
+                    }
+                    $db->exec('COMMIT');
+                } catch (Throwable $e) {
+                    ledger_rollback($db);
+                    throw $e;
+                }
+                if ($other !== null) {
+                    // The entry already with the partners is finished first; this proposal follows on the next head.
+                    try { peer_execute($db, $node, $coinId, $other, $send, $now); } catch (LedgerError $e) {
+                        $left = spend_proposal($db, $coinId, $other);
+                        if ($left && $left['status'] === 'pending' && peer_stored_entry($left, ledger_head($db, $coinId)) !== null) {
+                            ledger_fail('busy', 'another entry for this index is waiting for its approvals (' . $e->reason . '); this proposal follows it');
+                        }
+                    }
+                    continue;
+                }
             }
             if (count($approvals) < $needed) {
                 [$approvals, $refused, $detail] = peer_collect_approvals($db, $node, $coinId, $prepared, $approvals, $send, $now);
                 peer_store_entry($db, $coinId, $digest, $prepared, $approvals);
                 if (count($approvals) < $needed) {
-                    // Partners that refuse because another entry for this index is being approved, or because the head has
-                    // moved, are asked again once that entry is written.
+                    // Partners that refuse because the head has moved are asked again for an entry on the new head. An entry still on the
+                    // head is not replaced: partners that approved it sign no other for that index.
                     $moved = ledger_head($db, $coinId)['index'] !== $prepared['public']['index'] - 1;
-                    if ($refused && !array_diff($refused, ['equivocation', 'wrong-index', 'wrong-prev']) && $attempt < PEER_MAX_ATTEMPTS && ($moved || $attempt < 3)) {
+                    if ($moved && $refused && !array_diff($refused, ['equivocation', 'wrong-index', 'wrong-prev']) && $attempt < PEER_MAX_ATTEMPTS) {
                         peer_store_entry($db, $coinId, $digest, null, []);
                         usleep(random_int(20000, 60000) * min($attempt + 1, 4));
                         continue;

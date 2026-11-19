@@ -156,7 +156,12 @@ function ledger_schema(PDO $db): void
     $have = array_column($db->query('PRAGMA table_info(ledger_proposals)')->fetchAll(PDO::FETCH_ASSOC), 'name');
     foreach (['prepared_json', 'approvals_json'] as $column) if (!in_array($column, $have, true)) $db->exec('ALTER TABLE ledger_proposals ADD COLUMN ' . $column . ' TEXT');
     $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS ledger_one_pending ON ledger_proposals(coin_id,from_key) WHERE status='pending'");
-    $db->exec('CREATE TABLE IF NOT EXISTS ledger_approved(coin_id TEXT NOT NULL, idx INTEGER NOT NULL, hash TEXT NOT NULL, executed_at INTEGER NOT NULL, PRIMARY KEY(coin_id,idx))');
+    // What this domain approved as a roster member: one entry per index, never replaced. The signature is kept as it was issued.
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_approved(coin_id TEXT NOT NULL, idx INTEGER NOT NULL, hash TEXT NOT NULL, executed_at INTEGER NOT NULL, signature TEXT, approved_at INTEGER, requester TEXT, PRIMARY KEY(coin_id,idx))');
+    $have = array_column($db->query('PRAGMA table_info(ledger_approved)')->fetchAll(PDO::FETCH_ASSOC), 'name');
+    foreach (['signature' => 'TEXT', 'approved_at' => 'INTEGER', 'requester' => 'TEXT'] as $column => $type) if (!in_array($column, $have, true)) $db->exec('ALTER TABLE ledger_approved ADD COLUMN ' . $column . ' ' . $type);
+    // Requests this domain refused because it had approved a different entry for the index: evidence that the authority asked twice.
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_approval_refusals(coin_id TEXT NOT NULL, idx INTEGER NOT NULL, approved_hash TEXT NOT NULL, refused_hash TEXT NOT NULL, requester TEXT NOT NULL, refused_at INTEGER NOT NULL, PRIMARY KEY(coin_id,idx,refused_hash))');
     // The authority's journal of purchases it has decided: kept until the price credential has been dealt with.
     $db->exec("CREATE TABLE IF NOT EXISTS ledger_purchases(
         coin_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('decided','credited','done','abandoned')),

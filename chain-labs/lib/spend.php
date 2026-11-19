@@ -36,17 +36,24 @@ function spend_view(array $row): array
     return ['digest' => $row['digest'], 'status' => $row['status'], 'index' => $row['executed_index'] === null ? null : (int) $row['executed_index'], 'reason' => $row['reason']];
 }
 
-// Proposals that ran past their expiry stop blocking their sender.
+// Proposals that ran past their expiry stop blocking their sender. A proposal whose entry is already with the partners is not
+// closed while that entry still extends the head: partners that approved it sign no other entry for that index, so it is
+// written, at the time it was prepared for, or replaced when the head moves on.
 function spend_expire(PDO $db, string $coinId, int $now): void
 {
-    $rows = $db->prepare("SELECT digest,authorization_json FROM ledger_proposals WHERE coin_id=? AND status='pending'");
+    $rows = $db->prepare("SELECT digest,authorization_json,prepared_json FROM ledger_proposals WHERE coin_id=? AND status='pending'");
     $rows->execute([$coinId]);
+    $head = null;
     foreach ($rows->fetchAll(PDO::FETCH_ASSOC) as $row) {
         $auth = json_decode($row['authorization_json'], true);
         $expires = is_array($auth) ? strtotime((string) ($auth['payload']['expiresAt'] ?? '')) : false;
-        if ($expires === false || $now >= $expires) {
-            $db->prepare("UPDATE ledger_proposals SET status='expired', reason='expired' WHERE coin_id=? AND digest=? AND status='pending'")->execute([$coinId, $row['digest']]);
+        if ($expires !== false && $now < $expires) continue;
+        if ($row['prepared_json'] !== null) {
+            $head ??= ledger_head($db, $coinId);
+            $held = json_decode($row['prepared_json'], true);
+            if (is_array($held) && ($held['public']['index'] ?? null) === $head['index'] + 1 && ($held['public']['prevHash'] ?? null) === $head['hash']) continue;
         }
+        $db->prepare("UPDATE ledger_proposals SET status='expired', reason='expired' WHERE coin_id=? AND digest=? AND status='pending'")->execute([$coinId, $row['digest']]);
     }
 }
 

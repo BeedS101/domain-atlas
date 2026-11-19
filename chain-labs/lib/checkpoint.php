@@ -450,6 +450,70 @@ function ledger_guard_after(PDO $db, string $coinId, array $public, string $hash
     }
 }
 
+// ---------- approvals given to the authority ----------
+
+// A roster domain signs one entry for each index of a multi authority coin, for good. Beside the database row, every approval is
+// written to the same log as an `approve` line before the signature leaves this domain, so a database restored from a copy made
+// before the approval still remembers it. The floor and the halt do not read these lines.
+
+// The approvals the log holds for an index: [hash => ['signature' => ?string, 'at' => int]]. Reads back from the end of the file
+// until a line shows the index committed, since an approval is always written after the entry before it was committed and before
+// the entry itself.
+function guard_approvals_at(string $file, int $index): array
+{
+    clearstatcache(true, $file);
+    if (!is_file($file)) return [];
+    $size = (int) filesize($file);
+    $window = GUARD_TAIL_BYTES;
+    while (true) {
+        $from = max(0, $size - $window);
+        $parsed = guard_parse((string) file_get_contents($file, false, null, $from, $size - $from), $from > 0);
+        if ($parsed['corrupt'] !== null) throw new RuntimeException('the checkpoint file is damaged');
+        $found = [];
+        $settled = $from === 0;
+        foreach ($parsed['lines'] as $line) {
+            $kind = $line['kind'] ?? '';
+            if ($kind === 'approve' && ($line['index'] ?? null) === $index && is_string($line['hash'] ?? null)) {
+                $found[$line['hash']] = ['signature' => is_string($line['signature'] ?? null) ? $line['signature'] : null, 'at' => (int) ($line['at'] ?? 0)];
+            } elseif (in_array($kind, ['adopt', 'commit', 'restored', 'reseal'], true) && is_int($line['index'] ?? null) && $line['index'] >= $index) {
+                $settled = true;
+            }
+        }
+        if ($settled) return $found;
+        $window *= 4;
+    }
+}
+
+// Every approval this domain has issued for an index, from the database and from the log: [hash => ['signature' => ?string, 'at' => int]].
+// A log that cannot be read refuses, so nothing is approved on the strength of the database alone.
+function ledger_approval_memory(PDO $db, string $coinId, int $index): array
+{
+    $known = [];
+    $rows = $db->prepare('SELECT hash,signature,COALESCE(approved_at,executed_at) AS at FROM ledger_approved WHERE coin_id=? AND idx=?');
+    $rows->execute([$coinId, $index]);
+    foreach ($rows->fetchAll(PDO::FETCH_ASSOC) as $row) $known[$row['hash']] = ['signature' => $row['signature'], 'at' => (int) $row['at']];
+    if (ledger_guard_dir($db) === null) return $known;
+    try {
+        foreach (guard_approvals_at(guard_file($db, $coinId, 'log'), $index) as $hash => $line) {
+            if (!isset($known[$hash]) || $known[$hash]['signature'] === null) $known[$hash] = $line;
+        }
+    } catch (RuntimeException $e) {
+        throw new LedgerError('checkpoint-unavailable', 'the approvals this domain gave cannot be read, so it approves nothing: ' . $e->getMessage());
+    }
+    return $known;
+}
+
+// Writes down an approval before it is given. Refuses, so nothing is signed, when the line cannot be written.
+function ledger_approval_note(PDO $db, string $coinId, int $index, string $hash, string $signature, int $now): void
+{
+    if (ledger_guard_dir($db) === null) return;
+    try {
+        guard_append(guard_file($db, $coinId, 'log'), ['v' => 1, 'kind' => 'approve', 'coinId' => $coinId, 'index' => $index, 'hash' => $hash, 'signature' => $signature, 'at' => $now]);
+    } catch (RuntimeException $e) {
+        throw new LedgerError('checkpoint-unavailable', 'the approval cannot be written down, so it is not given: ' . $e->getMessage());
+    }
+}
+
 // ---------- recovery ----------
 
 // Replays journaled entries after the database's head, each through the checks of a mirror. The database must be on the journal's

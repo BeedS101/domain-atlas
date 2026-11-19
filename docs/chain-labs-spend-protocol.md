@@ -265,7 +265,9 @@ not make the attack impossible: an authority that withholds service still stops 
 | Co-approver down, threshold equal to the roster size | No spend executes. Balances stay readable. Safety is chosen over availability. |
 | Co-approver down, threshold below the roster size | Spending continues while enough domains remain; the absent domain catches up when it returns. |
 | Authority down | Nothing changes. Reads may be served from the mirror, marked as mirrored and possibly behind. |
-| Crash after the threshold of approvals, before execution | Recovery finds the satisfied pending proposal and executes it once. |
+| Crash after the threshold of approvals, before execution | Recovery finds the satisfied pending proposal and executes it once, however long after. |
+| Authority asks a partner to approve a second entry for an index | Refused (`equivocation`) at any time, and recorded. The partner's first approval is kept. |
+| A partner approved an entry that can no longer collect its threshold | The coin takes no new entry (`busy`) until that entry is written. No second approval is given. Recovery needs a decision (`docs/chain-labs-approvals.md`, section 5). |
 | Crash during execution | The transaction rolled back; the proposal is still pending and recovery retries. |
 | Duplicate submission | Same digest is idempotent; the nonce store rejects a second signed copy. |
 | Two spends from one balance at once | One executes; the other fails on `baseSeq`. |
@@ -454,11 +456,12 @@ Each stage ships separately, with tests, on its own branch.
      threshold, writes the entry and tells the others, who catch up from the authority and apply every entry with the same
      checks as a commit. A crash after the approvals is finished by recovery without asking again.
    - A co-approver catches up first, then checks the entry against its own copy (head, signatures, balance, faucet), and
-     refuses a second, different entry for an index it approved less than two skew windows ago.
-   - That last rule stops an authority that asks twice only when every domain must approve. Below that, two quorums can
-     meet only at the authority, so a fork is detected by head comparison (stage 6), not prevented.
-   - Concurrent proposals: partners refuse the loser of a race for one index; the authority asks again once the winner is
-     written. An entry takes the time of the entry before it when the request began earlier.
+     signs one entry for an index, for good: a second, different entry for it is refused whatever the time (`docs/chain-labs-approvals.md`).
+   - That rule is what stops an authority that asks twice, at any threshold: the first approved entry could still be committed later, so no
+     second one is ever signed. A fork by an authority that withholds entries is still detected by head comparison (stage 6).
+   - Concurrent proposals: one entry for an index is put to the partners at a time, and a second proposal waits for it (`busy`) and follows
+     it. An entry takes the time of the entry before it when the request began earlier. An entry that holds approvals is kept and written
+     at its own time, never replaced.
    - A partner catches up lazily when it is asked for a coin, a receipt or a proposal, and when it is asked to approve. A
      holdings lookup does not catch up first; the wallet compares domains in stage 8.
 6. Mirroring: catch-up, head comparison and the freeze rule, for multi coins.

@@ -42,6 +42,7 @@ removed or reordered line is a break in the chain, and a line cut short by a cra
 | `restored` | The lost entries are back and the database holds the floor again. |
 | `accept` | The operator accepted the loss. Permanent. |
 | `reseal` | The operator began a new file after damage. |
+| `approve` | A roster domain signed an approval of entry N for the authority. Written before the signature is given. Never a floor, and the guard does not read it. It is what keeps an approver from signing a second entry for an index after a restore (`docs/chain-labs-approvals.md`). |
 
 The folder is created with mode 0700 and the files with 0600, every append is flushed to disk (`fsync`) under a lock, and the guard
 refuses a folder inside `DOCUMENT_ROOT`. The checkpoint folder is beside the database, never in the web root, and is not served.
@@ -179,6 +180,9 @@ sales a domain witnessed as closed (`ledger_closed_sales`). What the checkpoint 
 
 ## 9. What a same-account checkpoint does not do
 
+Approvals given as a roster domain are in the same folder (`approve` lines), so the same limit applies to them: a database and a checkpoint
+folder both put back from before an approval lose it, and that domain could then sign a second entry for the index.
+
 The checkpoint is on the same hosting account as the database. It stops an accident, a stale backup restored by mistake and a lazy
 restore. It does not stop an operator who can put back both the database and the checkpoint folder: the test "lost checkpoint
 folder" shows exactly that, and the coin simply adopts the old head. The same holds for a host that snapshots the whole account.
@@ -223,5 +227,6 @@ step that closes this, and is a design decision for the operator rather than a c
 php test/chain-labs-rollback.php          # the guard in the library: rollback, crash, conflict, corruption, recovery, multi authority
 node test/chain-labs-rollback-http.js     # the same against the real endpoint and a killed server
 php test/chain-labs-rollback-purchase.php # sales under way when a database is put back
+php test/chain-labs-approvals.php         # approvals kept across a restored database (docs/chain-labs-approvals.md)
 node test/chain-labs-wallet.js            # includes the wallet's kept heads and its refusal to trust a fork
 ```
