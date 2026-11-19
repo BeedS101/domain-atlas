@@ -5006,6 +5006,132 @@ const AtlasWallet = (() => {
     return decryptAtRestAndMigrate(identity, 'recentWorlds', (atlasRecentWorlds || {})[identity.publicKey], [], (v) => saveRecentWorlds(identity.publicKey, v));
   }
 
+  // ---------- status message history ----------
+  //
+  // The viewer's top bar shows one short status message at a time and replaces it with the next. This keeps the last
+  // STATUS_HISTORY_LIMIT of them, per identity, so a message that has already been replaced can still be read when
+  // something goes wrong. The viewer reports every message it shows through one hook (recordStatusMessage); nothing
+  // else in the wallet writes here. It is a local diagnostic aid: it is not part of a backup or an export, and it is
+  // separate from the Activity Log, which records what moved in the wallet.
+  //
+  // Stored encrypted and per identity, like Recent Worlds. While the wallet is locked there is no identity to store
+  // for, so nothing is stored (the viewer keeps those messages for the page's lifetime only).
+  const STATUS_HISTORY_LIMIT = 20;
+  const STATUS_MESSAGE_MAX_CHARS = 300;
+  const STATUS_LEVELS = ['error', 'warning', 'success', 'info'];
+
+  // What may be kept of a status message. Messages are written for people, but some carry a server's reply or an
+  // error string, so anything shaped like a secret (tokens, keys, signatures, long opaque runs) is replaced, a JSON
+  // body is reduced to its error text, and the whole message is capped in length.
+  function sanitizeStatusMessage(text) {
+    let s = String(text === undefined || text === null ? '' : text).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const brace = s.indexOf('{');
+    if (brace !== -1) {
+      let shown = null;
+      try {
+        const parsed = JSON.parse(s.slice(brace));
+        const msg = parsed && typeof parsed === 'object' ? (typeof parsed.error === 'string' ? parsed.error : (typeof parsed.message === 'string' ? parsed.message : null)) : null;
+        if (msg) shown = msg;
+      } catch (err) { /* not a whole JSON document: fall through */ }
+      if (shown !== null) s = (s.slice(0, brace).trimEnd() + ' ' + shown).trim();
+      else if (s.length - brace > 40) s = (s.slice(0, brace).trimEnd() + ' [details hidden]').trim();
+    }
+    s = s
+      .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}/gi, '$1 [hidden]')
+      .replace(/\b(password|passphrase|secret|token|api[_-]?key|private[_-]?key|signature|proof|authorization)(["']?\s*[:=]\s*)(["']?)[^\s"',;]+/gi, '$1$2[hidden]')
+      .replace(/([?&](?:token|key|secret|sig|signature|code|password|auth)[^=&\s]*=)[^&\s]+/gi, '$1[hidden]')
+      .replace(/\beyJ[\w-]{5,}\.[\w-]{5,}(?:\.[\w-]*)?/g, '[hidden]')
+      .replace(/[A-Za-z0-9_-]{32,}/g, (run) => (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(run) ? run : '[hidden]'));
+    if (s.length > STATUS_MESSAGE_MAX_CHARS) s = s.slice(0, STATUS_MESSAGE_MAX_CHARS - 1).trimEnd() + '…';
+    return s;
+  }
+
+  // A best guess from the wording, for colouring and labelling only: 'error', 'warning', 'success' or 'info'.
+  function classifyStatusMessage(text) {
+    const s = String(text || '');
+    if (/\b(fail(?:ed|ure|s)?|could not|couldn't|can't|cannot|error|refus\w*|reject\w*|denied|invalid|unable|doesn't check out|does not check out|lost its connection|unreachable|timed out|not allowed|forbidden)\b/i.test(s)) return 'error';
+    if (/\b(cancell?ed|requires?|needs?|missing|try again|isn't|is not|not supported|unsupported|nothing is added|locked|expired|warning)\b/i.test(s)) return 'warning';
+    if (/^(picked it up|dropped|claimed|saved|sent|copied|done|deleted|added|removed|restored|unlocked|updated|joined|connected|in sync|switched)\b|\b(succeeded|successfully|completed)\b/i.test(s)) return 'success';
+    return 'info';
+  }
+
+  function statusEntryOf(value) {
+    if (!value || typeof value !== 'object' || typeof value.text !== 'string' || !value.text) return null;
+    const at = typeof value.at === 'string' && Number.isFinite(Date.parse(value.at)) ? value.at : null;
+    if (!at) return null;
+    return { at, level: STATUS_LEVELS.includes(value.level) ? value.level : 'info', text: value.text.slice(0, STATUS_MESSAGE_MAX_CHARS) };
+  }
+
+  async function readStatusHistory(identity) {
+    const { atlasStatusHistory } = await chrome.storage.local.get('atlasStatusHistory');
+    const stored = perOwnerMap(atlasStatusHistory)[identity.publicKey];
+    const list = await decryptAtRest(identity, 'statusHistory', stored, []);
+    return (Array.isArray(list) ? list : []).map(statusEntryOf).filter(Boolean).slice(0, STATUS_HISTORY_LIMIT);
+  }
+
+  async function writeStatusHistory(identity, list) {
+    const { atlasStatusHistory } = await chrome.storage.local.get('atlasStatusHistory');
+    const all = perOwnerMap(atlasStatusHistory);
+    if (list.length) all[identity.publicKey] = await encryptAtRestFor(identity, identity.publicKey, 'statusHistory', list);
+    else delete all[identity.publicKey];
+    await chrome.storage.local.set({ atlasStatusHistory: all });
+  }
+
+  // Writes are applied one at a time, in the order they were reported.
+  let statusHistoryQueue = Promise.resolve();
+  function queueStatusHistory(job) {
+    const run = statusHistoryQueue.then(job, job);
+    statusHistoryQueue = run.catch(() => {});
+    return run;
+  }
+
+  // Adds one message the status line showed, newest first, and drops the oldest beyond the limit. Resolves to the
+  // stored entry, or null when there was nothing to keep or no identity to keep it for. Never throws: a history that
+  // cannot be saved must not change how the action that produced the message went.
+  function recordStatusMessage(text, at) {
+    const when = at && typeof at.getTime === 'function' && Number.isFinite(at.getTime()) ? at : new Date();
+    return queueStatusHistory(async () => {
+      try {
+        const clean = sanitizeStatusMessage(text);
+        if (!clean) return null;
+        const identity = await getIdentity();
+        if (!identity) return null;
+        const entry = { at: when.toISOString(), level: classifyStatusMessage(clean), text: clean };
+        const list = await readStatusHistory(identity);
+        list.unshift(entry);
+        await writeStatusHistory(identity, list.slice(0, STATUS_HISTORY_LIMIT));
+        return entry;
+      } catch (err) {
+        return null;
+      }
+    });
+  }
+
+  // The active identity's messages, newest first (empty while locked).
+  function getStatusHistory() {
+    return queueStatusHistory(async () => {
+      try {
+        const identity = await getIdentity();
+        return identity ? await readStatusHistory(identity) : [];
+      } catch (err) {
+        return [];
+      }
+    });
+  }
+
+  // Forgets the active identity's messages only.
+  function clearStatusHistory() {
+    return queueStatusHistory(async () => {
+      const identity = await getIdentity();
+      if (identity) await writeStatusHistory(identity, []);
+    });
+  }
+
+  // The plain-text form used by Copy log: one line per message, newest first, with its UTC timestamp.
+  function statusHistoryAsText(list) {
+    return (list || []).map((e) => e.at + ' [' + e.level + '] ' + e.text).join('\n');
+  }
+
   // ---------- friends (#67) ----------
   //
   // A deliberate, user-curated list of other people's Atlas identities —
@@ -12184,6 +12310,7 @@ const AtlasWallet = (() => {
     submitTradeIntent, tradeAssetSnapshot, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,
     getSubmittedTrades, deleteSubmittedTrade, refreshSubmittedTrades, reconcileSubmittedTradesFromMail, getTradingStationMemberships,
     recordWorldVisit, getRecentWorlds,
+    recordStatusMessage, getStatusHistory, clearStatusHistory, statusHistoryAsText, sanitizeStatusMessage, classifyStatusMessage, STATUS_HISTORY_LIMIT,
     getCharacterScale, getSavedCharacterScale, setCharacterScale,
     getCameraDistance, setCameraDistance,
     getWalletSoundEnabled, setWalletSoundEnabled,

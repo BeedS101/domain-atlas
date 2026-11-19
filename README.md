@@ -792,6 +792,15 @@ block list and friends-only mode apply as for any mail. Verified by
 `test/manual-federated-friend-request.js` (Node, two issuers) and
 `test/manual-federated-friend-request-php.js` (two PHP bundles).
 
+**Recent status messages.** The status line in the top bar (the "Picked it up." / "Drop failed: ..." text beside the
+Wallet button) is also a button: click it, or press Enter or Space on it, to open the last 20 messages, newest first,
+each with a time and an Error, Warning, Success or Info label (a guess from the wording). Copy log copies them as plain
+text with UTC timestamps; Clear history forgets this identity's messages and nothing else. The list is kept in extension
+storage, encrypted and separately for each identity, and is not part of a backup or the Activity Log. Keys, tokens,
+passwords and request bodies are replaced before a message is stored. While the wallet is locked nothing is stored; those
+messages are shown only until the page is closed. Tests: `test/wallet-status-history.js` (storage) and
+`test/wallet-status-history-ui.js` (`xvfb-run -a`, the dropdown).
+
 **Favorites bookmark a domain+world**, independent of the auto-pruned
 Recent Worlds list on the main Wallet screen (Favorites are explicit
 add/remove only, and you control their order). "Favorite this domain"
