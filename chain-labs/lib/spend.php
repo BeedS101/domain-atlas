@@ -10,6 +10,9 @@ const SPEND_CHALLENGE_SECONDS = 120;
 const SPEND_CHALLENGE_FUTURE_SECONDS = 5;
 const SPEND_CHALLENGE_KEEP_SECONDS = 10;
 const SPEND_HOLDINGS_MAX_COINS = 50;
+// Until this second (1 February 2027, 00:00 UTC) a lookup that sends no nonce is answered in the form that is not tied to the
+// request (v1). From it, every lookup must carry a nonce.
+const SPEND_HOLDINGS_LEGACY_UNTIL = 1801440000;
 
 // The digest that names a proposal: the canonical payload the owner signed.
 // Reasons that close a proposal for good, as opposed to failures that leave it pending for a retry.
@@ -213,12 +216,25 @@ function spend_challenge_consume(PDO $db, string $domainPrivatePem, string $doma
     }
 }
 
+// A nonce is 32 lowercase hex characters, chosen by the wallet for each lookup. A signed lookup uses its challenge as the nonce.
+function spend_nonce_valid(mixed $nonce): bool
+{
+    return is_string($nonce) && preg_match('/^[a-f0-9]{32}$/D', $nonce) === 1;
+}
+
 // $request is null for a plain lookup, which sees public coins only, or the owner's signed request
 // ['payload' => ['type' => 'atlas.ledger.holdings.request', 'v' => 1, 'domain', 'key', 'challenge'], 'signature'], which
 // also sees the owner's private coins. Returns ['statement', 'signature'], the statement signed by the domain.
-function spend_holdings(PDO $db, string $domain, string $domainPrivatePem, string $key, ?array $request, int $now): array
+//
+// With a $nonce the statement is v2 and carries it inside the signed part, so it answers that lookup and no other: a copy
+// captured earlier does not verify against a later nonce. A signed lookup must send its challenge as the nonce; that is checked
+// before the challenge is used, so a refused lookup does not use it up. Without a nonce the statement is v1, which is
+// answered only until SPEND_HOLDINGS_LEGACY_UNTIL.
+function spend_holdings(PDO $db, string $domain, string $domainPrivatePem, string $key, ?array $request, int $now, mixed $nonce = null): array
 {
     if (!ledger_valid_owner_key($key)) ledger_fail('bad-key', 'the key is not a wallet public key');
+    if ($nonce !== null && !spend_nonce_valid($nonce)) ledger_fail('bad-nonce', 'the nonce must be 32 lowercase hex characters');
+    if ($nonce === null && $now >= SPEND_HOLDINGS_LEGACY_UNTIL) ledger_fail('nonce-required', 'a holdings lookup must carry a nonce');
     $proven = false;
     if ($request !== null) {
         $payload = $request['payload'] ?? null;
@@ -228,6 +244,7 @@ function spend_holdings(PDO $db, string $domain, string $domainPrivatePem, strin
         if ($fields !== ['challenge', 'domain', 'key', 'type', 'v']) ledger_fail('bad-request', 'the request has the wrong fields');
         if ($payload['type'] !== 'atlas.ledger.holdings.request' || $payload['v'] !== 1 || $payload['domain'] !== $domain || $payload['key'] !== $key) ledger_fail('bad-request', 'the request is not for this domain and key');
         if (!is_string($payload['challenge']) || !preg_match('/^[a-f0-9]{32}$/D', $payload['challenge'])) ledger_fail('bad-challenge', 'the challenge is malformed');
+        if ($nonce !== null && $nonce !== $payload['challenge']) ledger_fail('nonce-mismatch', 'the nonce of a signed lookup must be its challenge');
         if (!ledger_owner_verify(ledger_canonical($payload), $key, $request['signature'] ?? null)) ledger_fail('bad-signature', 'the request signature does not verify');
         spend_challenge_consume($db, $domainPrivatePem, $domain, $payload['challenge'], $now);
         $proven = true;
@@ -247,16 +264,26 @@ function spend_holdings(PDO $db, string $domain, string $domainPrivatePem, strin
         if (count($coins) >= SPEND_HOLDINGS_MAX_COINS) break;
     }
     usort($coins, fn($a, $b) => [$a['symbol'], $a['coinId']] <=> [$b['symbol'], $b['coinId']]);
-    $statement = ['type' => 'atlas.ledger.holdings', 'v' => 1, 'domain' => $domain, 'key' => $key, 'asOf' => gmdate('Y-m-d\TH:i:s\Z', $now), 'proven' => $proven, 'coins' => $coins];
+    $statement = ['type' => 'atlas.ledger.holdings', 'v' => $nonce === null ? 1 : 2, 'domain' => $domain, 'key' => $key, 'asOf' => gmdate('Y-m-d\TH:i:s\Z', $now), 'proven' => $proven, 'coins' => $coins];
+    if ($nonce !== null) $statement['nonce'] = $nonce;
     return ['statement' => $statement, 'signature' => ledger_sign($domainPrivatePem, ledger_canonical($statement))];
 }
 
 // What a wallet does with the answer: the statement is signed by the pinned domain key, names the domain and the key it
-// asked about, is not older than $maxAge seconds and is not dated in the future.
-function spend_verify_holdings(array $answer, string $domainPublicPem, string $domain, string $key, int $now, int $maxAge = 300): bool
+// asked about, is not older than $maxAge seconds and is not dated in the future. A $nonce means the wallet sent one, and only a
+// v2 statement carrying exactly that nonce is accepted; without one only a v1 statement is, and only before the compatibility
+// period ends.
+function spend_verify_holdings(array $answer, string $domainPublicPem, string $domain, string $key, int $now, int $maxAge = 300, ?string $nonce = null): bool
 {
     $statement = $answer['statement'] ?? null;
     if (!is_array($statement) || ($statement['type'] ?? null) !== 'atlas.ledger.holdings' || ($statement['domain'] ?? null) !== $domain || ($statement['key'] ?? null) !== $key) return false;
+    $fields = array_keys($statement);
+    sort($fields);
+    if ($nonce === null) {
+        if (($statement['v'] ?? null) !== 1 || $fields !== ['asOf', 'coins', 'domain', 'key', 'proven', 'type', 'v'] || $now >= SPEND_HOLDINGS_LEGACY_UNTIL) return false;
+    } elseif (($statement['v'] ?? null) !== 2 || $fields !== ['asOf', 'coins', 'domain', 'key', 'nonce', 'proven', 'type', 'v'] || ($statement['nonce'] ?? null) !== $nonce) {
+        return false;
+    }
     if (!ledger_verify($domainPublicPem, ledger_canonical($statement), $answer['signature'] ?? null)) return false;
     $at = strtotime((string) ($statement['asOf'] ?? ''));
     return $at !== false && $at <= $now + LEDGER_CLOCK_SKEW_SECONDS && $now - $at <= $maxAge;

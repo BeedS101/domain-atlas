@@ -70,6 +70,11 @@ challenge costing nothing to issue and nothing to hold, and leaves a request-per
 which can see the real client address (for example `limit_req` in nginx or a rule in the host's firewall). Nothing in the ledger
 depends on that limit being set.
 
+## The answer
+
+The challenge also serves as the nonce of the lookup: the domain signs it into the statement it returns, and the wallet accepts only a
+statement that carries the nonce it sent (`docs/chain-labs-holdings-binding.md`).
+
 ## Upgrading
 
 No wallet, key, table or request format changes. The old table is used as it is, only for redeemed challenges. A challenge a wallet

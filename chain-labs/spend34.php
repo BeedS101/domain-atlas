@@ -57,7 +57,7 @@ try {
 }
 
 const SPEND34_STATUS = [
-    'bad-signature' => 401, 'bad-challenge' => 401, 'unknown-coin' => 404, 'unknown-proposal' => 404, 'unknown-entry' => 404,
+    'bad-signature' => 401, 'bad-challenge' => 401, 'bad-nonce' => 400, 'nonce-mismatch' => 400, 'nonce-required' => 400, 'unknown-coin' => 404, 'unknown-proposal' => 404, 'unknown-entry' => 404,
     'stale' => 409, 'replayed' => 409, 'pending-exists' => 409, 'insufficient' => 409, 'closed' => 409, 'not-active' => 409, 'expired' => 409,
     'wrong-index' => 409, 'wrong-prev' => 409, 'key-exists' => 409, 'busy' => 429, 'needs-approvals' => 202,
     'unknown-peer' => 403, 'not-in-roster' => 403, 'not-authority' => 409, 'equivocation' => 409, 'exists' => 409, 'not-pending' => 409,
@@ -190,7 +190,8 @@ try {
         $m = body34();
         $request = $m['request'] ?? null;
         if ($request !== null && !is_array($request)) reply34(400, ['ok' => false, 'error' => 'Invalid request']);
-        reply34(200, ['ok' => true] + spend_holdings($db, $host, $domainPrivate, (string) ($m['key'] ?? ''), $request, $now));
+        $nonce = $m['nonce'] ?? null;
+        reply34(200, ['ok' => true] + spend_holdings($db, $host, $domainPrivate, (string) ($m['key'] ?? ''), $request, $now, $nonce));
     }
     if ($action === 'propose') {
         $m = body34();

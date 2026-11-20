@@ -111,7 +111,8 @@ function call(n, file, method, query, body) {
   });
 }
 const get = (n, q) => call(n, 'spend34', 'GET', q);
-const post = (n, q, body) => call(n, 'spend34', 'POST', q, body);
+const { withNonce } = require('./support/holdings-nonce');
+const post = (n, q, body) => call(n, 'spend34', 'POST', q, withNonce(q, body));
 const op = (n, action, body) => post(n, 'action=' + action, { adminToken: n.token, ...body });
 const createCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: n.token, ...extra });
 const NOW = () => Math.floor(Date.now() / 1000);

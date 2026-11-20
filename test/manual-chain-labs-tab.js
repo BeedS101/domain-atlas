@@ -31,12 +31,22 @@ const { A, B, nodes } = S;
     let breakReceipts = false;
     // While set, a transfer request is carried out by the domain but its answer never arrives.
     let dropAnswers = false;
+    // While set, holdings lookups reach the domain without their nonce, the way a server that has not been updated sees them, so it
+    // answers in the earlier form. Only meaningful before that form is switched off.
+    let stripNonce = false;
     await w.context.route(/^https:\/\/[abc]\.example\/chain-labs\//, async (route) => {
       const u = new URL(route.request().url());
       const n = nodes[u.hostname];
       const headers = { ...route.request().headers(), host: u.hostname };
       try {
-        const res = await route.fetch({ url: 'http://127.0.0.1:' + n.port + u.pathname.replace(/^\/chain-labs/, '') + u.search, headers });
+        const options = { url: 'http://127.0.0.1:' + n.port + u.pathname.replace(/^\/chain-labs/, '') + u.search, headers };
+        if (stripNonce && /action=holdings/.test(u.search) && route.request().method() === 'POST') {
+          const sent = JSON.parse(route.request().postData() || '{}');
+          delete sent.nonce;
+          options.postData = JSON.stringify(sent);
+          delete headers['content-length'];
+        }
+        const res = await route.fetch(options);
         if (dropAnswers && /action=propose/.test(u.search)) {
           await route.abort('timedout');
           return;
@@ -262,16 +272,57 @@ const { A, B, nodes } = S;
 
     console.log('--- the backup ---');
     const seed = created.seedPhrase;
+    const pinOf = (list, domain) => { const d = list.find((x) => x.domain === domain); return d && d.holdings ? d.holdings.v : null; };
+    const pinned = await page.evaluate(() => AtlasWallet.getChainLabs().domains());
+    check('each domain that answered with a statement tied to its request is recorded as doing so, and the card shows no older-form note', pinOf(pinned, A) === 2 && pinOf(pinned, B) === 2 && (await page.evaluate(() => AtlasWallet.getChainLabs().rows())).domains.every((d) => d.legacy === false) && !/older holdings form/.test(await section()), pinned.map((d) => d.holdings));
     const backup = await w.wallet((a) => AtlasWallet.exportFullBackup(a.pw, a.seed), { pw: 'chain-labs-tab-password', seed });
     await w.wallet(async () => { await chrome.storage.local.clear(); await chrome.storage.session.clear(); });
     await w.wallet((a) => AtlasWallet.importFullBackup(a.file, a.pw, a.seed), { file: backup, pw: 'chain-labs-tab-password', seed });
     const restored = await page.evaluate(() => AtlasWallet.getChainLabs().domains());
     check('a restored wallet has the same domains with their pinned keys', restored.map((d) => d.domain).sort().join() === A + ',' + B && restored.every((d) => /BEGIN PUBLIC KEY/.test(d.key)), restored.map((d) => d.domain));
+    check('and the record that each domain answers in the request-tied form is in the backup, so a restored wallet still refuses the earlier form', pinOf(restored, A) === 2 && pinOf(restored, B) === 2, restored.map((d) => d.holdings));
     const rows = await page.evaluate(() => AtlasWallet.getChainLabs().rows());
     check('and the answers cached before are not carried: it asks again', rows.domains.every((d) => d.never));
     await page.evaluate(() => AtlasWallet.getChainLabs().refresh());
     const again = await page.evaluate(() => AtlasWallet.getChainLabs().rows());
     check('after asking, the restored wallet finds its coins again', again.domains.find((d) => d.domain === A).coins.map((c) => c.symbol).sort().join() === 'PRV,SGL', again.domains.map((d) => [d.domain, d.problem, d.coins.length]));
+
+    if (Date.now() < Date.UTC(2027, 1, 1)) {
+      stripNonce = true;
+      const refused = await page.evaluate(() => AtlasWallet.getChainLabs().lookup('a.example'));
+      stripNonce = false;
+      const keptRows = await page.evaluate(() => AtlasWallet.getChainLabs().rows());
+      const keptA = keptRows.domains.find((d) => d.domain === A);
+      check('a restored wallet refuses a domain that goes back to the earlier form, says why, and keeps its last answer', refused.ok === false && refused.reason === 'downgrade' && /redeploy/.test(keptA.problem) && keptA.coins.length === 2, [refused.reason, keptA.problem]);
+      check('nothing it pinned for that domain was removed', pinOf(await page.evaluate(() => AtlasWallet.getChainLabs().domains()), A) === 2);
+      await page.evaluate(() => AtlasWallet.getChainLabs().lookup('a.example'));
+      check('and the next lookup, once the domain answers properly again, works with nothing to reset', (await page.evaluate(() => AtlasWallet.getChainLabs().rows())).domains.find((d) => d.domain === A).problem === null);
+      // A wallet that has never seen this domain answer in the request-tied form: the mark is taken off the stored record.
+      await page.evaluate(async (owner) => {
+        const g = await chrome.storage.local.get('atlasChainLabsDomains');
+        const all = g.atlasChainLabsDomains || {};
+        all[owner] = (all[owner] || []).map((d) => { const c = Object.assign({}, d); delete c.holdings; return c; });
+        await chrome.storage.local.set({ atlasChainLabsDomains: all });
+      }, w.pub);
+      stripNonce = true;
+      await page.evaluate(() => AtlasWallet.getChainLabs().lookup('a.example'));
+      await page.reload();
+      await page.waitForFunction(() => typeof routeWalletScreen === 'function' && typeof AtlasWallet !== 'undefined', null, { timeout: 15000 });
+      await page.evaluate(() => routeWalletScreen());
+      await page.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 10000 });
+      await openLedger();
+      await waitFor(/older holdings form/);
+      check('a domain still answering in the earlier form is read, and the card says until when', /still answers in the older holdings form\. It works until 31 January 2027/.test(await section()) && (await page.evaluate(() => AtlasWallet.getChainLabs().rows())).domains.find((d) => d.domain === A).coins.length === 2);
+      stripNonce = false;
+      await page.evaluate(() => AtlasWallet.getChainLabs().lookup('a.example'));
+      await page.reload();
+      await page.waitForFunction(() => typeof routeWalletScreen === 'function' && typeof AtlasWallet !== 'undefined', null, { timeout: 15000 });
+      await page.evaluate(() => routeWalletScreen());
+      await page.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 10000 });
+      await openLedger();
+      await page.waitForFunction(() => { const t = document.getElementById('chainLabsSection').innerText; return /a\.example says you hold/.test(t) && !/older holdings form/.test(t); }, null, { timeout: 15000 }).catch(() => null);
+      check('once it answers in the request-tied form the note goes and the mark is recorded again', !/older holdings form/.test(await section()) && pinOf(await page.evaluate(() => AtlasWallet.getChainLabs().domains()), A) === 2, [(await section()).includes("older holdings form"), await page.evaluate(() => AtlasWallet.getChainLabs().domains().then((l) => l.map((d) => [d.domain, d.holdings])))]);
+    }
 
     console.log('--- removing a domain ---');
     await page.reload();

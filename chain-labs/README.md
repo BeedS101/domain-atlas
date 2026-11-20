@@ -193,6 +193,13 @@ endpoints, including the refusal and the unlimited claims.
 the permanent sale closures, one status per coin and a non-zero exit on a problem. It is read only and never repairs anything. How to run it,
 what each check means and a cPanel cron example with a log and an email on failure are in `docs/chain-labs-integrity-check.md`.
 
+## Holdings statements
+
+A holdings lookup carries a nonce, which the domain signs into its answer so the answer cannot be replayed for another lookup. Servers
+answer a lookup with no nonce in the older form until 1 February 2027 00:00 UTC and refuse it after that, and the wallet stops reading the
+older form on the same date. Deploy `spend34.php`, `lib/spend.php` and `SOURCE.sha256` before that date; `docs/chain-labs-holdings-binding.md`
+has the message format, the rollout order and what to do if a server is rolled back.
+
 ## Provenance
 
 The PHP files were imported from the deployed files. `SOURCE.sha256` records the SHA-256 of each file as it stands (PHP
@@ -214,6 +221,7 @@ its line in `SOURCE.sha256`.
     php test/chain-labs-purchase.php
     node test/chain-labs-purchase-http.js
     node test/chain-labs-wallet.js
+    node test/chain-labs-holdings-binding.js
     node test/chain-labs-scan-http.js
     node test/chain-labs-policy-http.js
     node test/chain-labs-open-resume.js

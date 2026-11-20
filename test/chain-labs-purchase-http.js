@@ -122,7 +122,8 @@ function call(n, file, method, query, body) {
   });
 }
 const get = (n, q) => call(n, 'spend34', 'GET', q);
-const post = (n, q, body) => call(n, 'spend34', 'POST', q, body);
+const { withNonce } = require('./support/holdings-nonce');
+const post = (n, q, body) => call(n, 'spend34', 'POST', q, withNonce(q, body));
 // A coin's purchase policy lives in its registry row (the Coin Creation Studio puts it there) and opening uses only that. Tests that give a
 // ready-made ledger policy at open time register it the way the Studio would have, then open without one.
 const { execFileSync: execPolicy } = require('child_process');

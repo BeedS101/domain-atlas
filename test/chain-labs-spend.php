@@ -365,6 +365,45 @@ spend_challenge_consume($left, $dom['priv'], $domain, spend_challenge_issue($dom
 t((int) $left->query('SELECT COUNT(*) FROM ledger_challenges')->fetchColumn() === 1, 'and dropped once they have expired, so nothing accumulates after a burst');
 $left = $right = null;
 @unlink($file);
+
+echo "\n== holdings statements bound to the request that asked for them\n";
+$nonceA = bin2hex(random_bytes(16));
+$nonceB = bin2hex(random_bytes(16));
+$bound = spend_holdings($hdb, $domain, $dom['priv'], $h['key'], null, $NOW, $nonceA);
+$bs = $bound['statement'];
+t(($bs['v'] ?? null) === 2 && ($bs['nonce'] ?? null) === $nonceA && $bs['proven'] === false, 'a public lookup with a nonce is answered in the bound form carrying that nonce', $bs);
+$sorted = array_keys($bs); sort($sorted);
+t($sorted === ['asOf', 'coins', 'domain', 'key', 'nonce', 'proven', 'type', 'v'], 'with exactly the fields of the form', $sorted);
+t(spend_verify_holdings($bound, $dom['pub'], $domain, $h['key'], $NOW, 300, $nonceA), 'it verifies against the nonce the wallet sent');
+t(!spend_verify_holdings($bound, $dom['pub'], $domain, $h['key'], $NOW, 300, $nonceB), 'and not against another nonce: a captured statement does not answer a new request');
+t(!spend_verify_holdings($bound, $dom['pub'], $domain, $h['key'], $NOW), 'a bound statement is not accepted by a check that names no nonce');
+$edited = $bound; $edited['statement']['nonce'] = $nonceB;
+t(!spend_verify_holdings($edited, $dom['pub'], $domain, $h['key'], $NOW, 300, $nonceB), 'a nonce edited after signing fails the signature');
+$edited = $bound; $edited['statement']['coins'][0]['units'] = '1';
+t(!spend_verify_holdings($edited, $dom['pub'], $domain, $h['key'], $NOW, 300, $nonceA), 'so does an edited balance');
+$old = spend_holdings($hdb, $domain, $dom['priv'], $h['key'], null, $NOW);
+t($old['statement']['v'] === 1 && !array_key_exists('nonce', $old['statement']) && spend_verify_holdings($old, $dom['pub'], $domain, $h['key'], $NOW), 'a request that names no nonce is answered in the old form, until the end of the compatibility period');
+t(!spend_verify_holdings($old, $dom['pub'], $domain, $h['key'], $NOW, 300, $nonceA), 'which is not accepted where a nonce was sent');
+foreach (['short' => str_repeat('a', 31), 'long' => str_repeat('a', 33), 'upper' => strtoupper($nonceA), 'not hex' => str_repeat('z', 32), 'empty' => ''] as $why => $bad) {
+    t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], null, $NOW, $bad), 'bad-nonce'), 'refused: a nonce that is ' . $why);
+}
+$ch2 = spend_challenge_issue($dom['priv'], $domain, $NOW);
+$signedBound = spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ch2['challenge'], $h), $NOW, $ch2['challenge']);
+t($signedBound['statement']['v'] === 2 && $signedBound['statement']['nonce'] === $ch2['challenge'] && $signedBound['statement']['proven'] === true && spend_verify_holdings($signedBound, $dom['pub'], $domain, $h['key'], $NOW, 300, $ch2['challenge']), 'a key-signed lookup carries the challenge it redeemed, and verifies against it');
+t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ch2['challenge'], $h), $NOW, $ch2['challenge']), 'bad-challenge'), 'the challenge is still single use');
+$ch3 = spend_challenge_issue($dom['priv'], $domain, $NOW);
+t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ch3['challenge'], $h), $NOW, $nonceA), 'nonce-mismatch'), 'a nonce that is not the signed challenge is refused');
+t(spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ch3['challenge'], $h), $NOW, $ch3['challenge'])['statement']['proven'] === true, 'and that refusal does not use the challenge up');
+// The end of the compatibility period: 1 February 2027, 00:00 UTC.
+t(SPEND_HOLDINGS_LEGACY_UNTIL === gmmktime(0, 0, 0, 2, 1, 2027), 'the old form ends on 1 February 2027 at 00:00 UTC');
+$until = SPEND_HOLDINGS_LEGACY_UNTIL;
+t(spend_holdings($hdb, $domain, $dom['priv'], $h['key'], null, $until - 1)['statement']['v'] === 1, 'one second before it, the old form is still answered');
+t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], null, $until), 'nonce-required'), 'from that second a lookup without a nonce is refused');
+$ch4 = spend_challenge_issue($dom['priv'], $domain, $until);
+t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ch4['challenge'], $h), $until), 'nonce-required'), 'so is a key-signed one, before its challenge is used');
+t(spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ch4['challenge'], $h), $until, $ch4['challenge'])['statement']['v'] === 2, 'while the bound form is answered as before');
+t(!spend_verify_holdings(spend_holdings($hdb, $domain, $dom['priv'], $h['key'], null, $until - 1), $dom['pub'], $domain, $h['key'], $until, 300), 'and a statement in the old form does not verify once the period has ended');
+
 $direct = [];
 $port = random_int(20000, 40000);
 $server = proc_open([PHP_BINARY, '-S', '127.0.0.1:' . $port, '-t', __DIR__ . '/../chain-labs'], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $sp);

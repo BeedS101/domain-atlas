@@ -43,6 +43,10 @@
   const TIMEOUT_MS = 8000;
   const STATEMENT_MAX_AGE_S = 300;
   const CLOCK_SKEW_S = 120;
+  // Holdings statements that are not tied to the request that asked for them (v1) are read only before this moment, 1 February 2027
+  // 00:00 UTC, and never from a domain that has answered with a statement that is tied to its request (v2).
+  const LEGACY_UNTIL_MS = Date.UTC(2027, 1, 1);
+  const LEGACY_UNTIL_TEXT = '31 January 2027';
   const STALE_AFTER_MS = 30 * 60 * 1000;
   const MAX_UNITS_DIGITS = 13;
   const MAX_PENDING = 20;
@@ -223,16 +227,32 @@
     return { coinId: c.coinId, symbol: c.symbol, decimals: c.decimals, visibility: c.visibility, mode: c.mode, threshold: c.threshold, roster: c.roster, state: c.state, units: c.units, seq: c.seq, headIndex: c.headIndex, headHash: c.headHash };
   }
 
-  // The statement a domain signed: for this domain and this key, recent, in the form this wallet reads. `proven` says whether
+  const NONCE_RE = /^[a-f0-9]{32}$/;
+  const STATEMENT_KEYS_V1 = 'asOf,coins,domain,key,proven,type,v';
+  const STATEMENT_KEYS_V2 = 'asOf,coins,domain,key,nonce,proven,type,v';
+
+  // The statement a domain signed: for this domain and this key, recent, in a form this wallet reads. `proven` says whether
   // the domain saw a request this key signed, so a public lookup can never show private coins as proven.
-  async function checkHoldings(answer, pem, domain, key, nowMs, wantProven) {
+  //
+  // `expect` is what the wallet knows about the request: `nonce`, the one it sent, and `pinned`, whether this domain has answered with
+  // a statement tied to its request before. A v2 statement is accepted only with exactly the nonce that was sent, which the domain
+  // signed, so an answer captured earlier cannot answer a later request. A v1 statement is not tied to anything: it is read only from
+  // a domain not known to answer in v2 and only before LEGACY_UNTIL_MS, and the result says so (`bound: false`).
+  async function checkHoldings(answer, pem, domain, key, nowMs, wantProven, expect) {
     if (!isObject(answer) || !isObject(answer.statement)) return { ok: false, reason: 'unreadable' };
     const s = answer.statement;
-    if (Object.keys(s).sort().join(',') !== 'asOf,coins,domain,key,proven,type,v') return { ok: false, reason: 'unreadable' };
-    if (s.type !== 'atlas.ledger.holdings' || s.v !== 1 || s.domain !== domain || s.key !== key || s.proven !== wantProven) return { ok: false, reason: 'not-for-this-request' };
+    const want = isObject(expect) ? expect : {};
+    const shape = Object.keys(s).sort().join(',');
+    const bound = s.v === 2;
+    if (bound ? shape !== STATEMENT_KEYS_V2 : shape !== STATEMENT_KEYS_V1) return { ok: false, reason: 'unreadable' };
+    if (bound && (typeof s.nonce !== 'string' || !NONCE_RE.test(s.nonce))) return { ok: false, reason: 'unreadable' };
+    if (s.type !== 'atlas.ledger.holdings' || (s.v !== 1 && s.v !== 2) || s.domain !== domain || s.key !== key || s.proven !== wantProven) return { ok: false, reason: 'not-for-this-request' };
+    if (bound && s.nonce !== want.nonce) return { ok: false, reason: 'not-for-this-request' };
     let text;
     try { text = canonical(s); } catch (err) { return { ok: false, reason: 'unreadable' }; }
     if (!await verifyDomainSignature(pem, text, answer.signature)) return { ok: false, reason: 'bad-signature' };
+    if (!bound && want.pinned === true) return { ok: false, reason: 'downgrade' };
+    if (!bound && nowMs >= LEGACY_UNTIL_MS) return { ok: false, reason: 'legacy-ended' };
     const at = typeof s.asOf === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(s.asOf) ? Date.parse(s.asOf) : NaN;
     if (Number.isNaN(at)) return { ok: false, reason: 'unreadable' };
     if (at > nowMs + CLOCK_SKEW_S * 1000) return { ok: false, reason: 'clock' };
@@ -240,14 +260,16 @@
     if (!Array.isArray(s.coins) || s.coins.length > MAX_COINS_PER_DOMAIN) return { ok: false, reason: 'unreadable' };
     const coins = [];
     for (const c of s.coins) { const read = readCoin(c); if (!read) return { ok: false, reason: 'unreadable' }; coins.push(read); }
-    return { ok: true, asOf: s.asOf, proven: s.proven, coins };
+    return { ok: true, asOf: s.asOf, proven: s.proven, coins, bound };
   }
 
   // ---------- what the person is told ----------
 
   const PROBLEMS = {
     'bad-signature': 'The answer was not signed by the key pinned for this domain, so it was ignored.',
-    'not-for-this-request': 'The answer was not for this domain and key, so it was ignored.',
+    'not-for-this-request': 'The answer was not for this domain, this key and this request, so it was ignored.',
+    downgrade: 'This domain has answered before with holdings that are tied to each request, and has now answered in the earlier form, which is not. The answer was ignored and nothing the wallet pinned for this domain was changed. If its server was rolled back, its operator should redeploy the current version; there is no need to remove the domain.',
+    'legacy-ended': 'This domain still answers in the earlier holdings form, which this wallet stopped accepting on 1 February 2027. Its operator needs to update the server.',
     unreadable: 'The answer was not in a form the wallet reads, so it was ignored.',
     clock: 'The answer\'s time does not match this device\'s clock. Check the clock and try again.',
     network: 'The domain did not answer.',
@@ -414,24 +436,42 @@
       });
     }
 
-    // One lookup. A private-coin lookup is signed over a fresh challenge from the domain; a wallet that cannot sign for a
-    // ledger asks for public coins only.
+    // One lookup. A private-coin lookup is signed over a fresh challenge from the domain, which it also sends as its nonce; a wallet that
+    // cannot sign for a ledger asks for public coins only, with a random nonce of its own. The statement that comes back must carry that
+    // nonce under the domain's signature. A domain that has once answered that way is recorded, and is not read in the earlier form
+    // again, whatever it answers or fails to answer later.
     async function lookupOnce(record, key, allowSigned) {
-      let body = { key };
+      const current = (await domains()).find((d) => d.domain === record.domain) || record;
+      const pinned = isObject(current.holdings) && current.holdings.v === 2;
+      let nonce = randomHex(16);
+      let body = { key, nonce };
       let signed = false;
       if (allowSigned) {
         const ch = await request(record.domain, 'POST', 'action=challenge', {});
-        if (ch.status !== 200 || !ch.json || !/^[a-f0-9]{32}$/.test(ch.json.challenge || '')) return { ok: false, reason: 'network' };
+        if (ch.status !== 200 || !ch.json || !NONCE_RE.test(ch.json.challenge || '')) return { ok: false, reason: 'network' };
         let envelope;
         try { envelope = await env.sign({ type: 'atlas.ledger.holdings.request', v: 1, domain: record.domain, key, challenge: ch.json.challenge }); } catch (err) { return { ok: false, reason: 'proof-unsupported' }; }
         if (!envelope || envelope.publicKey !== key || typeof envelope.signature !== 'string') return { ok: false, reason: 'proof-unsupported' };
-        body = { key, request: { payload: { type: 'atlas.ledger.holdings.request', v: 1, domain: record.domain, key, challenge: ch.json.challenge }, signature: envelope.signature } };
+        nonce = ch.json.challenge;
+        body = { key, nonce, request: { payload: { type: 'atlas.ledger.holdings.request', v: 1, domain: record.domain, key, challenge: ch.json.challenge }, signature: envelope.signature } };
         signed = true;
       }
       const r = await request(record.domain, 'POST', 'action=holdings', body);
       if (r.status !== 200 || !r.json || r.json.ok !== true) return { ok: false, reason: r.status === 0 ? 'network' : 'unreadable' };
-      const checked = await checkHoldings(r.json, record.key, record.domain, key, nowMs(), signed);
-      return checked.ok ? Object.assign({ signed }, checked) : checked;
+      const checked = await checkHoldings(r.json, record.key, record.domain, key, nowMs(), signed, { nonce, pinned });
+      if (!checked.ok) return checked;
+      if (checked.bound && !pinned) await pinHoldings(record.domain);
+      return Object.assign({ signed }, checked);
+    }
+
+    // Records that a domain answered with a statement tied to its request. The mark is part of the domain's record, so it is in the
+    // wallet backup, and nothing in the wallet removes it.
+    function pinHoldings(domain) {
+      return serial(async () => {
+        const list = await domains();
+        if (!list.some((d) => d.domain === domain && !(isObject(d.holdings) && d.holdings.v === 2))) return;
+        await env.saveDomains(list.map((d) => (d.domain === domain ? Object.assign({}, d, { holdings: { v: 2, since: iso(nowMs()) } }) : d)));
+      });
     }
 
     // ---------- the highest head a domain has shown ----------
@@ -575,7 +615,7 @@
         if (!(await domains()).some((d) => d.domain === record.domain)) return null;
         const prior = c.answers[record.domain];
         c.answers[record.domain] = got.ok
-          ? { asOf: got.asOf, proven: got.proven, coins: got.coins, fetchedAt: nowMs(), problem: null }
+          ? { asOf: got.asOf, proven: got.proven, coins: got.coins, fetchedAt: nowMs(), problem: null, bound: got.bound === true }
           : Object.assign({}, prior || { asOf: null, proven: false, coins: [], fetchedAt: null }, { problem: got.reason });
         return c.answers[record.domain];
       }, key).catch((err) => { if (err && err.code === 'identity-changed') return null; throw err; });
@@ -599,7 +639,9 @@
       const out = [];
       for (const d of list) {
         const a = c.answers[d.domain];
+        const pinned = isObject(d.holdings) && d.holdings.v === 2;
         out.push({
+          legacy: !pinned && !!a && a.fetchedAt !== null && a.bound === false, legacyUntil: LEGACY_UNTIL_TEXT,
           domain: d.domain, fingerprint: d.fingerprint || '', addedAt: d.addedAt, asOf: a ? a.asOf : null, fetchedAt: a ? a.fetchedAt : null, proven: !!(a && a.proven),
           problem: a && a.problem ? PROBLEMS[a.problem] || PROBLEMS.network : null, never: !a || a.fetchedAt === null,
           stale: !a || a.fetchedAt === null || nowMs() - a.fetchedAt > STALE_AFTER_MS || !!a.problem,
@@ -623,7 +665,7 @@
       if (verdicts && verdicts[coinId] && verdicts[coinId].kind === 'unproven') throw Object.assign(new Error(PROBLEMS['history-unproven']), { code: 'history-unproven' });
       const coin = got.coins.find((c) => c.coinId === coinId);
       if (!coin) throw Object.assign(new Error('This domain no longer lists that coin for you.'), { code: 'unknown-coin' });
-      return { coin, key };
+      return { coin, key, bound: got.bound === true };
     }
 
     // Checks a transfer before anything is signed and describes it for the person to approve.
@@ -895,7 +937,10 @@
       if (!payload || !Number.isFinite(expires) || !Number.isInteger(payload.baseSeq)) return { made: null, reason: 'the signed transfer cannot be read' };
       if (nowMs() < expires + UNSEEN_SETTLE_MS) return { made: null, reason: 'the domain has no record of it yet, and it could still arrive' };
       try {
-        const { coin } = await freshCoin(await recordFor(p.domain), p.coinId);
+        const { coin, bound } = await freshCoin(await recordFor(p.domain), p.coinId);
+        // A statement that is not tied to the request that asked for it could be an earlier one replayed, so it cannot show the
+        // account stood where it did because the transfer was never made.
+        if (!bound) return { made: null, reason: 'the domain answered in the old form, which is not tied to each request, so it cannot show that this transfer was never made' };
         if (coin.seq === payload.baseSeq) return { made: false };
         return { made: null, reason: 'the account has moved since, so the wallet cannot tell whether this transfer was made' };
       } catch (err) {

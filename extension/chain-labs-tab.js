@@ -89,6 +89,7 @@
     card.appendChild(el('div', { className: 'meta', textContent: bits.join(' · ') }));
     if (d.problem) card.appendChild(el('div', { className: 'ledger-problem', role: 'status', textContent: d.problem + (d.coins.length ? ' Showing its last answer.' : '') }));
     else if (d.stale && !d.never) card.appendChild(el('div', { className: 'meta', textContent: 'This answer is out of date.' }));
+    if (d.legacy) card.appendChild(el('div', { className: 'meta ledger-legacy', textContent: 'This domain still answers in the older holdings form. It works until ' + d.legacyUntil + ', then the domain needs to update its server.' }));
     if (!d.coins.length && !d.problem && !d.never) card.appendChild(el('div', { className: 'meta', textContent: 'This domain lists nothing for your key.' }));
     d.coins.forEach((c) => card.appendChild(coinLine(d, c)));
     const actions = el('div', { className: 'item-actions' });

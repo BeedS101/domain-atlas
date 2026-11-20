@@ -64,7 +64,8 @@ function call(file, method, query, body, opts = {}) {
   });
 }
 const get = (q, opts) => call('spend34', 'GET', q, undefined, opts);
-const post = (q, body, opts) => call('spend34', 'POST', q, body, opts);
+const { withNonce } = require('./support/holdings-nonce');
+const post = (q, body, opts) => call('spend34', 'POST', q, withNonce(q, body), opts);
 const op = (action, body) => post('action=' + action, { adminToken: TOKEN, ...body });
 const createCoin = (symbol, extra = {}) => call('coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: TOKEN, ...extra });
 const NOW = () => Math.floor(Date.now() / 1000);

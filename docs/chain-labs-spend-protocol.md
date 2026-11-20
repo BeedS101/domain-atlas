@@ -375,7 +375,8 @@ Nothing about the coins is stored in the wallet beyond the list and a cache of t
   signed by its own key, `atlas.ledger.holdings`, listing for each coin the coin id, symbol, visibility, authority
   mode, the balance in minor units, the account `seq`, the log head hash and index, and the time of the statement. The
   wallet verifies the signature against the key pinned from the domain's manifest and ignores any answer that fails,
-  is malformed or is larger than a fixed size.
+  is malformed or is larger than a fixed size. The request carries a nonce, which the domain signs into the statement
+  (`v: 2`), so an answer cannot be replayed for a later request (docs/chain-labs-holdings-binding.md).
 - For a public coin the request carries only the key. For a private coin the request is signed by the key over a fresh
   challenge from the domain (docs/chain-labs-challenges.md), and a domain returns private-coin results only to such a request. A domain answers a
   request that is not signed with its public coins only.
