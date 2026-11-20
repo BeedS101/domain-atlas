@@ -107,5 +107,29 @@ $_SERVER['REMOTE_ADDR'] = '203.0.113.88';
 t(refused(fn() => authorize('spend34/integrity', ['adminToken' => 'x'], $T)) === 'rate-limited', 'a token from the limited client is turned away (unchanged)');
 t(refused(fn() => authorize('spend34/integrity', signed($stranger, 'spend34/integrity', [], $T + 301), $T + 301)) === 'not-operator', 'and the count is for five minutes (unchanged)');
 
+echo "\n== what is kept stays small\n";
+$db = operator_db($private);
+$mine = static fn(string $c): int => (int) $db->query("SELECT COUNT(*) FROM operator_audit WHERE event = 'throttled' AND client = '" . $c . "'")->fetchColumn();
+$_SERVER['REMOTE_ADDR'] = '203.0.113.88';
+$lines = $mine(operator_client());
+t($lines === 1, 'a client over the limit has one throttled line in the audit table for the window, not one for every request', $lines);
+$last = $db->query("SELECT detail FROM operator_audit WHERE event = 'throttled' AND client = '" . operator_client() . "' ORDER BY id DESC LIMIT 1")->fetchColumn();
+t(is_string($last) && str_contains($last, 'since the last line'), 'and the next one says how many requests were turned away without a line', $last);
+$T2 = $NOW + 40000;
+for ($i = 0; $i < 5; $i++) { $b = signed($stranger, 'spend34/integrity', [], $T2); $b['proof']['publicKey'] = $root['key']; refused(fn() => authorize('spend34/integrity', $b, $T2)); }
+$b = signed($stranger, 'spend34/integrity', [], $T2 + 400); $b['proof']['publicKey'] = $root['key'];
+for ($i = 0; $i < OPERATOR_FAIL_LIMIT + 3; $i++) { $b = signed($stranger, 'spend34/integrity', [], $T2 + 400); $b['proof']['publicKey'] = $root['key']; refused(fn() => authorize('spend34/integrity', $b, $T2 + 400)); }
+$lines2 = $mine(operator_client());
+$second = (string) $db->query("SELECT detail FROM operator_audit WHERE event = 'throttled' AND client = '" . operator_client() . "' ORDER BY id DESC LIMIT 1")->fetchColumn();
+t($lines2 === 2 && preg_match('/: ([1-9]\d*)$/', $second) === 1, 'a later window writes one more line, which carries the count of those turned away in the one before', [$lines2, $second]);
+t(operator_audit_verify($db)['ok'] === true, 'the audit table is still a chain that checks');
+$db->exec('DELETE FROM operator_failures');
+for ($i = 0; $i < OPERATOR_FAILURE_ROWS_CAP + 50; $i++) $db->prepare('INSERT INTO operator_failures(client, at) VALUES(?, ?)')->execute(['filler' . ($i % 5000), $T2]);
+$_SERVER['REMOTE_ADDR'] = '198.51.100.7';
+$before = (int) $db->query('SELECT COUNT(*) FROM operator_failures')->fetchColumn();
+for ($i = 0; $i < 3; $i++) { $b = signed($stranger, 'spend34/integrity', [], $T2); $b['proof']['publicKey'] = $root['key']; refused(fn() => authorize('spend34/integrity', $b, $T2)); }
+t((int) $db->query('SELECT COUNT(*) FROM operator_failures')->fetchColumn() === $before, 'when the table of failures is full it takes no more rows, however many clients there are');
+t(authorize('spend34/integrity', signed($root, 'spend34/integrity', [], $T2), $T2)['via'] === 'signed', 'and a valid signature still gets through');
+
 echo "\n" . ($failures === 0 ? 'ALL ' . $total . ' CHAIN-LABS OPERATOR THROTTLE CHECKS PASSED' : $failures . ' of ' . $total . ' checks FAILED') . "\n";
 exit($failures === 0 ? 0 : 1);

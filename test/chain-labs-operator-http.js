@@ -143,6 +143,7 @@ const forgetFailures = (n) => require('child_process').execFileSync('php', ['-r'
       line(l2.status === 200, 'and an action still takes it', l2.json);
       const l3 = await call(a, 'spend34', 'POST', 'action=integrity', Object.assign(S.OP.legacyBody(a.token, { coinId: coin.id })));
       line(!!l3.raw && l3.status === 200, 'with a note in the answer headers');
+      forgetFailures(a);
       const demo = await post(a, 'action=grant', { adminToken: a.demoToken, coinId: coin.id, to: alice.key, amount: '1' });
       const demoCreate = await call(a, 'coin26', 'POST', 'action=create', Object.assign(S.coinRequest('DEMO'), { adminToken: a.demoToken }));
       const demoOpen = await post(a, 'action=open', { adminToken: a.demoToken, coinId: coin.id });
@@ -153,6 +154,7 @@ const forgetFailures = (n) => require('child_process').execFileSync('php', ['-r'
       const noHash = await signedOp(a, 'integrity', { coinId: coin.id });
       line(noHash.status === 200, 'the signed path is unaffected by any of it');
       writeRoster(a, { legacyTokenSha256: undefined, keys: [{ publicKey: a.operator.publicKey, label: 'root' }, { publicKey: spare.publicKey }] });
+      forgetFailures(a);
       const noToken = await legacyOp(a, 'integrity', { coinId: coin.id });
       line(noToken.status === 403 && noToken.json.code === 'legacy-disabled', 'a roster without the token hash accepts no token', noToken.json);
       writeRoster(a, { keys: [{ publicKey: a.operator.publicKey, label: 'root' }, { publicKey: spare.publicKey }] });

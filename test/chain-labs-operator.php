@@ -104,6 +104,8 @@ $empty = authorize('operator/check', signed($root, 'operator/check', [], $NOW), 
 t(($empty['via'] ?? '') === 'signed' && $empty['args'] === [], 'a request with no arguments is signed and read as an empty object');
 
 echo "\n== time\n";
+// Every refused request counts against the client that sent it, so each section that refuses many has a client of its own.
+$_SERVER['REMOTE_ADDR'] = '203.0.113.10';
 t(refused(fn() => authorize('spend34/grant', signed($root, 'spend34/grant', $req, $NOW - 61), $NOW)) === 'expired-request', 'a sensitive request is refused 61 seconds after it was issued');
 t(refused(fn() => authorize('spend34/grant', signed($root, 'spend34/grant', $req, $NOW), $NOW + 60)) === 'expired-request', 'and at the second it expires');
 $near = authorize('spend34/grant', signed($root, 'spend34/grant', ['coinId' => str_repeat('b', 32), 'to' => $recipient, 'amount' => '1'], $NOW), $NOW + 59);
@@ -115,6 +117,7 @@ t(refused(fn() => authorize('spend34/integrity', signed($root, 'spend34/integrit
 t(refused(fn() => authorize('spend34/integrity', signed($root, 'spend34/integrity', [], $NOW, [], ['issuedAt' => '2027-01-01 00:00:00']), $NOW)) === 'bad-request', 'a time that is not in the fixed form is refused');
 
 echo "\n== the nonce is recorded before the action, and a repeat is not carried out again\n";
+$_SERVER['REMOTE_ADDR'] = '203.0.113.11';
 $first = signed($root, 'spend34/integrity', ['coinId' => str_repeat('c', 32)], $NOW);
 $a1 = authorize('spend34/integrity', $first, $NOW);
 t(($a1['via'] ?? '') === 'signed', 'a request is accepted');

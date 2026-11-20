@@ -182,6 +182,37 @@ $s5['db']->prepare('INSERT INTO ledger_requests(coin_id,request_id,idx,to_key,un
 $r = run($s5);
 t($r['code'] === 1 && str_contains($r['out'], 'FAIL closed-sale-delivered: 1 sale(s) are closed and also have an entry'), 'a sale that is closed and delivered is found', $r['out']);
 
+echo "\n== the last complete record of a file damaged\n";
+$damageLast = function (string $file): string {
+    $kept = (string) file_get_contents($file);
+    $lines = explode("\n", rtrim($kept, "\n"));
+    $lines[count($lines) - 1] = preg_replace('/"at":(\d)/', '"at":9$1', $lines[count($lines) - 1], 1);
+    file_put_contents($file, implode("\n", $lines) . "\n");
+    return $kept;
+};
+$s7 = site();
+$c7 = coin($s7, 'LST', 'public', 3);
+$rid7 = bin2hex(random_bytes(16));
+ledger_close_sale($s7['db'], $c7['id'], $rid7, $NOW);
+$dir7 = $s7['file'] . '.checkpoints/';
+$r = run($s7);
+t($r['code'] === 0, 'with every file whole the coin is ok', $r['out']);
+$kept = $damageLast($dir7 . $c7['id'] . '.closed');
+$r = run($s7);
+t($r['code'] === 1 && str_contains($r['out'], 'FAIL closed-file-damaged'), 'a closed-sales file whose last record was damaged is found, not read as a shorter file', $r['out']);
+file_put_contents($dir7 . $c7['id'] . '.closed', $kept);
+$kept = $damageLast($dir7 . $c7['id'] . '.journal');
+$r = run($s7);
+t($r['code'] === 1 && str_contains($r['out'], 'FAIL journal-damaged'), 'a journal whose last record was damaged is found', $r['out']);
+file_put_contents($dir7 . $c7['id'] . '.journal', $kept);
+$kept = $damageLast($dir7 . $c7['id'] . '.log');
+$r = run($s7);
+t($r['code'] === 1 && str_contains($r['out'], 'FAIL checkpoint-halted') && str_contains($r['out'], 'checkpoint-corrupt'), 'a checkpoint log whose last record was damaged stops the coin in the report', $r['out']);
+file_put_contents($dir7 . $c7['id'] . '.log', $kept);
+file_put_contents($dir7 . $c7['id'] . '.closed', '{"v":1,"coinId":"' . $c7['id'] . '","kind":"clo', FILE_APPEND);
+$r = run($s7);
+t($r['code'] === 0, 'a record cut short at the end of the file is not damage', $r['out']);
+
 echo "\n== a coin whose opening never finished, and an older database\n";
 $s6 = site();
 $ok6 = coin($s6, 'FIN', 'public', 1);

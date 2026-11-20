@@ -117,9 +117,31 @@ private folder, which is also all that is needed to change the roster.
 
 ## 6. Failed attempts
 
-Ten failed attempts in five minutes from one client address, with a token or a key that is not on the roster or a request that cannot be
-read, are answered 429 with `Retry-After`. A request signed by a key on the roster is never turned away by this count, so a stranger cannot
-lock the operator out.
+Ten failed attempts in five minutes from one client address make that client's further failed attempts answer 429 with `Retry-After`. What
+counts as a failed attempt is any request that does not authenticate: a token that is wrong or not accepted for the action, a key that is not on
+the roster, a bad signature (including one under a key that is on the roster), and a request that cannot be read or is for another action or
+domain, has a bad lifetime or is expired, or has no credential at all. Once the client is over the limit the answer to any of these is
+`rate-limited`, whatever the reason would have been, and nothing more is written about it beyond the points below.
+
+A request that carries a valid signature from a key on the roster is never turned away by the count, so a stranger cannot lock the operator out.
+It follows that a request claiming a key on the roster has its signature checked even from a client that is over the limit: that is how a valid
+one is told from a forged one.
+
+What is kept stays small however many requests arrive:
+
+- A client has at most ten failure rows (one more adds nothing; the client is already limited), and the table holds at most 20000 rows, after
+  which it takes no more. A flood from more addresses than that is therefore not limited by the application once the table is full.
+- The audit table gets one `throttled` line per client for each five minutes, and the next such line says how many requests were turned away
+  without a line, so the record shows who and how much without a line for every request. At most 20000 clients are followed this way, and the
+  `refused` and `throttled` lines together stop at 200000 lines in the table; `accepted`, `outcome`, `replay`, `legacy` and `activated` lines are
+  never dropped for that reason.
+
+**Limits of this count.** It limits what a client can try and what is written down; it does not remove the work of checking a signature. A
+request that claims a key on the roster is verified before it is known to be forged, and each check costs a little CPU, so a flood of them from
+many addresses, or from one address that is not limited because the traffic is spread across proxies, can still use CPU. Limits at the web server
+or in front of it (a per-address request rate on the operator endpoints, a connection limit, a request size limit, or a firewall) are still needed
+and are the right place to stop that. The count keys on the address the web server reports, so behind a proxy it must be set up so that
+`REMOTE_ADDR` is the client and not the proxy.
 
 ## 7. The old token
 
@@ -217,6 +239,7 @@ node test/chain-labs-operator-http.js        # the same through the real endpoin
 node test/chain-labs-operator-cli.js         # both command line tools
 node test/chain-labs-operator-sunset.js      # the end of the token over HTTP, and that no setting moves it
 node test/chain-labs-operator-separation.js  # the demonstration labs' token and the chain labs operator credential
+php test/chain-labs-audit-operator-throttle.php  # failures under a listed key and malformed requests are limited, a valid signature is not, and what is kept stays small
 xvfb-run -a node test/manual-chain-labs-studio.js         # the Studio signs in a real browser, the key never leaves it
 xvfb-run -a node test/manual-chain-labs-studio-legacy.js  # the page from before signed requests, until the token ends and after activation
 php test/chain-labs-consent.php              # partner consent: records, review, accept and decline, fail closed, bounds, upgrade

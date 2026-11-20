@@ -189,9 +189,18 @@ t($read['corrupt'] === null && $read['junk'] === 1 && verdict($c)['status'] === 
 t(send($c, $alice, $bob['key'], '30')['index'] === 4, 'the next write starts on a new line and carries on');
 $read = guard_read(cp_log($c));
 t($read['corrupt'] === null && guard_state($read['lines'])['floor']['index'] === 4, 'and the chain of sums is whole', $read['corrupt']);
+// A cut write that a later append carried on from sits in the middle of the file and is skipped.
+file_put_contents(cp_log($c), '{"v":1,"coinId":"' . $c['coin'] . '","kind":"comm', FILE_APPEND);
+t(send($c, $alice, $bob['key'], '5')['index'] === 5 && guard_read(cp_log($c))['corrupt'] === null && verdict($c)['status'] === 'ok', 'a cut write that a later write began a new line after is skipped, and writing goes on');
+// A line that ends with a newline and does not verify is not a cut write: it is damage, wherever it is.
+$before = file_get_contents(cp_log($c));
 file_put_contents(cp_log($c), "not json at all\n", FILE_APPEND);
-t(verdict($c)['status'] === 'ok' && guard_read(cp_log($c))['corrupt'] === null, 'a garbage line at the end is ignored too');
-t(send($c, $alice, $bob['key'], '5')['index'] === 5, 'and writing goes on');
+t(verdict($c)['status'] === 'halted' && verdict($c)['reason'] === 'checkpoint-corrupt', 'a line that is not a record, with its newline, as the last line is not silently ignored');
+file_put_contents(cp_log($c), $before);
+file_put_contents(cp_log($c), '{"at":1,"coinId":"' . $c['coin'] . '","kind":"commit","prevSum":"' . str_repeat('0', 64) . '","sum":"' . str_repeat('1', 64) . '","v":1}' . "\n", FILE_APPEND);
+t(verdict($c)['status'] === 'halted' && verdict($c)['reason'] === 'checkpoint-corrupt', 'a complete-looking record whose sum does not hold as the last line stops the coin');
+file_put_contents(cp_log($c), $before);
+t(verdict($c)['status'] === 'ok', 'and the coin runs again with the file as it was');
 // The same restart after each: a new process finds the same floor.
 $floorNow = guard_state(guard_read(cp_log($c))['lines'])['floor'];
 reopen($c);

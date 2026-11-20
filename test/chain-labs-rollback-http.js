@@ -102,6 +102,7 @@ const send = async (w, coinId, to, amount) => post(a, 'action=propose', { author
       resume: { coinId: coin.id }
     };
     for (const [action, body] of Object.entries(bodies)) {
+      S.forgetFailures(a);
       const none = await post(a, 'action=' + action, body);
       const wrong = await post(a, 'action=' + action, { ...body, adminToken: '0'.repeat(64) });
       const short = await post(a, 'action=' + action, { ...body, adminToken: a.token.slice(0, 32) });

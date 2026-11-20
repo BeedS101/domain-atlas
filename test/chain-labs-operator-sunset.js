@@ -46,11 +46,13 @@ const realDate = /const OPERATOR_LEGACY_UNTIL = 1803859200;/.test(fs.readFileSyn
     line(typeof withHash.legacyTokenSha256 === 'string', 'although the roster still holds its hash');
     for (const extra of [{ legacyUntil: '2099-01-01' }, { legacyUntil: 4102444800 }, { legacyDisabled: false }, { activated: false }]) {
       S.writeRoster(a, extra);
+      S.forgetFailures(a);
       const r = await legacyOp(a, 'integrity', { coinId: coin.id });
       line(r.status === 403 && r.json.code === 'legacy-ended', 'a roster setting ' + JSON.stringify(extra) + ' does not bring it back', r.json);
     }
     S.writeRoster(a);
     fs.writeFileSync(path.join(a.priv, 'chainlabs-config.json'), JSON.stringify({ hosts: [S.A, S.B, S.C, S.D], legacyUntil: 4102444800, partners: { [S.A]: [S.B, S.C, S.D] } }));
+    S.forgetFailures(a);
     line((await legacyOp(a, 'integrity', { coinId: coin.id })).status === 403, 'nor does the hosts file');
     line(!/getenv|\$_ENV|ini_get/.test(fs.readFileSync(path.join(a.root, 'lib', 'operator.php'), 'utf8').match(/function operator_legacy_open[\s\S]*?\n}/)[0]), 'the check reads the constant and the clock only');
 

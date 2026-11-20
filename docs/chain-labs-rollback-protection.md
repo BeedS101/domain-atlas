@@ -32,7 +32,7 @@ Per coin, three append-only files of JSON lines in `<database path>.checkpoints/
 | `<coin>.closed` | One `close` line for every sale this domain closed (`requestId`, time), written before the database row and before anything is signed. A closed sale is read from the database and from this file together, so an older database put back does not open it again (section 8). |
 
 Each line carries the sum of the line before it (`prevSum`) and its own (`sum`, the SHA-256 of its canonical form), so a changed,
-removed or reordered line is a break in the chain, and a line cut short by a crash is told apart from damage.
+removed or reordered line is a break in the chain, and a line cut short by a crash is told apart from damage (section 3.1).
 
 | Line | Meaning |
 | --- | --- |
@@ -65,10 +65,11 @@ Every check compares the database head with the floor (the highest `adopt`, `com
 | --- | --- | --- |
 | Database head equals the floor | `ok` | Normal. |
 | Database one entry ahead of the floor and it is the last intent's entry, or an intent with nothing behind it | crash | `repaired`: the missing journal and commit lines are written; nothing stops. |
-| A last line cut short, or one line of junk after the last good one | crash | The torn line is ignored; the chain before it is intact. |
+| A last line cut short (no newline at its end) | crash | The torn line is ignored; the chain before it is intact. A whole record that only lacks its newline is read as a record. |
+| A cut write that a later write carried on from (a torn line in the middle, which the next line follows from the last good one) | crash | Skipped; the chain around it is intact. |
 | Database head lower than the floor | `rollback` | The coin stops: `rollback-detected` (503). |
 | Another hash at the floor's index, or a journal of another history | `conflict` | The coin stops: `checkpoint-conflict` (503). |
-| A line in the middle that does not match its sum | `checkpoint-corrupt` | The coin stops: `checkpoint-corrupt` (503). |
+| A complete line (one that ends with a newline) that does not verify and that looks like a record, a line that does not follow the one before it, or a line cut short that ends with a newline and has nothing after it | `checkpoint-corrupt` | The coin stops: `checkpoint-corrupt` (503). This includes the last complete line of the file. |
 | No checkpoint yet for an existing coin | `adopted` | The database's own head is recorded (see section 10). |
 
 The journal counts as a record of commits too. An entry is journaled only after the database has committed it, so a journal that holds
@@ -80,6 +81,37 @@ a crash before the commit, and the entry is then lost the way it would be withou
 
 A stopped coin refuses new transfers, proposals, approvals and mirrored entries that are not replays of the lost history. It is shown
 to wallets and scanners as `frozen` (the database row is not changed). Reads, receipts and history stay readable.
+
+### 3.1 A cut write is not a damaged record
+
+Before, any line that did not verify was skipped as long as the lines after it still followed the last good one, so a complete record that was
+damaged and happened to be the last one was read as if it had never been written: a closed sale reopened, an approval was forgotten, a
+commit line vanished. A reader (`guard_parse`, `guard_each`) now tells the two apart by what a write cut short can look like:
+
+- the piece after the last newline is a write cut short and is ignored (or, if it is a whole record that only lacks its newline, read);
+- a line that ends with a newline and reads as a record (a JSON object that does not verify, or one that ends the way every complete line ends,
+  `"v":1}`), or is too long to have been written, is damage;
+- a line that ends with a newline and is only a piece of a record (a cut write that the next append began a new line after) is skipped, but only
+  when something follows it: a good line that follows the last good one, or a further cut write. A cut write that ends with a newline and has nothing
+  after it cannot be told from a damaged last record, so it is damage.
+
+The same rules apply to the log, the journal and the closed-sales file, so the checks that read them (the guard, approvals, closed sales, replay
+and the integrity check) all report the same damage. A file whose last complete record is damaged is `checkpoint-corrupt` for the log (the coin is
+stopped), a `checkpoint-unavailable` for approvals and sales, and `journal-damaged` / `closed-file-damaged` in `integrity-cli.php`.
+
+Compatibility: a log, journal or closed-sales file written by this or the earlier code reads the same, including the ones that carry cut writes in
+the middle. A file that has an unverifiable complete record at its end now stops instead of reading as shorter.
+
+### 3.2 Recovery never sets an irreversible decision aside
+
+An approval a domain gave, and a sale it closed, are permanent. Neither has a recovery action that can drop them:
+
+- `<coin>.closed` is never rewritten, replaced or set aside by anything. A damaged file stops every sale of that coin until it is looked at.
+- `approve` lines are in `<coin>.log`, so the damaged log of a **partner** of a coin of several domains cannot be replaced by `reseal`:
+  the answer is `approvals-unrecoverable`, nothing is set aside, and the partner stays stopped (it approves nothing) until its history can be
+  reconstructed or independently verified. The authority of such a coin and a coin of one domain give no approvals, so `reseal` works for them as before.
+- No generic reset exists for either, and none is added here. A narrowly scoped procedure for a partner (for example one that is checked against
+  what the authority and the other partners can show) has to be reviewed separately before it is built.
 
 ## 4. Single authority and multi authority
 
@@ -168,7 +200,7 @@ accepted loss cannot be undone by any of them). None of them brings back spent f
    stopped for good. Nothing un-freezes it: the lost spends cannot be told apart from balances that were spent once, so putting the
    database's balances back in use would be the resurrection this guard exists to prevent. The way on is a new coin and a migration of
    balances decided by the operator from the evidence.
-4. `reseal` (`coinId`, `confirm: { databaseIndex, databaseHash }`): for damaged checkpoint files only. The database must pass the
+4. `reseal` (`coinId`, `confirm: { databaseIndex, databaseHash }`): for damaged checkpoint files only, and never for a partner of a coin of several domains (`approvals-unrecoverable`, section 3.2). The database must pass the
    checker, the journal must not be beyond the database's head, and the confirmation must match the database's head. The damaged files
    are set aside (`*.damaged-<time>`) and a new log begins with a `reseal` line at the database's head.
 5. `resume` (`coinId`): for a partner that froze on rollback evidence, as in section 4.
@@ -217,10 +249,11 @@ sales a domain closed (`ledger_closed_sales`, which is also kept in `<coin>.clos
 | The entries are replayed | The sales table is rebuilt from the log (`ledger_requests`, checked by `ledger_check`). A journaled sale then finds its delivery and finishes once: one delivery, the credential spent once. |
 | The sale journal row itself was lost with the rollback | The request cannot be delivered again (`duplicate-purchase`: the log holds it). The credential stays held, not released and not spent, and recovery has no row to finish. The operator finishes or releases it at the code that holds the credential, after reading the delivery in the ledger. This is the one case that needs a separate change (rebuilding the row from the entry) and it fails safe. |
 | A partner restored from an older copy | It is stopped and will not witness that a sale is closed, since it may have lost the entry. |
-| A partner or authority whose database lost only the approval or closed-sale rows, with no entry lost | Not detected by the guard, because the log is intact. The credential holder's own record (`begin`, `lock`, once-only `finish`) is what stops a second use. Treat any restore of a ledger database with sales in flight as needing a check of those sales at the credential holder before the coin sells again. |
+| A partner whose database lost the approval rows only | The `approve` lines of its checkpoint log name the sale each approval was for (`requestId`, covered by the line's sum), and a witness is refused when the database **or** the log shows an approval for the sale (`cannot-close`). An approval written before the field existed is ruled out only when this domain's own log shows that another entry took its index, or that the entry committed at that index delivers another sale; an index it has not committed leaves it open and the witness is refused. A log that cannot be read refuses (`checkpoint-unavailable`). The check and the closure are one write transaction with the approval, so an approval cannot be given between them. |
+| A partner or authority whose database lost only the approval or closed-sale rows, with no entry lost | Not detected by the entry guard, because the entry log is intact, but nothing depends on those rows alone: the approvals and closures are read from the checkpoint folder as well (the two rows above), and a damaged file fails closed. The credential holder's own record (`begin`, `lock`, once-only `finish`) is what stops a second use. Treat any restore of a ledger database with sales in flight as needing a check of those sales at the credential holder before the coin sells again. |
 | A sale that was closed, and a database copy from before it was closed | The closure is in `<coin>.closed`, so the sale is still closed: the same request is refused (`sale-closed`), an entry prepared for it before is refused when it commits, the restored journal row is ended by recovery without delivering, and the credential is not delivered against. Restoring only the database leaves the checkpoint folder intact and is the case this covers. Restoring the database and the checkpoint folder together is not detected (section 9). |
 | A sale of a coin of several domains is closed with its partners' witnesses | The authority writes the closure down too (database and `<coin>.closed`), once the witnesses are in and before the credential is freed against it. So the authority itself never takes the same request again (`sale-closed`, before the credential is reserved), and refuses to commit an entry that delivers it. A stop between the witnesses and that record is finished by asking again: the partners witness again and the record is made once. |
-| A closure that cannot be written down, or a `<coin>.closed` file that is damaged | Nothing is signed and the sale is not closed: the credential stays held and the sale can still be delivered by recovery. A damaged file is a `checkpoint-unavailable` for every sale of that coin, and a sale is not delivered or started until it is looked at. A line cut short by a crash is ignored; a line that was changed or removed breaks the chain. |
+| A closure that cannot be written down, or a `<coin>.closed` file that is damaged | Nothing is signed and the sale is not closed: the credential stays held and the sale can still be delivered by recovery. A damaged file is a `checkpoint-unavailable` for every sale of that coin, and a sale is not delivered or started until it is looked at. A line cut short by a crash is ignored; a line that was changed or removed, or a complete last record that does not verify, is damage. |
 | A coin whose loss was accepted | Sales on it stay held; nothing is delivered or released. |
 
 ## 9. What a same-account checkpoint does not do

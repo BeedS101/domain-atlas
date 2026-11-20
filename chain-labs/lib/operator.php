@@ -27,6 +27,9 @@ const OPERATOR_FAIL_LIMIT = 10;
 const OPERATOR_FAIL_WINDOW_SECONDS = 300;
 const OPERATOR_NONCE_CAP = 20000;
 const OPERATOR_REFUSAL_LOG_CAP = 200000;
+const OPERATOR_FAILURE_ROWS_CAP = 20000;
+const OPERATOR_THROTTLE_ROWS_CAP = 20000;
+const OPERATOR_THROTTLE_KEEP_SECONDS = 86400;
 const OPERATOR_STORED_RESPONSE_MAX = 60000;
 const OPERATOR_ROSTER_MAX_BYTES = 65536;
 const OPERATOR_MAX_KEYS = 50;
@@ -161,6 +164,7 @@ function operator_db(string $private): PDO
     $db->exec('CREATE INDEX IF NOT EXISTS operator_nonces_intent ON operator_nonces(intent, at)');
     $db->exec('CREATE TABLE IF NOT EXISTS operator_failures(client TEXT NOT NULL, at INTEGER NOT NULL)');
     $db->exec('CREATE INDEX IF NOT EXISTS operator_failures_client ON operator_failures(client, at)');
+    $db->exec('CREATE TABLE IF NOT EXISTS operator_throttle(client TEXT PRIMARY KEY, logged_at INTEGER NOT NULL, suppressed INTEGER NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS operator_verified(key_fp TEXT PRIMARY KEY, at INTEGER NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS operator_state(name TEXT PRIMARY KEY, value TEXT NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS operator_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, event TEXT NOT NULL, action TEXT, key_fp TEXT, nonce_fp TEXT,
@@ -169,15 +173,24 @@ function operator_db(string $private): PDO
     return $db;
 }
 
-// A request that fails to authenticate is counted for the client that sent it. The count limits only what a client can try without
-// a key on the roster: a token, a key that is not listed, a request that cannot be read. A request that is signed by a listed key is
-// never turned away by the count, so a stranger cannot shut the operator out.
+// A request that fails to authenticate is counted for the client that sent it: a bad signature (under a listed key or not), a key that is not
+// listed, a token, a request that cannot be read or is not for this action or domain. The count limits only what a client can try without a
+// valid signature from a key on the roster. A request that carries one is never turned away by the count, so a stranger cannot shut the
+// operator out; it is a request that fails that is answered `rate-limited` once the client is over the limit.
+// What is kept stays small however many requests arrive: a client has at most OPERATOR_FAIL_LIMIT rows (a failure beyond that adds nothing,
+// the client is already turned away), and the table holds at most OPERATOR_FAILURE_ROWS_CAP rows in all, so a flood from very many addresses
+// stops adding rows rather than filling the disk; the clients already counted stay limited.
 function operator_failure_note(PDO $db, int $now): void
 {
     $db->prepare('DELETE FROM operator_failures WHERE at < ?')->execute([$now - OPERATOR_FAIL_WINDOW_SECONDS]);
+    $own = $db->prepare('SELECT COUNT(*) FROM operator_failures WHERE client = ?');
+    $own->execute([operator_client()]);
+    if ((int) $own->fetchColumn() >= OPERATOR_FAIL_LIMIT) return;
+    if ((int) $db->query('SELECT COUNT(*) FROM operator_failures')->fetchColumn() >= OPERATOR_FAILURE_ROWS_CAP) return;
     $db->prepare('INSERT INTO operator_failures(client, at) VALUES(?, ?)')->execute([operator_client(), $now]);
 }
 
+// Seconds the client must wait, 0 when it is under the limit.
 function operator_retry_after(PDO $db, int $now): int
 {
     $q = $db->prepare('SELECT at FROM operator_failures WHERE client = ? AND at >= ? ORDER BY at');
@@ -185,6 +198,30 @@ function operator_retry_after(PDO $db, int $now): int
     $times = $q->fetchAll(PDO::FETCH_COLUMN);
     if (count($times) < OPERATOR_FAIL_LIMIT) return 0;
     return max(1, (int) $times[count($times) - OPERATOR_FAIL_LIMIT] + OPERATOR_FAIL_WINDOW_SECONDS - $now);
+}
+
+// Turns a request away because its client is over the limit. The audit table gets one `throttled` line for a client in each window, which
+// says how many requests it did not write a line for since the last one, so the record shows the client and the volume without a line for
+// every request. At most OPERATOR_THROTTLE_ROWS_CAP clients are followed this way; beyond that the line is left out.
+function operator_throttle(PDO $db, int $now, string $action, ?string $keyFp, int $retry): never
+{
+    try {
+        $client = operator_client();
+        $db->prepare('DELETE FROM operator_throttle WHERE logged_at < ?')->execute([$now - OPERATOR_THROTTLE_KEEP_SECONDS]);
+        $q = $db->prepare('SELECT logged_at, suppressed FROM operator_throttle WHERE client = ?');
+        $q->execute([$client]);
+        $row = $q->fetch(PDO::FETCH_ASSOC);
+        if ($row && (int) $row['logged_at'] > $now - OPERATOR_FAIL_WINDOW_SECONDS) {
+            $db->prepare('UPDATE operator_throttle SET suppressed = suppressed + 1 WHERE client = ?')->execute([$client]);
+        } elseif ($row || (int) $db->query('SELECT COUNT(*) FROM operator_throttle')->fetchColumn() < OPERATOR_THROTTLE_ROWS_CAP) {
+            operator_audit($db, 'throttled', ['action' => $action, 'key_fp' => $keyFp, 'code' => 'rate-limited', 'status' => 429,
+                'detail' => 'requests turned away since the last line for this client: ' . ($row ? (int) $row['suppressed'] : 0)], $now);
+            $db->prepare('INSERT OR REPLACE INTO operator_throttle(client, logged_at, suppressed) VALUES(?, ?, 0)')->execute([$client, $now]);
+        }
+    } catch (Throwable $e) {
+        // The line is missing from the record; the request is turned away all the same.
+    }
+    throw new OperatorError('rate-limited', 'Too many failed attempts. Try again later.', 429, ['retryAfter' => $retry]);
 }
 
 // Whether a transaction opened here is running on this connection (PDO does not report one that was opened with BEGIN IMMEDIATE).
@@ -271,7 +308,12 @@ function operator_detail(array $args): string
 
 function operator_refuse(PDO $db, int $now, string $action, ?string $keyFp, string $code, string $message, int $status, array $extra = [], bool $count = false): never
 {
-    if ($count) operator_failure_note($db, $now);
+    if ($count) {
+        // A failure from a client that is over the limit is answered rate-limited, whatever it was, and adds nothing to the failure rows.
+        $retry = operator_retry_after($db, $now);
+        if ($retry > 0) operator_throttle($db, $now, $action, $keyFp, $retry);
+        operator_failure_note($db, $now);
+    }
     operator_audit($db, 'refused', ['action' => $action, 'key_fp' => $keyFp, 'code' => $code, 'status' => $status], $now);
     throw new OperatorError($code, $message, $status, $extra);
 }
@@ -317,7 +359,7 @@ function operator_authorize_checked(string $private, string $host, string $actio
     if ($roster['domain'] !== $host) operator_refuse($db, $now, $action, null, 'wrong-domain', 'The operator roster is not for the host this request arrived under.', 400, [], true);
     if (array_key_exists('payload', $body) || array_key_exists('proof', $body)) return operator_signed($private, $roster, $db, $host, $action, $method, $body, $now);
     if (array_key_exists('adminToken', $body)) return operator_legacy($private, $roster, $db, $action, $body, $now);
-    operator_refuse($db, $now, $action, null, 'auth-required', 'This action needs a signed operator request.', 403);
+    operator_refuse($db, $now, $action, null, 'auth-required', 'This action needs a signed operator request.', 403, [], true);
 }
 
 function operator_object(mixed $v): bool
@@ -359,12 +401,10 @@ function operator_signed(string $private, array $roster, PDO $db, string $host, 
     if ($issued === null || $expires === null || !is_string($nonce) || !preg_match('/^[A-Za-z0-9_-]{16,128}$/D', $nonce)) $bad('The time or the nonce is not in the form this domain reads.', $fp);
     $limit = $sensitive ? OPERATOR_SENSITIVE_LIFETIME_SECONDS : OPERATOR_LIFETIME_SECONDS;
     if ($expires <= $issued || $expires - $issued > $limit) operator_refuse($db, $now, $action, $fp, 'bad-lifetime', 'A request for this action may live at most ' . $limit . ' seconds.', 400, [], true);
-    if ($now >= $expires || $issued > $now + OPERATOR_SKEW_SECONDS) operator_refuse($db, $now, $action, $fp, 'expired-request', 'The request has expired or is dated ahead of this domain\'s clock.', 401, ['serverTime' => operator_iso($now)]);
+    if ($now >= $expires || $issued > $now + OPERATOR_SKEW_SECONDS) operator_refuse($db, $now, $action, $fp, 'expired-request', 'The request has expired or is dated ahead of this domain\'s clock.', 401, ['serverTime' => operator_iso($now)], true);
 
     $key = $roster['keys'][$publicKey] ?? null;
     if ($key === null || $key['revoked']) {
-        $retry = operator_retry_after($db, $now);
-        if ($retry > 0) { operator_audit($db, 'throttled', ['action' => $action, 'key_fp' => $fp, 'code' => 'rate-limited', 'status' => 429], $now); throw new OperatorError('rate-limited', 'Too many failed attempts. Try again later.', 429, ['retryAfter' => $retry]); }
         operator_refuse($db, $now, $action, $fp, 'not-operator', 'This key is not an operator key of this domain.', 401, [], true);
     }
     $signed = $payload;
@@ -430,12 +470,12 @@ function operator_signed(string $private, array $roster, PDO $db, string $host, 
 
 function operator_legacy(string $private, array $roster, PDO $db, string $action, array $body, int $now): array
 {
-    if (isset(OPERATOR_SIGNED_ONLY[$action])) operator_refuse($db, $now, $action, null, 'signature-required', 'This action takes a signed operator request only; an operator token is not accepted for it.', 403);
-    if (!operator_legacy_open($now)) operator_refuse($db, $now, $action, null, 'legacy-ended', 'Operator tokens are no longer accepted. Sign the request with an operator key.', 403);
-    if ($roster['legacySha'] === null) operator_refuse($db, $now, $action, null, 'legacy-disabled', 'This domain does not accept an operator token. Sign the request with an operator key.', 403);
-    if (operator_sensitive($action) && operator_ratchet_active($private, $db)) operator_refuse($db, $now, $action, null, 'signature-required', 'This action now needs a signed operator request; a token is no longer accepted for it.', 403);
+    if (isset(OPERATOR_SIGNED_ONLY[$action])) operator_refuse($db, $now, $action, null, 'signature-required', 'This action takes a signed operator request only; an operator token is not accepted for it.', 403, [], true);
+    if (!operator_legacy_open($now)) operator_refuse($db, $now, $action, null, 'legacy-ended', 'Operator tokens are no longer accepted. Sign the request with an operator key.', 403, [], true);
+    if ($roster['legacySha'] === null) operator_refuse($db, $now, $action, null, 'legacy-disabled', 'This domain does not accept an operator token. Sign the request with an operator key.', 403, [], true);
+    if (operator_sensitive($action) && operator_ratchet_active($private, $db)) operator_refuse($db, $now, $action, null, 'signature-required', 'This action now needs a signed operator request; a token is no longer accepted for it.', 403, [], true);
     $retry = operator_retry_after($db, $now);
-    if ($retry > 0) { operator_audit($db, 'throttled', ['action' => $action, 'code' => 'rate-limited', 'status' => 429], $now); throw new OperatorError('rate-limited', 'Too many failed attempts. Try again later.', 429, ['retryAfter' => $retry]); }
+    if ($retry > 0) operator_throttle($db, $now, $action, null, $retry);
     $token = $body['adminToken'];
     if (!is_string($token) || !preg_match('/^[a-f0-9]{64}$/D', $token) || !hash_equals($roster['legacySha'], hash('sha256', $token))) {
         operator_refuse($db, $now, $action, null, 'bad-token', 'Incorrect operator token', 403, [], true);

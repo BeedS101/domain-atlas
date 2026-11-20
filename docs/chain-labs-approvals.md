@@ -26,6 +26,13 @@ is enough to refuse a different entry. If the checkpoint cannot be read, the dom
 `checkpoint-corrupt`); it never falls back to the table alone. A database from before this change gets the new columns when it is opened,
 and its existing rows count as approvals.
 
+The `approve` line also carries `requestId`, the sale the approved entry delivers (null for an entry that is not a sale); the field is covered
+by the line's sum. A partner that is asked to witness that a sale is closed (`close-sale`) reads the approvals from the database and from this log
+and refuses (`cannot-close`) when either shows one for the sale, or one that cannot be ruled out: a line written before the field existed is ruled out
+only when the domain's own log shows another entry at its index, or an entry at that index that delivers another sale (section 8 of
+`docs/chain-labs-rollback-protection.md`). A damaged log or file refuses; a missing database row is never read as no approval. The check and the
+closure run in the same write transaction as the approval, so a domain cannot approve and close the same sale.
+
 The `approve` lines are not a floor and do not affect the rollback guard (`docs/chain-labs-rollback-protection.md`). The limit stated there
 holds here too: an operator who restores both the database and the checkpoint folder from before the approval removes the memory of it.
 

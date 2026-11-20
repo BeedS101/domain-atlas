@@ -872,7 +872,6 @@
       const kind = await signatureKind(v.keys[v.authority], entrySigText(coinId, e.index, receipt.hash, v.authority), receipt.hash, receipt.authoritySignature);
       if (kind === null) throw unverified(v.authority + ' did not sign it');
       if (kind === 'legacy' && Number.isInteger(v.v2From) && e.index >= v.v2From) throw unverified(v.authority + ' signed it in the older format after the coin moved to the newer one');
-      if (kind === 'v2') await pinV2From(record.domain, coinId, e.index);
       const signers = new Set([v.authority]);
       const text = approvalText(coinId, e.index, receipt.hash);
       for (const a of receipt.approvals) {
@@ -888,6 +887,9 @@
       const shown = await headAt(record, coinId, e.index, receipt.hash, meta);
       if (shown === false) throw unverified('the domain\'s own history holds another entry there');
       if (shown !== true) throw Object.assign(unverified('the domain does not show it in its history'), { unchecked: !meta.reached });
+      // Only a receipt that passed every check above moves the remembered format 2 index: the approvals and the domain's own history stand
+      // behind it. A receipt that was refused leaves every pin as it was.
+      if (kind === 'v2') await pinV2From(record.domain, coinId, e.index);
     }
 
     // A receipt is accepted when it verifies and is for what was asked. Anything else is refused with bad-receipt.

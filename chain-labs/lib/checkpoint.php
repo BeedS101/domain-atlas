@@ -82,23 +82,39 @@ function guard_line(string $piece): ?array
     try { return hash_equals(hash('sha256', ledger_canonical($body)), $row['sum']) ? $row : null; } catch (Throwable $e) { return null; }
 }
 
-// Reads lines out of text. A piece after the last newline is a write that was cut short; a line whose own sum does not hold is
-// ignored the same way, as long as the lines after it still follow the last good one. A good line that does not follow the one
-// before it means something was changed or removed.
+// Whether a piece that is not a valid record is a complete record that was damaged, as opposed to a write that was cut short. A write cut
+// short is a prefix of a line and so is never a JSON object, and never ends the way every complete line does (the canonical form puts the
+// version last: `"v":1}`). A piece that is either, or is too long to have been written, is damage.
+function guard_piece_damaged(string $piece): bool
+{
+    if (strlen($piece) > GUARD_MAX_LINE || str_ends_with($piece, '"v":1}')) return true;
+    return is_array(json_decode($piece, true));
+}
+
+// Reads lines out of text. What follows the last newline is a write that was cut short and is ignored, unless it is a whole record that
+// only lacks its newline, which then counts. A line that ends with a newline and does not verify is damage when it looks like a complete
+// record, and otherwise a cut write that a later append carried on from: it is skipped as long as the next good line follows the last good
+// one, or a further cut write follows it. A good line that does not follow the one before it, or a damaged complete record, or a cut
+// write that nothing follows at all (so that it cannot be told from a damaged last record), means something was changed or removed.
 function guard_parse(string $text, bool $windowed): array
 {
     $pieces = explode("\n", $text);
     $tail = array_pop($pieces);
     if ($windowed && $pieces) array_shift($pieces);
     $good = [];
-    $junk = $tail !== '' ? 1 : 0;
+    $junk = 0;
     $expect = null;
     $corrupt = null;
+    $trailing = false;
     foreach ($pieces as $piece) {
         if ($piece === '') continue;
         $row = guard_line($piece);
-        $ok = $row !== null;
-        if (!$ok) { $junk++; continue; }
+        if ($row === null) {
+            if (guard_piece_damaged($piece)) { $corrupt = 'a complete record does not verify'; break; }
+            $junk++;
+            $trailing = true;
+            continue;
+        }
         if ($expect === null) {
             if (!$windowed && $row['prevSum'] !== GUARD_ZERO) { $corrupt = 'the first line does not begin the chain'; break; }
         } elseif ($row['prevSum'] !== $expect) {
@@ -107,7 +123,21 @@ function guard_parse(string $text, bool $windowed): array
         }
         $good[] = $row;
         $expect = $row['sum'];
+        $trailing = false;
     }
+    if ($corrupt === null && $tail !== '') {
+        $row = guard_line($tail);
+        if ($row === null) {
+            $junk++;
+        } elseif ($expect === null ? (!$windowed && $row['prevSum'] !== GUARD_ZERO) : $row['prevSum'] !== $expect) {
+            $corrupt = $expect === null ? 'the first line does not begin the chain' : 'a line does not follow the one before it';
+        } else {
+            $good[] = $row;
+            $expect = $row['sum'];
+            $trailing = false;
+        }
+    }
+    if ($corrupt === null && $trailing && $tail === '') $corrupt = 'the last complete record is damaged';
     return ['lines' => $good, 'junk' => $junk, 'corrupt' => $corrupt, 'lastSum' => $expect];
 }
 
@@ -155,7 +185,8 @@ function guard_append(string $file, array $body): array
     }
 }
 
-// Every good line of a file in order, one at a time (a journal can be large). Stops with the reason if the chain breaks.
+// Every good line of a file in order, one at a time (a journal can be large). Stops with the reason if the chain breaks or a complete
+// record is damaged. The same rules as guard_parse apply to what is skipped.
 function guard_each(string $file, callable $each): ?string
 {
     if (!is_file($file)) return null;
@@ -163,18 +194,28 @@ function guard_each(string $file, callable $each): ?string
     if (!$handle) return 'the file cannot be read';
     $expect = null;
     $problem = null;
+    $trailing = false;
+    $endsOpen = false;
     while (($piece = fgets($handle, GUARD_MAX_LINE + 2)) !== false) {
-        if (!str_ends_with($piece, "\n")) break;
+        $closed = str_ends_with($piece, "\n");
+        if (!$closed && !feof($handle)) { $problem = 'a line is too long'; break; }
         $piece = rtrim($piece, "\n");
         if ($piece === '') continue;
+        if (!$closed) $endsOpen = true;
         $row = guard_line($piece);
-        if ($row === null) continue;
+        if ($row === null) {
+            if ($closed && guard_piece_damaged($piece)) { $problem = 'a complete record does not verify'; break; }
+            if ($closed) $trailing = true;
+            continue;
+        }
         if ($expect !== null && $row['prevSum'] !== $expect) { $problem = 'a line does not follow the one before it'; break; }
         if ($expect === null && $row['prevSum'] !== GUARD_ZERO) { $problem = 'the first line does not begin the chain'; break; }
         $expect = $row['sum'];
-        if ($each($row) === false) break;
+        $trailing = false;
+        if ($each($row) === false) { $trailing = false; break; }
     }
     fclose($handle);
+    if ($problem === null && $trailing && !$endsOpen) $problem = 'the last complete record is damaged';
     return $problem;
 }
 
@@ -503,15 +544,73 @@ function ledger_approval_memory(PDO $db, string $coinId, int $index): array
     return $known;
 }
 
-// Writes down an approval before it is given. Refuses, so nothing is signed, when the line cannot be written.
-function ledger_approval_note(PDO $db, string $coinId, int $index, string $hash, string $signature, int $now): void
+// Writes down an approval before it is given. Refuses, so nothing is signed, when the line cannot be written. The line names the sale
+// the entry delivers (`requestId`, null for an entry that is not a sale), which is what lets a witness that a sale is closed rule the approval
+// in or out later; the sum of the line covers it. A line without the field was written before it existed.
+function ledger_approval_note(PDO $db, string $coinId, int $index, string $hash, string $signature, int $now, ?string $requestId = null): void
 {
     if (ledger_guard_dir($db) === null) return;
     try {
-        guard_append(guard_file($db, $coinId, 'log'), ['v' => 1, 'kind' => 'approve', 'coinId' => $coinId, 'index' => $index, 'hash' => $hash, 'signature' => $signature, 'at' => $now]);
+        guard_append(guard_file($db, $coinId, 'log'), ['v' => 1, 'kind' => 'approve', 'coinId' => $coinId, 'index' => $index, 'hash' => $hash, 'signature' => $signature, 'requestId' => $requestId, 'at' => $now]);
     } catch (RuntimeException $e) {
         throw new LedgerError('checkpoint-unavailable', 'the approval cannot be written down, so it is not given: ' . $e->getMessage());
     }
+}
+
+// Whether an approval this domain gave could belong to a delivery of the sale, and cannot be ruled out. An approval whose sale is recorded
+// is decided by the sale. One recorded without it (written before the field existed, or kept only as a row of approved entries) is ruled out
+// only when this domain's own log shows that another entry took its index, or that the entry committed at that index delivers no such sale;
+// an index this domain has not committed leaves it open, since the authority may still commit the entry. A missing record is never read as
+// no approval.
+function ledger_approval_open(PDO $db, string $coinId, string $requestId, int $index, string $hash): bool
+{
+    $held = guard_hash_at($db, $coinId, $index);
+    if ($held === null) return true;
+    if ($held !== $hash) return false;
+    $q = $db->prepare('SELECT public_json FROM ledger_log WHERE coin_id=? AND idx=?');
+    $q->execute([$coinId, $index]);
+    $public = json_decode((string) $q->fetchColumn(), true);
+    return !is_array($public) || ($public['purchase']['requestId'] ?? null) === $requestId;
+}
+
+// Why this domain may have approved an entry for the sale, or null when it demonstrably did not: from the database rows, from the
+// approvals in the checkpoint log, and from approved entries whose sale is not recorded anywhere. A log or database that cannot be read
+// refuses. Meant to run inside the write transaction that records the closure, so an approval cannot be given between the check and the closure.
+function ledger_sale_approval(PDO $db, string $coinId, string $requestId): ?string
+{
+    $rows = $db->prepare('SELECT COUNT(*) FROM ledger_purchase_approvals WHERE coin_id=? AND request_id=?');
+    $rows->execute([$coinId, $requestId]);
+    if ((int) $rows->fetchColumn() > 0) return 'database';
+    if (ledger_guard_dir($db) === null) return null;
+    $named = [];
+    $reason = null;
+    try {
+        $problem = guard_each(guard_file($db, $coinId, 'log'), function (array $line) use ($db, $coinId, $requestId, &$named, &$reason): bool {
+            if (($line['kind'] ?? '') !== 'approve' || !is_int($line['index'] ?? null) || !is_string($line['hash'] ?? null)) return true;
+            if (array_key_exists('requestId', $line)) {
+                $named[$line['index'] . ':' . $line['hash']] = true;
+                if ($line['requestId'] === $requestId) { $reason = 'log'; return false; }
+                return true;
+            }
+            if (ledger_approval_open($db, $coinId, $requestId, $line['index'], $line['hash'])) { $reason = 'log-unrecorded'; return false; }
+            return true;
+        });
+    } catch (RuntimeException $e) {
+        throw new LedgerError('checkpoint-unavailable', 'the approvals this domain gave cannot be read, so it witnesses nothing: ' . $e->getMessage());
+    }
+    if ($problem !== null) throw new LedgerError('checkpoint-unavailable', 'the approvals this domain gave cannot be read, so it witnesses nothing: the checkpoint log is damaged (' . $problem . ')');
+    if ($reason !== null) return $reason;
+    // Approved entries that no row or line ties to a sale are open until the log shows what became of them.
+    $tied = $db->prepare('SELECT 1 FROM ledger_purchase_approvals WHERE coin_id=? AND idx=? AND hash=?');
+    $approved = $db->prepare('SELECT idx,hash FROM ledger_approved WHERE coin_id=?');
+    $approved->execute([$coinId]);
+    foreach ($approved->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        if (isset($named[$row['idx'] . ':' . $row['hash']])) continue;
+        $tied->execute([$coinId, $row['idx'], $row['hash']]);
+        if ($tied->fetchColumn() !== false) continue;
+        if (ledger_approval_open($db, $coinId, $requestId, (int) $row['idx'], (string) $row['hash'])) return 'database-unrecorded';
+    }
+    return null;
 }
 
 // ---------- sales closed for good ----------
@@ -622,11 +721,18 @@ function ledger_guard_accept(PDO $db, string $coinId, array $confirm, string $re
 
 // A damaged checkpoint file is set aside and a new one begun from the database, but only when the database passes the checker and
 // the journal holds nothing beyond it (which would mean entries are missing: restore them first). The old file is kept.
-function ledger_guard_reseal(PDO $db, string $coinId, array $confirm, int $now): array
+function ledger_guard_reseal(PDO $db, string $coinId, array $confirm, int $now, ?string $domain = null): array
 {
     $file = guard_file($db, $coinId, 'log');
     $read = guard_read($file);
     if ($read['corrupt'] === null) ledger_fail('not-damaged', 'the checkpoint file is not damaged');
+    // The log also holds the approvals a roster domain has given, which are irreversible: a new file cannot be begun from the database for a
+    // domain whose approvals might be in the part that cannot be read. Such a domain stays stopped until its history can be reconstructed
+    // or independently verified; nothing here sets an approval aside.
+    $coin = ledger_coin($db, $coinId);
+    if ($coin['mode'] === 'multi' && ($domain === null || $coin['genesis']['authority'] !== $domain)) {
+        ledger_fail('approvals-unrecoverable', 'this domain may have given approvals for this coin that the damaged file held, and they cannot be reconstructed, so the file is not replaced');
+    }
     $head = ledger_head($db, $coinId);
     if (($confirm['databaseIndex'] ?? null) !== $head['index'] || ($confirm['databaseHash'] ?? null) !== $head['hash']) ledger_fail('confirm-mismatch', 'the confirmation does not match the database head');
     $problems = ledger_check($db, $coinId);

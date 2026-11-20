@@ -94,9 +94,27 @@ const both = (...hooks) => async (url, init, forward) => { for (const h of hooks
     const prime = Chain.create(envFor(alice, few));
     const warm = await prime.send(await prime.prepareSend(A, allOf.id, bob.key, '1'));
     line(warm.status === 'done' && pinOf(few, allOf.id) && pinOf(few, allOf.id).v2From === null, 'an honest transfer is accepted and nothing has moved to format 2', pinOf(few, allOf.id));
+    const pinsOf = (state) => JSON.stringify(state.domains.map((d) => [d.domain, d.genesis || null]));
+    const pinsBefore = pinsOf(few);
     const stripped = through(alice, few, edit('action=propose', (j) => { asV2(j); j.receipt.approvals = []; }));
     line(await refusal(stripped.send(await stripped.prepareSend(A, allOf.id, bob.key, '1'))) === 'bad-receipt', 'a receipt signed in format 2 by the authority with the partners\' approvals taken out is refused');
     line(pinOf(few, allOf.id).v2From === null, 'and the wallet has not moved its remembered format 2 index', pinOf(few, allOf.id));
+    line(pinsOf(few) === pinsBefore, 'nor changed any other pin it holds');
+    const half = through(alice, few, edit('action=propose', (j) => { asV2(j); j.receipt.approvals = j.receipt.approvals.slice(0, 1); }));
+    line(await refusal(half.send(await half.prepareSend(A, allOf.id, bob.key, '1'))) === 'bad-receipt' && pinsOf(few) === pinsBefore, 'a receipt with one of its two partners\' approvals missing leaves the pins as they were');
+    const selfApproved = through(alice, few, edit('action=propose', (j) => {
+      asV2(j);
+      const bytes = canon({ type: 'atlas.ledger.entry.approval', v: 1, coinId: allOf.id, index: j.receipt.entry.index, hash: j.receipt.hash });
+      j.receipt.approvals = [{ domain: B, signature: derSign(a, bytes) }, { domain: C, signature: derSign(a, bytes) }];
+    }));
+    line(await refusal(selfApproved.send(await selfApproved.prepareSend(A, allOf.id, bob.key, '1'))) === 'bad-receipt' && pinsOf(few) === pinsBefore, 'and so does one whose approvals were made up by the authority');
+    const moving = through(alice, few, edit('action=propose', asV2));
+    const whole = await moving.send(await moving.prepareSend(A, allOf.id, bob.key, '1'));
+    line(whole.status === 'done' && pinOf(few, allOf.id).v2From === whole.receipt.entry.index, 'a receipt in format 2 with every approval, found in the domain\'s history, does move it', pinOf(few, allOf.id));
+    const movedTo = pinOf(few, allOf.id).v2From;
+    const lateLegacy = Chain.create(envFor(alice, few));
+    line(await refusal(lateLegacy.send(await lateLegacy.prepareSend(A, allOf.id, bob.key, '1'))) === 'bad-receipt', 'and the ratchet then refuses a receipt in format 1 for a later entry, as before');
+    line(pinOf(few, allOf.id).v2From === movedTo, 'without moving it');
 
     console.log('\n== a format 2 receipt for an entry the domain\'s history does not hold');
     const notThere = await listed();
@@ -112,6 +130,11 @@ const both = (...hooks) => async (url, init, forward) => { for (const h of hooks
     const forged = through(alice, notThere, edit('action=propose', made));
     line(await refusal(forged.send(await forged.prepareSend(A, sgl.id, bob.key, '1'))) === 'bad-receipt', 'a format 2 receipt for entry 1 that the domain\'s own history shows to be another entry is refused');
     line(pinOf(notThere, sgl.id).v2From === null, 'and the wallet has not moved its remembered format 2 index', pinOf(notThere, sgl.id));
+    // The domain does not answer when asked to show the entry: the receipt is left unchecked and nothing is pinned.
+    const silent = through(alice, notThere, both(edit('action=propose', asV2), async (url) => (url.includes('action=head') ? { status: 503, json: { ok: false } } : null)));
+    const prepared = await warm2.prepareSend(A, sgl.id, bob.key, '1');
+    const waiting = await silent.send(prepared).catch((e) => e);
+    line(waiting.status === 'waiting' && pinOf(notThere, sgl.id).v2From === null, 'a format 2 receipt whose entry the domain does not show (it does not answer) is left unchecked and pins nothing', waiting.status || waiting.code);
     const honestAfter = Chain.create(envFor(alice, notThere));
     const later = await honestAfter.send(await honestAfter.prepareSend(A, sgl.id, bob.key, '1')).catch((e) => e);
     line(later.status === 'done', 'so an honest receipt in format 1 for a later entry is still accepted', later.code || later.status);

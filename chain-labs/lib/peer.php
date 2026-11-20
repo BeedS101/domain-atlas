@@ -391,7 +391,7 @@ function peer_on_approve(PDO $db, array $node, string $from, array $body, int $n
         }
         $signature = ledger_sign($node['private'], ledger_approval_bytes($coinId, $index, $hash));
         // The approval is written down outside the database before the row exists and before the signature leaves this domain.
-        ledger_approval_note($db, $coinId, $index, $hash, $signature, $now);
+        ledger_approval_note($db, $coinId, $index, $hash, $signature, $now, $requestId);
         if ($requestId !== null) $db->prepare('INSERT OR IGNORE INTO ledger_purchase_approvals(coin_id,request_id,idx,hash) VALUES(?,?,?,?)')->execute([$coinId, $requestId, $index, $hash]);
         $db->prepare('INSERT OR IGNORE INTO ledger_approved(coin_id,idx,hash,executed_at,signature,approved_at,requester) VALUES(?,?,?,?,?,?,?)')->execute([$coinId, $index, $hash, $at, $signature, $now, $from]);
         $db->exec('COMMIT');
@@ -444,9 +444,9 @@ function peer_on_close_sale(PDO $db, array $node, string $from, array $body, int
     $db->exec('BEGIN IMMEDIATE');
     try {
         if (ledger_request_entry($db, $coinId, $requestId) !== null) ledger_fail('cannot-close', 'an entry for this request is in this domain\'s log');
-        $approved = $db->prepare('SELECT COUNT(*) FROM ledger_purchase_approvals WHERE coin_id=? AND request_id=?');
-        $approved->execute([$coinId, $requestId]);
-        if ((int) $approved->fetchColumn() > 0) ledger_fail('cannot-close', 'this domain approved an entry for this request, which may have been committed');
+        // What this domain approved is read from its database and from its checkpoint log, which an older database put back does not touch. An
+        // approval that cannot be ruled out, or a record that cannot be read, ends the check: nothing is witnessed on the strength of a missing row.
+        if (ledger_sale_approval($db, $coinId, $requestId) !== null) ledger_fail('cannot-close', 'this domain approved an entry for this request, which may have been committed');
         ledger_close_sale($db, $coinId, $requestId, $now);
         $db->exec('COMMIT');
     } catch (Throwable $e) {

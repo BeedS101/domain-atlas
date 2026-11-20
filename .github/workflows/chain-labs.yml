@@ -33,6 +33,14 @@ on:
       - 'test/chain-labs-sigformat-activation.php'
       - 'test/chain-labs-sigformat-http.js'
       - 'test/chain-labs-wallet-verify.js'
+      - 'test/chain-labs-audit-witness.php'
+      - 'test/chain-labs-audit-wallet-pin.js'
+      - 'test/chain-labs-audit-operator-throttle.php'
+      - 'test/chain-labs-audit-checkpoint-readers.php'
+      - 'test/chain-labs-rollback.php'
+      - 'test/chain-labs-rollback-purchase.php'
+      - 'test/chain-labs-purchase-closure.php'
+      - 'test/chain-labs-integrity-cli.php'
       - 'tools/chainlabs-operator.js'
       - 'tools/lib/chainlabs-operator.js'
       - 'extension/chain-labs-wallet.js'
@@ -68,6 +76,14 @@ on:
       - 'test/chain-labs-sigformat-activation.php'
       - 'test/chain-labs-sigformat-http.js'
       - 'test/chain-labs-wallet-verify.js'
+      - 'test/chain-labs-audit-witness.php'
+      - 'test/chain-labs-audit-wallet-pin.js'
+      - 'test/chain-labs-audit-operator-throttle.php'
+      - 'test/chain-labs-audit-checkpoint-readers.php'
+      - 'test/chain-labs-rollback.php'
+      - 'test/chain-labs-rollback-purchase.php'
+      - 'test/chain-labs-purchase-closure.php'
+      - 'test/chain-labs-integrity-cli.php'
       - 'tools/chainlabs-operator.js'
       - 'tools/lib/chainlabs-operator.js'
       - 'extension/chain-labs-wallet.js'
@@ -131,3 +147,11 @@ jobs:
           php test/chain-labs-sigformat-activation.php
           node test/chain-labs-sigformat-http.js
           node test/chain-labs-wallet-verify.js
+          php test/chain-labs-audit-witness.php
+          node test/chain-labs-audit-wallet-pin.js
+          php test/chain-labs-audit-operator-throttle.php
+          php test/chain-labs-audit-checkpoint-readers.php
+          php test/chain-labs-rollback.php
+          php test/chain-labs-rollback-purchase.php
+          php test/chain-labs-purchase-closure.php
+          php test/chain-labs-integrity-cli.php

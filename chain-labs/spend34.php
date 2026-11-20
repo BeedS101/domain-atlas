@@ -431,7 +431,7 @@ try {
         reply34(200, ['ok' => true, 'accepted' => ledger_guard_accept($db, $coinId, is_array($m['confirm'] ?? null) ? $m['confirm'] : [], (string) ($m['reason'] ?? ''), $now)]);
     }
     if ($action === 'reseal') {
-        reply34(200, ['ok' => true, 'resealed' => ledger_guard_reseal($db, $coinId, is_array($m['confirm'] ?? null) ? $m['confirm'] : [], $now)]);
+        reply34(200, ['ok' => true, 'resealed' => ledger_guard_reseal($db, $coinId, is_array($m['confirm'] ?? null) ? $m['confirm'] : [], $now, $host)]);
     }
     if ($action === 'resume') {
         reply34(200, ['ok' => true] + peer_resume_after_rollback($db, $node, $coinId, $send, $now));

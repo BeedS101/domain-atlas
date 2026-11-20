@@ -196,4 +196,7 @@ function cleanup() {
   for (const n of Object.values(nodes)) killGroup(n);
   fs.rmSync(work, { recursive: true, force: true });
 }
-module.exports = { OP, consentAccept, writeRoster, target, signedOp, legacyOp, legacyCreateCoin, coinRequest, bindingOf, remember, A, B, C, D, nodes, issuer, issuerKey, POLICY, b64u, canon, sleep, wallet, start, stop, call, get, post, scan, op, createCoin, NOW, iso, transfer, units, headOf, level, levelOk, hex, credential, cleanup };
+// The failure count is per client address, and a test that probes many unrelated refusals from one address would otherwise run into it.
+const forgetFailures = (n) => require('child_process').execFileSync('php', ['-r', '$d=new PDO("sqlite:".$argv[1]);$d->exec("DELETE FROM operator_failures");', require('path').join(n.priv, 'chainlabs-operator.sqlite')]);
+
+module.exports = { forgetFailures, OP, consentAccept, writeRoster, target, signedOp, legacyOp, legacyCreateCoin, coinRequest, bindingOf, remember, A, B, C, D, nodes, issuer, issuerKey, POLICY, b64u, canon, sleep, wallet, start, stop, call, get, post, scan, op, createCoin, NOW, iso, transfer, units, headOf, level, levelOk, hex, credential, cleanup };

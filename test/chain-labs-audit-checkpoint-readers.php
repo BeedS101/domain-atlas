@@ -156,5 +156,94 @@ put_file_back($w, $one);
 $both = ledger_guard_check($w['db'], $w['coin'], false, $NOW);
 t($both['status'] === 'halted' || ($both['status'] ?? '') === 'checkpoint-corrupt', 'with the last record of both files damaged the rollback is still seen', $both);
 
+echo "\n== interrupted writes\n";
+$w = single_coin();
+$closed = $w['file'] . '.checkpoints/' . $w['coin'] . '.closed';
+ledger_close_sale($w['db'], $w['coin'], $rid1, $NOW);
+ledger_close_sale($w['db'], $w['coin'], $rid2, $NOW);
+$whole = (string) file_get_contents($closed);
+// A whole record that only lacks its newline is a record.
+file_put_contents($closed, rtrim($whole, "\n"));
+t(array_keys(guard_closed_ids($w['db'], $w['coin'])) === [$rid1, $rid2], 'a last record that only lacks its newline is read');
+$rid3 = bin2hex(random_bytes(16));
+ledger_close_sale($w['db'], $w['coin'], $rid3, $NOW);
+t(array_keys(guard_closed_ids($w['db'], $w['coin'])) === [$rid1, $rid2, $rid3], 'and the next record carries on from it without breaking the chain');
+// Two cut writes in a row: the second begins on a new line after the first.
+file_put_contents($closed, '{"v":1,"coinId":"' . $w['coin'] . '","kind":"clo', FILE_APPEND);
+file_put_contents($closed, "\n" . '{"v":1,"coinId":"' . $w['coin'] . '","kind":"cl', FILE_APPEND);
+t(count(guard_closed_ids($w['db'], $w['coin'])) === 3, 'a cut write followed by another cut write is read as what came before');
+$rid4 = bin2hex(random_bytes(16));
+ledger_close_sale($w['db'], $w['coin'], $rid4, $NOW);
+t(count(guard_closed_ids($w['db'], $w['coin'])) === 4, 'and writing goes on');
+// A cut write that a newline follows and nothing else cannot be told from a damaged last record, so it is damage.
+$damagedTail = $closed . '.x';
+copy($closed, $damagedTail);
+file_put_contents($closed, '{"v":1,"coinId":"' . $w['coin'] . '","kind":"clo' . "\n", FILE_APPEND);
+t(str_contains(why(fn() => guard_closed_ids($w['db'], $w['coin'])), 'damaged'), 'a record cut short that ends with a newline and has nothing after it is damage');
+t(str_contains(why(fn() => ledger_sale_closed($w['db'], $w['coin'], bin2hex(random_bytes(16)))), 'checkpoint-unavailable') && refuses(fn() => ledger_close_sale($w['db'], $w['coin'], bin2hex(random_bytes(16)), $NOW), 'checkpoint-unavailable'), 'so nothing is closed or asked about the file until it is looked at, and no new record is added to it');
+copy($damagedTail, $closed);
+unlink($damagedTail);
+t(count(guard_closed_ids($w['db'], $w['coin'])) === 4, 'the file as it was reads again');
+
+echo "\n== writers and a reader at the same time\n";
+$w = single_coin();
+$closed = $w['file'] . '.checkpoints/' . $w['coin'] . '.closed';
+@mkdir(dirname($closed), 0700, true);
+$procs = [];
+$pipes = [];
+foreach (['a', 'b', 'c'] as $tag) $procs[$tag] = proc_open([PHP_BINARY, __DIR__ . '/support/closed-append-worker.php', $closed, $w['coin'], '60', $tag], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes[$tag]);
+$reads = 0;
+$problems = [];
+do {
+    $running = false;
+    foreach ($procs as $proc) if (proc_get_status($proc)['running']) $running = true;
+    try { guard_closed_ids($w['db'], $w['coin']); $reads++; } catch (RuntimeException $e) { $problems[] = $e->getMessage(); }
+    $status = ledger_guard_dir($w['db']) !== null ? guard_read($closed) : null;
+    if ($status !== null && $status['corrupt'] !== null) $problems[] = $status['corrupt'];
+} while ($running);
+foreach ($procs as $tag => $proc) { stream_get_contents($pipes[$tag][1]); stream_get_contents($pipes[$tag][2]); proc_close($proc); }
+t($reads > 5 && $problems === [], 'a reader never reports damage while three writers append', ['reads' => $reads, 'problems' => array_slice($problems, 0, 3)]);
+t(count(guard_closed_ids($w['db'], $w['coin'])) === 180, 'and every record the writers wrote is there once they are done', count(guard_closed_ids($w['db'], $w['coin'])));
+
+echo "\n== an approval record that is not the last record is damaged\n";
+cluster(3);
+$c = open_coin(3, 2);
+open_now($c);
+$bLog = $CLUSTER['b.example']['file'] . '.checkpoints/' . $c['coin'] . '.log';
+$first = ledger_prepare_transfer(ndb('a.example'), $c['coin'], ledger_grant_authorization(ndb('a.example'), $c['coin'], ['key' => $c['treasury']['key'], 'private' => $c['treasury']['priv']], owner()['key'], '100', max($NOW, ledger_head_time(ndb('a.example'), $c['coin']))), max($NOW, ledger_head_time(ndb('a.example'), $c['coin'])));
+$envelope = peer_envelope(node('a.example'), 'b.example', 'approve', ['coinId' => $c['coin'], 'prepared' => ['public' => $first['public'], 'private' => $first['private'], 'hash' => $first['hash']]], $NOW);
+peer_handle(ndb('b.example'), node('b.example'), json_decode(json_encode($envelope), true), $NOW, 'transport');
+$kept = (string) file_get_contents($bLog);
+$rows = explode("\n", rtrim($kept, "\n"));
+$idx = null;
+foreach ($rows as $i => $row) if (str_contains($row, '"kind":"approve"')) $idx = $i;
+$rows[$idx] = preg_replace('/"at":(\d)/', '"at":9$1', $rows[$idx], 1);
+file_put_contents($bLog, implode("\n", $rows) . "\n");
+t(refuses(fn() => ledger_approval_memory(ndb('b.example'), $c['coin'], $first['public']['index']), 'checkpoint-unavailable'), 'a damaged approval record that other records follow is refused (the reader already caught this)');
+file_put_contents($bLog, $kept);
+t(isset(ledger_approval_memory(ndb('b.example'), $c['coin'], $first['public']['index'])[$first['hash']]), 'and the file as it was gives the approval back');
+
+echo "\n== recovery: nothing sets a partner's approvals aside\n";
+cluster(3);
+$c = open_coin(3, 2);
+open_now($c);
+foreach (['b.example', 'a.example'] as $domain) {
+    $log = $CLUSTER[$domain]['file'] . '.checkpoints/' . $c['coin'] . '.log';
+    $text = (string) file_get_contents($log);
+    $rows = explode("\n", rtrim($text, "\n"));
+    $rows[0] = preg_replace('/"at":(\d)/', '"at":9$1', $rows[0], 1);
+    file_put_contents($log, implode("\n", $rows) . "\n");
+    $head = ledger_head(ndb($domain), $c['coin']);
+    $confirm = ['databaseIndex' => $head['index'], 'databaseHash' => $head['hash']];
+    if ($domain === 'b.example') {
+        t(refuses(fn() => ledger_guard_reseal(ndb($domain), $c['coin'], $confirm, $NOW, $domain), 'approvals-unrecoverable') && is_file($log) && glob($log . '.damaged-*') === [], 'a partner of a coin of several domains cannot have its damaged log replaced: the file stays where it is');
+        t(refuses(fn() => ledger_guard_reseal(ndb($domain), $c['coin'], $confirm, $NOW, null), 'approvals-unrecoverable'), 'nor when the caller does not say which domain it is');
+        t(refuses(fn() => ledger_approval_memory(ndb($domain), $c['coin'], 1), 'checkpoint-unavailable'), 'and it approves nothing for that coin while the file is damaged');
+    } else {
+        $sealed = ledger_guard_reseal(ndb($domain), $c['coin'], $confirm, $NOW, $domain);
+        t(isset($sealed['keptAs']) && is_file(dirname($log) . '/' . $sealed['keptAs']), 'the authority, which gives no approvals, can still begin a new file, and the old one is kept');
+    }
+}
+
 echo "\n" . ($failures === 0 ? 'ALL ' . $total . ' CHAIN-LABS CHECKPOINT READER CHECKS PASSED' : $failures . ' of ' . $total . ' checks FAILED') . "\n";
 exit($failures === 0 ? 0 : 1);
