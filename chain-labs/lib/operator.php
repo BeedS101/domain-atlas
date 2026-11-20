@@ -43,11 +43,13 @@ const OPERATOR_ACTIONS = [
     'operator/activate' => true,
     // A partner operator's consent to the genesis of a coin another domain proposes (lib/consent.php).
     'spend34/consent-list' => false, 'spend34/consent-accept' => true, 'spend34/consent-decline' => true,
+    // Signature format 2 (lib/sigformat.php): the readiness of this domain and its partners, and the activation that cannot be undone.
+    'spend34/sigformat-status' => false, 'spend34/sigformat-activate' => true,
 ];
 
 // Actions that never take the operator token, not even before the token's date and before signed requests are activated: they are new, so
-// nothing depends on a token for them, and a consent is the last thing to leave to the weaker credential.
-const OPERATOR_SIGNED_ONLY = ['spend34/consent-list' => true, 'spend34/consent-accept' => true, 'spend34/consent-decline' => true];
+// nothing depends on a token for them, and a consent or a change of signature format is the last thing to leave to the weaker credential.
+const OPERATOR_SIGNED_ONLY = ['spend34/consent-list' => true, 'spend34/consent-accept' => true, 'spend34/consent-decline' => true, 'spend34/sigformat-status' => true, 'spend34/sigformat-activate' => true];
 
 final class OperatorError extends RuntimeException
 {

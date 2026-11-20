@@ -523,6 +523,78 @@ const clearCache = (n, coinId) => fs.rmSync(path.join(n.priv, 'scan35-heads-' + 
     const flat = await V.verifySignedEntry(live.info.genesis, { public: live.items[3].entry, hash: live.items[3].hash, authoritySignature: live.items[3].authoritySignature });
     line(flat.ok && !(await V.verifySignedEntry(live.info.genesis, { public: { ...live.items[3].entry, amount: '8' }, hash: live.items[3].hash, authoritySignature: live.items[3].authoritySignature })).ok, 'an entry the authority signed verifies, and the same entry changed does not');
     line((await V.fingerprint(live.info.genesis.roster[0].key)).length === 16 && V.derToRaw(new Uint8Array([1, 2, 3])) === null, 'a key has a short fingerprint and a damaged signature is refused');
+
+    console.log('\n== the verifier reads both signature formats and keeps the ratchet');
+    {
+      // Format 2 signs typed messages that name the coin, the position and the signer; format 1 signed the bare hash. Chains here carry real
+      // signatures in each, so only the format rules decide.
+      const COIN = 'cd'.repeat(16);
+      const fx = (kinds, genesisKinds = null) => {
+        const ds = ['x.example', 'y.example'].map(dom);
+        const genesis = { type: 'atlas.ledger.genesis', v: 1, coinId: COIN, symbol: 'FMT', name: 'Formats', decimals: 0, maxUnits: '1000', initialUnits: '100', mode: 'multi', visibility: 'public',
+          authority: ds[0].name, threshold: 2, roster: ds.map((d) => ({ domain: d.name, key: d.key })), faucet: null, createdAt: '2026-01-01T00:00:00Z', treasuryRef: 'T'.repeat(87) };
+        const digest = sha(canon(genesis));
+        const gKinds = genesisKinds || [kinds[0], kinds[0]];
+        const entry0 = { type: 'genesis', coinId: COIN, index: 0, prevHash: digest, executedAt: genesis.createdAt, amount: '100', from: null, to: genesis.treasuryRef };
+        const sigOf = (d, index, hash, kind) => d.sign(kind === 'v2' ? V.entrySigText(COIN, index, hash, d.name) : hash);
+        const items = [{ entry: entry0, hash: sha(canon(entry0)), approvals: ds.map((d, i) => ({ domain: d.name, signature: d.sign(gKinds[i] === 'v2' ? V.genesisSigText(COIN, digest, d.name) : digest) })) }];
+        items[0].authoritySignature = sigOf(ds[0], 0, items[0].hash, kinds[0]);
+        for (let i = 1; i < kinds.length; i++) {
+          const entry = { type: 'transfer', coinId: COIN, index: i, prevHash: items[i - 1].hash, executedAt: '2026-01-01T00:00:0' + i + 'Z', amount: '5', from: genesis.treasuryRef, to: 'U'.repeat(87) };
+          const hash = sha(canon(entry));
+          items.push({ entry, hash, authoritySignature: sigOf(ds[0], i, hash, kinds[i]), approvals: [{ domain: ds[1].name, signature: ds[1].sign(canon({ type: 'atlas.ledger.entry.approval', v: 1, coinId: COIN, index: i, hash })) }] });
+        }
+        return { ds, genesis, digest, items, info: { genesis, genesisDigest: digest } };
+      };
+      const L = 'legacy', N = 'v2';
+      const ran = (f) => run(f.info, f.items);
+      let r = await ran(fx([L, L, L, L]));
+      line(r.ok && r.checked === 4 && r.v2From === null, 'a chain signed throughout in format 1 verifies, and no point of change is reported', r);
+      r = await ran(fx([L, L, N, N]));
+      line(r.ok && r.checked === 4 && r.v2From === 2, 'a chain of format 1 entries followed by format 2 entries verifies, and reports where the change was', r);
+      r = await ran(fx([N, N, N], [N, N]));
+      line(r.ok && r.v2From === 0, 'a chain opened in format 2, genesis signatures included, verifies from entry 0', r);
+      r = await ran(fx([L, N, L]));
+      line(!r.ok && r.problem.index === 2 && r.problem.check === 'authority-signature' && /older format/.test(r.problem.detail), 'a format 1 signature after a format 2 one is refused at that entry', r.problem);
+      r = await ran(fx([L, N, N, L]));
+      line(!r.ok && r.problem.index === 3, 'also when other format 2 entries come between', r.problem);
+      r = await ran(fx([N, N], [N, L]));
+      line(!r.ok && r.problem.index === 0 && r.problem.check === 'genesis-signature' && /older format/.test(r.problem.detail), 'a format 2 entry 0 with one genesis signature in format 1 is refused', r.problem);
+      r = await ran(fx([L, L], [N, N]));
+      line(r.ok, 'a format 1 entry 0 may carry genesis signatures in format 2', r);
+      r = await ran(fx([L, L], [N, L]));
+      line(r.ok, 'and a mixture of the two', r);
+
+      const base = fx([L, N, N]);
+      const crossed = (change) => { const f = fx([L, N, N]); change(f); return ran(f); };
+      r = await crossed((f) => { f.items[1].authoritySignature = f.ds[0].sign(V.genesisSigText(COIN, f.items[1].hash, f.ds[0].name)); });
+      line(!r.ok && r.problem.index === 1 && r.problem.check === 'authority-signature', 'a genesis-purpose signature over an entry\'s hash is not an authority signature', r.problem);
+      r = await crossed((f) => { f.items[0].approvals[0].signature = f.ds[0].sign(V.entrySigText(COIN, 0, f.digest, f.ds[0].name)); });
+      line(!r.ok && r.problem.index === 0 && r.problem.check === 'genesis-signature', 'and an authority signature over the digest is not a genesis signature', r.problem);
+      r = await crossed((f) => { f.items[1].authoritySignature = f.ds[0].sign(V.entrySigText(COIN, 2, f.items[1].hash, f.ds[0].name)); });
+      line(!r.ok && r.problem.index === 1, 'a format 2 signature made for another index is refused', r.problem);
+      r = await crossed((f) => { f.items[1].authoritySignature = f.ds[0].sign(V.entrySigText('ef'.repeat(16), 1, f.items[1].hash, f.ds[0].name)); });
+      line(!r.ok && r.problem.index === 1, 'for another coin', r.problem);
+      r = await crossed((f) => { f.items[1].authoritySignature = f.ds[0].sign(V.entrySigText(COIN, 1, f.items[1].hash, 'y.example')); });
+      line(!r.ok && r.problem.index === 1, 'or one that names another signer', r.problem);
+      r = await crossed((f) => { f.items[1].authoritySignature = f.ds[1].sign(V.entrySigText(COIN, 1, f.items[1].hash, 'x.example')); });
+      line(!r.ok && r.problem.index === 1, 'or one signed by another domain\'s key', r.problem);
+
+      const head = (f, index, kind, over = {}) => {
+        const it = f.items[index];
+        const payload = { type: 'atlas.ledger.head', v: 1, coinId: COIN, domain: f.ds[1].name, index, hash: it.hash, issuedAt: '2026-01-01T00:00:09Z', ...over };
+        return { payload, signature: f.ds[1].sign(canon(payload)), public: it.entry, authoritySignature: f.ds[0].sign(kind === 'v2' ? V.entrySigText(COIN, index, it.hash, f.ds[0].name) : it.hash) };
+      };
+      line((await V.verifyHead(base.genesis, head(base, 1, N))).ok && (await V.verifyHead(base.genesis, head(base, 0, L))).ok, 'a head statement carries the authority signature in either format when nothing is known about the chain');
+      line((await V.verifyHead(base.genesis, head(base, 0, L), { v2From: 1 })).ok, 'a format 1 head before the point of change is still accepted');
+      const late = await V.verifyHead(base.genesis, head(base, 2, L), { v2From: 1 });
+      line(!late.ok && /older format/.test(late.reason), 'a format 1 head at or after the point of change is refused', late);
+      line((await V.verifyHead(base.genesis, head(base, 2, N), { v2From: 1 })).ok, 'and a format 2 head after it is accepted');
+      line(!(await V.verifyHead(base.genesis, { ...head(base, 2, N), authoritySignature: base.ds[0].sign(V.genesisSigText(COIN, base.items[2].hash, base.ds[0].name)) })).ok, 'a genesis-purpose signature in a head is refused');
+      const ev = (index, kind) => ({ public: base.items[index].entry, hash: base.items[index].hash, authoritySignature: base.ds[0].sign(kind === 'v2' ? V.entrySigText(COIN, index, base.items[index].hash, base.ds[0].name) : base.items[index].hash) });
+      line((await V.verifySignedEntry(base.genesis, ev(0, L))).ok && (await V.verifySignedEntry(base.genesis, ev(2, N))).ok && (await V.verifySignedEntry(base.genesis, ev(2, L))).ok, 'evidence accepts an entry the authority signed in either format');
+      line(!(await V.verifySignedEntry(base.genesis, { ...ev(2, N), authoritySignature: base.ds[0].sign(V.genesisSigText(COIN, base.items[2].hash, base.ds[0].name)) })).ok, 'but not a signature made for another purpose');
+    }
   } finally {
     S.cleanup();
   }

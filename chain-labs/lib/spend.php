@@ -110,7 +110,7 @@ function spend_execute(PDO $db, string $coinId, string $digest, string $authorit
             // A request that started earlier than the entry just written executes at that entry's time, not before it.
             $clock = max($now, ledger_head_time($db, $coinId));
             $prepared = ledger_prepare_transfer($db, $coinId, $authorization, $clock);
-            $done = ledger_commit($db, $coinId, $prepared, ledger_sign($authorityPrivatePem, $prepared['hash']), [], $clock, false, $reading);
+            $done = ledger_commit($db, $coinId, $prepared, ledger_sign_entry($db, $coinId, $authorityPrivatePem, (int) $prepared['public']['index'], $prepared['hash']), [], $clock, false, $reading);
             break;
         } catch (LedgerError $e) {
             $current = spend_proposal($db, $coinId, $digest);
@@ -167,11 +167,18 @@ function spend_receipt(PDO $db, string $coinId, int $index): array
 
 // What a wallet does with a receipt: the hash is the digest of the entry, the authority signed it, and, when the
 // previous hash is known, the entry extends it.
-function spend_verify_receipt(array $receipt, string $authorityPublicPem, ?string $previousHash = null): bool
+// The authority's domain is needed for a format 2 signature, which names it. $v2From is the first index the receiving side already knows to
+// carry a format 2 authority signature on this coin: a format 1 signature at or after it is refused, so a single receipt cannot step around the ratchet.
+function spend_verify_receipt(array $receipt, string $authorityPublicPem, ?string $previousHash = null, ?string $authorityDomain = null, ?int $v2From = null): bool
 {
     $entry = $receipt['entry'] ?? null;
     if (!is_array($entry) || !is_string($receipt['hash'] ?? null) || ledger_digest($entry) !== $receipt['hash']) return false;
-    if (!ledger_verify($authorityPublicPem, $receipt['hash'], $receipt['authoritySignature'] ?? null)) return false;
+    $index = $entry['index'] ?? null;
+    if (!is_int($index) || !is_string($entry['coinId'] ?? null)) return false;
+    $kind = $authorityDomain === null
+        ? (ledger_verify($authorityPublicPem, $receipt['hash'], $receipt['authoritySignature'] ?? null) ? SIGFORMAT_LEGACY : null)
+        : sigformat_entry_kind($authorityPublicPem, $entry['coinId'], $index, $receipt['hash'], $authorityDomain, $receipt['authoritySignature'] ?? null);
+    if ($kind === null || ($kind === SIGFORMAT_LEGACY && $v2From !== null && $index >= $v2From)) return false;
     return $previousHash === null || ($entry['prevHash'] ?? null) === $previousHash;
 }
 

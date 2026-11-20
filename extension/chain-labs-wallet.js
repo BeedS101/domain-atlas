@@ -160,6 +160,20 @@
     return canonical({ type: 'atlas.ledger.entry.approval', v: 1, coinId, index, hash });
   }
 
+  // The bytes a domain signs in signature format 2 (the same text as sigformat_genesis_bytes and sigformat_entry_bytes in the PHP ledger). The
+  // `v:1` inside is the version of the message; "format 2" is the signature format. Format 1 signed the bare 64-character hex digest or hash.
+  function genesisSigText(coinId, digest, domain) {
+    return canonical({ type: 'atlas.ledger.genesis.signature', v: 1, coinId, digest, domain });
+  }
+  function entrySigText(coinId, index, hash, domain) {
+    return canonical({ type: 'atlas.ledger.entry.authority', v: 1, coinId, index, hash, domain });
+  }
+  // Which format a signature is in: 'v2', 'legacy', or null when it verifies in neither. Format 1 is read only for a bare lowercase hex hash.
+  async function signatureKind(pem, v2Text, bare, signature) {
+    if (await verifyDomainSignature(pem, v2Text, signature)) return 'v2';
+    return /^[a-f0-9]{64}$/.test(bare) && await verifyDomainSignature(pem, bare, signature) ? 'legacy' : null;
+  }
+
   // A genesis in the form the ledger writes: one to five distinct domains with P-256 keys, the authority first, and a threshold that fits the mode.
   // Returns { authority, threshold, keys: {domain: pem}, domains: [domain] } or null.
   function readGenesis(g, coinId) {
@@ -713,10 +727,14 @@
         if (known && !sameKey(known.key, read.keys[d])) throw Object.assign(new Error('The genesis names another key for ' + d + ' than the one pinned for it, so nothing was signed.'), { code: 'wrong-genesis' });
       }
       if (!pin) {
-        await checkGenesisEntry(record, g, digest, read);
-        await pinGenesis(record.domain, coinId, { digest, authority: read.authority, threshold: read.threshold, roster: read.domains, unpinned: read.domains.filter((d) => d !== record.domain && !list.some((x) => x.domain === d)), pinnedAt: iso(nowMs()) });
+        const opened = await checkGenesisEntry(record, g, digest, read);
+        await pinGenesis(record.domain, coinId, { digest, authority: read.authority, threshold: read.threshold, roster: read.domains, unpinned: read.domains.filter((d) => d !== record.domain && !list.some((x) => x.domain === d)), pinnedAt: iso(nowMs()), v2From: opened.entryZero === 'v2' ? 0 : null });
       }
-      return { genesis: g, digest, authority: read.authority, threshold: read.threshold, keys: read.keys, raw: r.json };
+      // Where the coin's authority signatures moved to format 2, as far as this wallet has seen: format 1 is not accepted from there on.
+      const held = (await recordFor(record.domain)).genesis;
+      const pinned = pin || (isObject(held) ? held[coinId] : null);
+      const seen = isObject(pinned) ? pinned.v2From : null;
+      return { genesis: g, digest, authority: read.authority, threshold: read.threshold, keys: read.keys, raw: r.json, v2From: Number.isInteger(seen) ? seen : null };
     }
 
     // The coin's first entry, from the domain: the authority signed it, and every roster domain signed this genesis digest. It is what
@@ -730,13 +748,19 @@
       if (!isObject(e) || e.type !== 'genesis' || e.index !== 0 || e.coinId !== g.coinId || e.prevHash !== digest || !HASH_RE.test(rc.hash || '')) throw bad();
       let hash;
       try { hash = await sha256Hex(canonical(e)); } catch (err) { throw bad(); }
-      if (hash !== rc.hash || !await verifyDomainSignature(read.keys[read.authority], rc.hash, rc.authoritySignature)) throw bad();
+      if (hash !== rc.hash) throw bad();
+      // Entry 0 is in format 2 on a coin opened in it, and then every genesis signature must be in format 2 too; a coin from before has format 1 throughout.
+      const zero = await signatureKind(read.keys[read.authority], entrySigText(g.coinId, 0, rc.hash, read.authority), rc.hash, rc.authoritySignature);
+      if (zero === null) throw bad();
       const signed = new Set();
       for (const a of Array.isArray(rc.approvals) ? rc.approvals : []) {
-        if (!isObject(a) || typeof a.domain !== 'string' || read.keys[a.domain] === undefined || signed.has(a.domain) || !await verifyDomainSignature(read.keys[a.domain], digest, a.signature)) throw bad();
+        const key = isObject(a) && typeof a.domain === 'string' ? read.keys[a.domain] : undefined;
+        const kind = key === undefined ? null : await signatureKind(key, genesisSigText(g.coinId, digest, a.domain), digest, a.signature);
+        if (kind === null || signed.has(a.domain) || (zero === 'v2' && kind !== 'v2')) throw bad();
         signed.add(a.domain);
       }
       if (read.domains.some((d) => !signed.has(d))) throw bad();
+      return { entryZero: zero };
     }
 
     function pinGenesis(domain, coinId, pin) {
@@ -749,6 +773,19 @@
         kept[coinId] = pin;
         const ids = Object.keys(kept);
         if (ids.length > GENESIS_KEPT) for (const id of ids.slice(0, ids.length - GENESIS_KEPT)) delete kept[id];
+        await env.saveDomains(list.map((d) => (d.domain === domain ? Object.assign({}, d, { genesis: kept }) : d)));
+      });
+    }
+
+    // Remembers the lowest index at which this wallet has seen a verified format 2 authority signature on a coin, so that an authority signature in
+    // format 1 at or after it is refused for a single receipt as it is for a whole chain. It only ever moves down.
+    function pinV2From(domain, coinId, index) {
+      return serial(async () => {
+        const list = await domains();
+        const entry = list.find((d) => d.domain === domain);
+        const pin = entry && isObject(entry.genesis) ? entry.genesis[coinId] : null;
+        if (!isObject(pin) || (Number.isInteger(pin.v2From) && pin.v2From <= index)) return;
+        const kept = Object.assign({}, entry.genesis, { [coinId]: Object.assign({}, pin, { v2From: index }) });
         await env.saveDomains(list.map((d) => (d.domain === domain ? Object.assign({}, d, { genesis: kept }) : d)));
       });
     }
@@ -832,7 +869,10 @@
       let hash;
       try { hash = await sha256Hex(canonical(e)); } catch (err) { throw unverified('the entry cannot be hashed'); }
       if (hash !== receipt.hash) throw unverified('the hash is not the hash of the entry');
-      if (!await verifyDomainSignature(v.keys[v.authority], receipt.hash, receipt.authoritySignature)) throw unverified(v.authority + ' did not sign it');
+      const kind = await signatureKind(v.keys[v.authority], entrySigText(coinId, e.index, receipt.hash, v.authority), receipt.hash, receipt.authoritySignature);
+      if (kind === null) throw unverified(v.authority + ' did not sign it');
+      if (kind === 'legacy' && Number.isInteger(v.v2From) && e.index >= v.v2From) throw unverified(v.authority + ' signed it in the older format after the coin moved to the newer one');
+      if (kind === 'v2') await pinV2From(record.domain, coinId, e.index);
       const signers = new Set([v.authority]);
       const text = approvalText(coinId, e.index, receipt.hash);
       for (const a of receipt.approvals) {

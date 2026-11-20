@@ -27,6 +27,7 @@ function ledger_fail(string $reason, string $message, array $detail = []): never
 }
 
 require_once __DIR__ . '/checkpoint.php';
+require_once __DIR__ . '/sigformat.php';
 
 // ---------- encoding, hashing, signatures ----------
 
@@ -139,6 +140,9 @@ function ledger_schema(PDO $db): void
         decimals INTEGER NOT NULL, max_units INTEGER NOT NULL CHECK(max_units BETWEEN 1 AND " . LEDGER_MAX_UNITS . "),
         initial_units INTEGER NOT NULL CHECK(initial_units BETWEEN 0 AND " . LEDGER_MAX_UNITS . "), threshold INTEGER NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('pending','active','frozen')), ref_secret TEXT, treasury_key TEXT)");
+    // The domain's record that it signs in format 2 (lib/sigformat.php). The durable record is a file beside the checkpoints; this row is its
+    // counterpart in the database, and the two must agree.
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_sig_format(id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL, domain TEXT NOT NULL, activated_at INTEGER NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_genesis_sigs(coin_id TEXT NOT NULL, domain TEXT NOT NULL, signature TEXT NOT NULL, PRIMARY KEY(coin_id,domain))');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_log(
         coin_id TEXT NOT NULL, idx INTEGER NOT NULL, hash TEXT NOT NULL, prev_hash TEXT NOT NULL, public_json TEXT NOT NULL,
@@ -343,9 +347,13 @@ function ledger_genesis_digest(array $genesis): string
     return ledger_digest($genesis);
 }
 
-function ledger_genesis_sign(array $genesis, string $privatePem): string
+// Signs the genesis as $domain. Format 2 names the coin and the signer; format 1 signs the bare digest.
+function ledger_genesis_sign(array $genesis, string $privatePem, ?string $domain = null, bool $v2 = false): string
 {
-    return ledger_sign($privatePem, ledger_genesis_digest($genesis));
+    $digest = ledger_genesis_digest($genesis);
+    if (!$v2) return ledger_sign($privatePem, $digest);
+    if ($domain === null) ledger_fail('bad-genesis', 'a format 2 genesis signature needs the signing domain');
+    return sigformat_sign_genesis($privatePem, (string) $genesis['coinId'], $digest, $domain);
 }
 
 // Stores a coin as pending. The treasury key and, for a private coin, the reference secret are private state.
@@ -389,7 +397,10 @@ function ledger_add_genesis_signature(PDO $db, string $coinId, string $domain, s
     if ($coin['state'] !== 'pending') ledger_fail('not-pending', 'the genesis is already complete');
     $key = ledger_roster_key($coin['genesis'], $domain);
     if ($key === null) ledger_fail('not-in-roster', 'that domain is not in the roster');
-    if (!ledger_verify($key, $coin['genesis_digest'], $signature)) ledger_fail('bad-signature', 'the genesis signature does not verify');
+    $kind = ledger_genesis_kind($coin['genesis'], $coinId, $coin['genesis_digest'], $domain, $signature);
+    if ($kind === null) ledger_fail('bad-signature', 'the genesis signature does not verify');
+    // An authority that signs in format 2 opens only coins whose genesis signatures are in format 2: no mixture is ever written.
+    if ($kind === SIGFORMAT_LEGACY && ledger_sig_activated($db, $coin['genesis']['authority'])) ledger_fail('partner-needs-upgrade', $domain . ' signed the genesis in the older format; it must be upgraded and sign again');
     $db->prepare('INSERT OR REPLACE INTO ledger_genesis_sigs(coin_id,domain,signature) VALUES(?,?,?)')->execute([$coinId, $domain, $signature]);
 }
 
@@ -418,7 +429,9 @@ function ledger_write_genesis_entry(PDO $db, array $coin, array $entry, string $
 }
 
 // Opens the coin once every roster domain has signed its genesis: credits the initial units to the treasury as entry 0.
-function ledger_activate(PDO $db, string $coinId, string $authorityPrivatePem): void
+// Entry 0 is signed in format 2 once this domain has activated it, and then every genesis signature must be in format 2 as well: a coin never
+// opens with a mixture of format 1 genesis signatures and a format 2 entry 0.
+function ledger_activate(PDO $db, string $coinId, string $authorityPrivatePem, ?bool $v2 = null): void
 {
     $db->exec('BEGIN IMMEDIATE');
     try {
@@ -431,8 +444,15 @@ function ledger_activate(PDO $db, string $coinId, string $authorityPrivatePem): 
         foreach ($coin['genesis']['roster'] as $member) if (!isset($have[$member['domain']])) ledger_fail('genesis-unsigned', $member['domain'] . ' has not signed the genesis');
         $approvals = [];
         foreach ($have as $domain => $sig) $approvals[] = ['domain' => $domain, 'signature' => $sig];
+        $v2 ??= ledger_sig_activated($db, $coin['genesis']['authority']);
+        if ($v2) {
+            foreach ($have as $domain => $sig) {
+                if (ledger_genesis_kind($coin['genesis'], $coinId, $coin['genesis_digest'], $domain, $sig) !== SIGFORMAT_V2) ledger_fail('genesis-legacy-signature', $domain . ' signed this genesis in the older format; it must sign again before the coin opens');
+            }
+        }
         $entry = ledger_genesis_entry($coin, $approvals);
-        ledger_write_genesis_entry($db, $coin, $entry, ledger_sign($authorityPrivatePem, $entry['hash']));
+        $authority = $coin['genesis']['authority'];
+        ledger_write_genesis_entry($db, $coin, $entry, $v2 ? sigformat_sign_entry($authorityPrivatePem, $coinId, 0, $entry['hash'], $authority) : ledger_sign($authorityPrivatePem, $entry['hash']));
         $db->exec('COMMIT');
         try { ledger_guard_check($db, $coinId, true); } catch (Throwable $e) {}
     } catch (Throwable $e) {
@@ -455,14 +475,16 @@ function ledger_mirror_genesis(PDO $db, string $coinId, array $record): void
         $have = [];
         foreach ($approvals as $a) {
             $key = is_array($a) && is_string($a['domain'] ?? null) ? ledger_roster_key($genesis, $a['domain']) : null;
-            if ($key === null || isset($have[$a['domain']]) || !ledger_verify($key, $coin['genesis_digest'], $a['signature'] ?? null)) ledger_fail('bad-approval', 'a genesis signature does not verify');
-            $have[$a['domain']] = true;
+            $kind = $key === null ? null : ledger_genesis_kind($genesis, $coinId, $coin['genesis_digest'], $a['domain'], $a['signature'] ?? null);
+            if ($kind === null || isset($have[$a['domain']])) ledger_fail('bad-approval', 'a genesis signature does not verify');
+            $have[$a['domain']] = $kind;
         }
         foreach ($genesis['roster'] as $member) if (!isset($have[$member['domain']])) ledger_fail('genesis-unsigned', $member['domain'] . ' has not signed the genesis');
         $entry = ledger_genesis_entry($coin, $approvals);
         if (ledger_canonical($record['public'] ?? null) !== ledger_canonical($entry['public']) || ledger_canonical($record['private'] ?? null) !== ledger_canonical($entry['private']) || ($record['hash'] ?? null) !== $entry['hash']) ledger_fail('bad-entry', 'entry 0 is not the one the genesis gives');
-        $authorityKey = ledger_roster_key($genesis, $genesis['authority']);
-        if ($authorityKey === null || !ledger_verify($authorityKey, $entry['hash'], $record['authoritySignature'] ?? null)) ledger_fail('bad-authority-signature', 'the authority signature does not verify');
+        $zero = ledger_entry_kind($genesis, $coinId, 0, $entry['hash'], $record['authoritySignature'] ?? null);
+        if ($zero === null) ledger_fail('bad-authority-signature', 'the authority signature does not verify');
+        foreach ($have as $kind) if (!sigformat_genesis_allowed($kind, $zero)) ledger_fail('genesis-legacy-signature', 'a genesis signature is in the older format on a coin whose entry 0 is in the newer one');
         ledger_write_genesis_entry($db, $coin, $entry, $record['authoritySignature']);
         $db->exec('COMMIT');
         try { ledger_guard_check($db, $coinId, true); } catch (Throwable $e) {}
@@ -550,6 +572,53 @@ function ledger_account_ref(array $coin, string $key): string
 function ledger_approval_bytes(string $coinId, int $index, string $hash): string
 {
     return ledger_canonical(['type' => 'atlas.ledger.entry.approval', 'v' => 1, 'coinId' => $coinId, 'index' => $index, 'hash' => $hash]);
+}
+
+// ---------- signature formats (lib/sigformat.php) ----------
+
+// The format of a genesis signature by a roster domain: 'v2', 'legacy', or null when it verifies in neither.
+function ledger_genesis_kind(array $genesis, string $coinId, string $digest, string $domain, mixed $signature): ?string
+{
+    $key = ledger_roster_key($genesis, $domain);
+    return $key === null ? null : sigformat_genesis_kind($key, $coinId, $digest, $domain, $signature);
+}
+
+// The format of the authority's signature on an entry: 'v2', 'legacy', or null when it verifies in neither.
+function ledger_entry_kind(array $genesis, string $coinId, int $index, string $hash, mixed $signature): ?string
+{
+    $key = ledger_roster_key($genesis, $genesis['authority']);
+    return $key === null ? null : sigformat_entry_kind($key, $coinId, $index, $hash, $genesis['authority'], $signature);
+}
+
+// The format of the authority signature this log holds for an entry, or null when there is no such entry or it verifies in neither format.
+function ledger_stored_kind(PDO $db, array $genesis, string $coinId, int $index): ?string
+{
+    if ($index < 0) return null;
+    $row = $db->prepare('SELECT hash,authority_sig FROM ledger_log WHERE coin_id=? AND idx=?');
+    $row->execute([$coinId, $index]);
+    $found = $row->fetch(PDO::FETCH_ASSOC);
+    return $found ? ledger_entry_kind($genesis, $coinId, $index, (string) $found['hash'], $found['authority_sig']) : null;
+}
+
+// Whether the authority signs the entry at $index in format 2: once this domain has activated it, and for a coin whose log already holds a
+// format 2 authority signature just before it. A signature in format 1 after one in format 2 is refused everywhere, so a coin keeps format 2.
+function ledger_signs_v2(PDO $db, array $genesis, string $coinId, int $index): bool
+{
+    return ledger_sig_activated($db, $genesis['authority']) || ($index > 0 && ledger_stored_kind($db, $genesis, $coinId, $index - 1) === SIGFORMAT_V2);
+}
+
+// The authority's own signature on a genesis: format 2 once this domain has activated it, format 1 until then.
+function ledger_genesis_sign_own(PDO $db, array $genesis, string $privatePem, string $domain): string
+{
+    return ledger_genesis_sign($genesis, $privatePem, $domain, ledger_sig_activated($db, $domain));
+}
+
+// Signs the hash of the entry at $index as the coin's authority.
+function ledger_sign_entry(PDO $db, string $coinId, string $authorityPrivatePem, int $index, string $hash, ?bool $v2 = null): string
+{
+    $genesis = ledger_coin($db, $coinId)['genesis'];
+    $v2 ??= ledger_signs_v2($db, $genesis, $coinId, $index);
+    return $v2 ? sigformat_sign_entry($authorityPrivatePem, $coinId, $index, $hash, $genesis['authority']) : ledger_sign($authorityPrivatePem, $hash);
 }
 
 // Checks an owner's signed transfer and returns [from, to, amount, baseSeq, baseHead, nonce, purchase, version]. No state is
@@ -819,8 +888,11 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
         // the domains that committed them, and a copy that refused them could not catch up.
         $saleId = $public['purchase']['requestId'] ?? null;
         if (!$history && $saleId !== null && ledger_sale_closed($db, $coinId, $saleId)) ledger_fail('sale-closed', 'this sale was closed; it is not delivered');
-        $authorityKey = ledger_roster_key($genesis, $genesis['authority']);
-        if ($authorityKey === null || !ledger_verify($authorityKey, $hash, $authoritySignature)) ledger_fail('bad-authority-signature', 'the authority signature does not verify');
+        $kind = ledger_entry_kind($genesis, $coinId, (int) $public['index'], $hash, $authoritySignature);
+        if ($kind === null) ledger_fail('bad-authority-signature', 'the authority signature does not verify');
+        if (!sigformat_entry_allowed($kind, ledger_stored_kind($db, $genesis, $coinId, (int) $public['index'] - 1))) ledger_fail('signature-downgrade', 'the authority signed in the older format after a newer one');
+        // An entry this domain writes as the authority is in format 2 for good once the domain has activated it. History replayed or mirrored is not new.
+        if (!$history && $kind === SIGFORMAT_LEGACY && ledger_sig_activated($db, $genesis['authority'])) ledger_fail('signature-downgrade', 'this domain signs in the newer format only');
         // Approvals: the authority counts once through its signature above; every other approver is a distinct roster domain.
         $approvers = [$genesis['authority'] => true];
         $kept = [];
@@ -991,6 +1063,7 @@ function ledger_check(PDO $db, string $coinId): array
     $rows = $db->prepare('SELECT * FROM ledger_log WHERE coin_id=? ORDER BY idx');
     $rows->execute([$coinId]);
     $prev = $coin['genesis_digest'];
+    $previousKind = null;
     $expectedIndex = 0;
     $units = [];
     $seq = [];
@@ -1020,13 +1093,18 @@ function ledger_check(PDO $db, string $coinId): array
         if ($hash !== $row['hash'] || ($priv['hash'] ?? null) !== $hash) $problems[] = $where . 'hash does not match the public form';
         $prev = $row['hash'];
         $hashIndex[$row['hash']] = $i;
-        if ($authorityKey === null || !ledger_verify($authorityKey, $row['hash'], $row['authority_sig'])) $problems[] = $where . 'authority signature does not verify';
+        $kind = $authorityKey === null ? null : ledger_entry_kind($genesis, $coinId, $i, (string) $row['hash'], $row['authority_sig']);
+        if ($kind === null) $problems[] = $where . 'authority signature does not verify';
+        elseif (!sigformat_entry_allowed($kind, $previousKind)) $problems[] = $where . 'authority signature is in the older format after one in the newer format';
+        $previousKind = $kind ?? $previousKind;
         if ($i === 0) {
             if (($public['type'] ?? null) !== 'genesis' || ($public['amount'] ?? null) !== $genesis['initialUnits'] || ($public['to'] ?? null) !== $genesis['treasuryRef']) $problems[] = $where . 'does not credit the treasury with the initial units';
             foreach ($genesis['roster'] as $member) {
                 $sig = null;
                 foreach ($approvals as $a) if (($a['domain'] ?? null) === $member['domain']) $sig = $a['signature'] ?? null;
-                if ($sig === null || !ledger_verify($member['key'], $coin['genesis_digest'], $sig)) $problems[] = $where . $member['domain'] . ' has no valid genesis signature';
+                $genesisKind = $sig === null ? null : ledger_genesis_kind($genesis, $coinId, $coin['genesis_digest'], $member['domain'], $sig);
+                if ($genesisKind === null) $problems[] = $where . $member['domain'] . ' has no valid genesis signature';
+                elseif (!sigformat_genesis_allowed($genesisKind, $kind)) $problems[] = $where . $member['domain'] . ' signed the genesis in the older format on a coin whose entry 0 is in the newer one';
             }
             $treasuryKey = $priv['to'] ?? null;
             if (!is_string($treasuryKey) || $refFor($treasuryKey) !== $genesis['treasuryRef']) $problems[] = $where . 'the treasury key does not match its reference';

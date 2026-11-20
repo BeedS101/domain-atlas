@@ -60,7 +60,7 @@ console.log('\n== no private material in the folder');
 const stray = entries.filter((f) => !/\.(php|html|md|sha256)$/.test(f) && f !== 'lib');
 line(stray.length === 0, 'only PHP, HTML, README, the hash list and the lib folder are present', stray);
 const libFiles = fs.readdirSync(path.join(DIR, 'lib')).sort();
-line(JSON.stringify(libFiles) === JSON.stringify(['.htaccess', 'checkpoint.php', 'consent.php', 'gold-issuer.php', 'hosts.php', 'integrity-cli.php', 'ledger.php', 'market.php', 'operator-cli.php', 'operator.php', 'peer.php', 'policy.php', 'purchase.php', 'spend.php']), 'the lib folder holds the checkpoint, consent, host, integrity checker, ledger, market, operator, spend, peer, policy, purchase and Gold issuer libraries and the deny rule only', libFiles);
+line(JSON.stringify(libFiles) === JSON.stringify(['.htaccess', 'checkpoint.php', 'consent.php', 'gold-issuer.php', 'hosts.php', 'integrity-cli.php', 'ledger.php', 'market.php', 'operator-cli.php', 'operator.php', 'peer.php', 'policy.php', 'purchase.php', 'sigformat.php', 'spend.php']), 'the lib folder holds the checkpoint, consent, host, integrity checker, ledger, market, operator, signature format, spend, peer, policy, purchase and Gold issuer libraries and the deny rule only', libFiles);
 const secret = files.filter((f) => /BEGIN (EC |RSA )?PRIVATE KEY|"d"\s*:\s*"[A-Za-z0-9_-]{40,}"/.test(read(f)));
 line(secret.length === 0, 'no private key material in any file', secret);
 

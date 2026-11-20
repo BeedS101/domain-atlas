@@ -75,6 +75,7 @@ function peer_handle(PDO $db, array $node, array $envelope, int $now, callable $
         'approve' => peer_on_approve($db, $node, $from, $body, $now, $send),
         'notify' => peer_on_notify($db, $node, $from, $body, $now, $send),
         'head' => peer_on_head($db, $node, $from, $body, $now),
+        'sigformat' => peer_on_sigformat($node, $from, $body, $now),
         'freeze' => peer_on_freeze($db, $node, $from, $body, $now, $send),
         'close-sale' => peer_on_close_sale($db, $node, $from, $body, $now, $send),
         default => ledger_fail('unknown-action', 'unknown peer action'),
@@ -138,7 +139,8 @@ function peer_on_genesis(PDO $db, array $node, string $from, array $body, int $n
                 consent_add_proposal($db, $coinId, $digest, $now);
                 $verdict = 'awaiting';
             }
-            if ($verdict === 'sign') $signature = ledger_genesis_sign($genesis, $node['private']);
+            // A domain that has activated format 2 never signs in format 1; one that has not signs in format 2 only when the authority asks for it.
+            if ($verdict === 'sign') $signature = ledger_genesis_sign($genesis, $node['private'], $node['domain'], ledger_sig_activated($db, $node['domain']) || ($body['sig'] ?? null) === 2);
             $db->exec('COMMIT');
         } catch (Throwable $e) {
             ledger_rollback($db);
@@ -168,16 +170,19 @@ function peer_open_multi(PDO $db, array $node, array $genesis, string $treasuryK
     $coin = ledger_coin($db, $coinId);
     if ($coin['state'] !== 'pending') ledger_fail('not-pending', 'the coin is already open');
     if ($genesis['authority'] !== $node['domain']) ledger_fail('not-authority', 'only the authority opens a coin');
-    ledger_add_genesis_signature($db, $coinId, $node['domain'], ledger_genesis_sign($genesis, $node['private']));
-    $have = $db->prepare('SELECT domain FROM ledger_genesis_sigs WHERE coin_id=?');
+    ledger_add_genesis_signature($db, $coinId, $node['domain'], ledger_genesis_sign_own($db, $genesis, $node['private'], $node['domain']));
+    $have = $db->prepare('SELECT domain,signature FROM ledger_genesis_sigs WHERE coin_id=?');
     $have->execute([$coinId]);
-    $signed = array_flip($have->fetchAll(PDO::FETCH_COLUMN));
+    // Once this domain has activated format 2, a partner's earlier signature in format 1 does not count: the partner is asked again, in format 2.
+    $v2 = ledger_sig_activated($db, $node['domain']);
+    $signed = [];
+    foreach ($have->fetchAll(PDO::FETCH_ASSOC) as $row) if (!$v2 || ledger_genesis_kind($genesis, $coinId, ledger_genesis_digest($genesis), $row['domain'], $row['signature']) === SIGFORMAT_V2) $signed[$row['domain']] = true;
     // Every partner is asked in one attempt, so each sees the proposal; one that has not accepted, or declined, does not stop the others.
     $waiting = [];
     foreach ($genesis['roster'] as $member) {
         if (isset($signed[$member['domain']])) continue;
         try {
-            $answer = $send($member['domain'], peer_envelope($node, $member['domain'], 'genesis', ['genesis' => $genesis, 'treasuryKey' => $treasuryKey, 'refSecret' => $refSecret], $now));
+            $answer = $send($member['domain'], peer_envelope($node, $member['domain'], 'genesis', ['genesis' => $genesis, 'treasuryKey' => $treasuryKey, 'refSecret' => $refSecret] + ($v2 ? ['sig' => 2] : []), $now));
         } catch (LedgerError $e) {
             if ($e->reason !== 'needs-consent' && $e->reason !== 'consent-declined') throw $e;
             $waiting[$member['domain']] = $e->reason === 'needs-consent' ? 'awaiting' : 'declined';
@@ -193,6 +198,56 @@ function peer_open_multi(PDO $db, array $node, array $genesis, string $treasuryK
     }
     ledger_activate($db, $coinId, $node['private']);
     peer_notify_all($db, $node, $coinId, $send, $now);
+}
+
+// ---------- readiness for signature format 2 ----------
+
+// A domain asks a partner whether it can verify format 2. The partner does not say so: it gives its verdict on samples signed by a throwaway
+// key (lib/sigformat.php sigformat_probe_make), in a statement it signs, which names the asker and repeats the asker's fresh challenge.
+function peer_on_sigformat(array $node, string $from, array $body, int $now): array
+{
+    $challenge = $body['challenge'] ?? null;
+    if (!is_string($challenge) || !preg_match('/^[a-f0-9]{32}$/D', $challenge)) ledger_fail('bad-request', 'a challenge is needed');
+    $payload = ['type' => 'atlas.ledger.capability', 'v' => 1, 'domain' => $node['domain'], 'to' => $from, 'challenge' => $challenge, 'formats' => [1, 2],
+        'issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $now), 'results' => sigformat_probe_verdicts($body)];
+    return ['payload' => $payload, 'signature' => ledger_sign($node['private'], ledger_canonical($payload))];
+}
+
+// Asks $domain whether it can verify format 2. Returns ['ok' => bool, 'reason' => string]. Only a statement signed by the domain's pinned key,
+// naming this domain and the challenge sent now, with the right verdict on every sample, counts; an old answer, another domain's, or a plain version number does not.
+function peer_probe_sigformat(array $node, string $domain, callable $send, int $now): array
+{
+    $probe = sigformat_probe_make();
+    try {
+        $answer = $send($domain, peer_envelope($node, $domain, 'sigformat', ['challenge' => $probe['challenge'], 'key' => $probe['key'], 'samples' => $probe['samples']], $now));
+    } catch (LedgerError $e) {
+        return ['ok' => false, 'reason' => $e->reason === 'unknown-action' ? 'it has not been upgraded: it does not know the readiness check' : 'it did not answer the readiness check (' . $e->reason . ')'];
+    }
+    $pinned = $node['pinned'][$domain] ?? null;
+    $payload = is_array($answer) ? ($answer['payload'] ?? null) : null;
+    if ($pinned === null || !is_array($payload) || !ledger_verify($pinned, ledger_canonical($payload), $answer['signature'] ?? null)) return ['ok' => false, 'reason' => 'its answer is not signed by its pinned key'];
+    $fields = array_keys($payload);
+    sort($fields);
+    if ($fields !== ['challenge', 'domain', 'formats', 'issuedAt', 'results', 'to', 'type', 'v'] || $payload['type'] !== 'atlas.ledger.capability' || $payload['v'] !== 1) return ['ok' => false, 'reason' => 'its answer is malformed'];
+    if ($payload['domain'] !== $domain || $payload['to'] !== $node['domain'] || $payload['challenge'] !== $probe['challenge']) return ['ok' => false, 'reason' => 'its answer is not for this request'];
+    $at = is_string($payload['issuedAt']) ? strtotime($payload['issuedAt']) : false;
+    if ($at === false || abs($now - $at) > PEER_MAX_AGE_SECONDS) return ['ok' => false, 'reason' => 'its answer is not recent'];
+    if (ledger_canonical($payload['results']) !== ledger_canonical($probe['expect'])) return ['ok' => false, 'reason' => 'it gave the wrong verdict on a sample, so it cannot verify format 2'];
+    return ['ok' => true, 'reason' => ''];
+}
+
+// What an operator needs before activating: every other domain of every coin of several domains proves it can verify format 2, and no pending
+// coin of this domain holds a genesis signature in format 1. 'ready' is true only when both hold.
+function peer_sigformat_readiness(PDO $db, array $node, callable $send, int $now): array
+{
+    $partners = [];
+    foreach (sigformat_partners($db, $node['domain']) as $domain => $coins) {
+        $result = peer_probe_sigformat($node, $domain, $send, $now);
+        $partners[$domain] = $result + ['coins' => $coins];
+    }
+    $pending = sigformat_pending_legacy($db, $node['domain']);
+    $ready = $pending === [] && !in_array(false, array_column($partners, 'ok'), true);
+    return ['ready' => $ready, 'partners' => $partners, 'pendingWithOlderSignatures' => $pending];
 }
 
 // ---------- keeping the copies level ----------
@@ -533,7 +588,7 @@ function peer_execute(PDO $db, array $node, string $coinId, string $digest, call
                     ledger_fail('not-enough-approvals', 'the entry has ' . (count($approvals) + 1) . ' of ' . $coin['threshold'] . ' approvals' . ($refused ? '; refused by ' . implode(', ', array_map(fn($d, $r) => $d . ' (' . $r . (($detail[$d] ?? '') !== '' && $r !== 'bad-approval' ? ': ' . $detail[$d] : '') . ')', array_keys($refused), $refused)) : ''));
                 }
             }
-            $done = ledger_commit($db, $coinId, $prepared, ledger_sign($node['private'], $prepared['hash']), $approvals, $clock);
+            $done = ledger_commit($db, $coinId, $prepared, ledger_sign_entry($db, $coinId, $node['private'], (int) $prepared['public']['index'], $prepared['hash']), $approvals, $clock);
             peer_notify_all($db, $node, $coinId, $send, $now);
             return spend_receipt($db, $coinId, $done['index']);
         } catch (LedgerError $e) {
@@ -802,14 +857,13 @@ function peer_check_evidence(array $coin, array $evidence, ?int $now = null): vo
     }
 }
 
-// An entry in evidence: its public form is the one the hash names, it belongs to this coin and the authority signed the hash.
-// Returns [index, hash].
+// An entry in evidence: its public form is the one the hash names, it belongs to this coin and the authority signed the hash, in either format:
+// evidence only shows what the authority signed, so an old signature must stay usable as proof of it. Returns [index, hash].
 function peer_check_entry(array $coin, mixed $item): array
 {
-    $authorityKey = ledger_roster_key($coin['genesis'], $coin['genesis']['authority']);
     $public = is_array($item) ? ($item['public'] ?? null) : null;
     if (!is_array($public) || ($public['coinId'] ?? null) !== $coin['coin_id'] || !is_int($public['index'] ?? null) || ledger_digest($public) !== ($item['hash'] ?? null)
-        || !ledger_verify($authorityKey, (string) $item['hash'], $item['authoritySignature'] ?? null)) ledger_fail('bad-evidence', 'an entry in the evidence does not verify');
+        || ledger_entry_kind($coin['genesis'], $coin['coin_id'], $public['index'], (string) $item['hash'], $item['authoritySignature'] ?? null) === null) ledger_fail('bad-evidence', 'an entry in the evidence does not verify');
     return [$public['index'], $item['hash']];
 }
 

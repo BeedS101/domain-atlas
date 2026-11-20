@@ -124,9 +124,20 @@ input{width:100%;max-width:560px;border:1px solid #607490;background:#0a1423;col
     return null;
   }
   function approvalBytes(coinId, index, hash) { return canonical({ type: 'atlas.ledger.entry.approval', v: 1, coinId, index, hash }); }
+  // Signature format 2 signs typed messages that name the coin, the position and the signer; format 1 signed the bare 64-character hex digest or
+  // hash. The `v:1` inside a message is the version of the message, not the format. Format 1 is read only for a bare lowercase hex string.
+  function genesisSigText(coinId, digest, domain) { return canonical({ type: 'atlas.ledger.genesis.signature', v: 1, coinId, digest, domain }); }
+  function entrySigText(coinId, index, hash, domain) { return canonical({ type: 'atlas.ledger.entry.authority', v: 1, coinId, index, hash, domain }); }
+  async function signatureKind(pem, v2Text, bare, signature) {
+    if (await verifySignature(pem, v2Text, signature)) return 'v2';
+    return /^[a-f0-9]{64}$/.test(bare) && await verifySignature(pem, bare, signature) ? 'legacy' : null;
+  }
 
   // One entry against the chain so far. Returns null when it holds, or { check, detail } for the first thing that does not.
-  async function checkEntry(genesis, genesisDigest, item, expectIndex, prevHash) {
+  // `state` carries what the chain so far showed: { previous, zero, v2From }. Format 1 is accepted for an authority signature only while no earlier
+  // entry was signed in format 2, and for a genesis signature only when entry 0 is itself in format 1.
+  async function checkEntry(genesis, genesisDigest, item, expectIndex, prevHash, state) {
+    state = state || { previous: null, zero: null, v2From: null };
     const e = item && item.entry;
     if (!isObject(e) || typeof item.hash !== 'string') return { check: 'shape', detail: 'the entry has no public form or hash' };
     if (e.index !== expectIndex) return { check: 'index', detail: 'expected entry ' + expectIndex + ' and found ' + e.index };
@@ -137,7 +148,12 @@ input{width:100%;max-width:560px;border:1px solid #607490;background:#0a1423;col
     if (e.prevHash !== prevHash) return { check: 'prev-hash', detail: 'the entry does not extend the one before it' };
     const authority = genesis.authority;
     const authorityKey = rosterKey(genesis, authority);
-    if (!authorityKey || !(await verifySignature(authorityKey, item.hash, item.authoritySignature))) return { check: 'authority-signature', detail: authority + ' did not sign this entry' };
+    const kind = authorityKey ? await signatureKind(authorityKey, entrySigText(genesis.coinId, expectIndex, item.hash, authority), item.hash, item.authoritySignature) : null;
+    if (kind === null) return { check: 'authority-signature', detail: authority + ' did not sign this entry' };
+    if (kind === 'legacy' && state.previous === 'v2') return { check: 'authority-signature', detail: authority + ' signed this entry in the older format after the newer one' };
+    if (kind === 'v2' && state.v2From === null) state.v2From = expectIndex;
+    state.previous = kind;
+    if (expectIndex === 0) state.zero = kind;
     const approvals = Array.isArray(item.approvals) ? item.approvals : null;
     if (!approvals) return { check: 'approvals', detail: 'the approvals are missing' };
     if (expectIndex === 0) {
@@ -145,7 +161,9 @@ input{width:100%;max-width:560px;border:1px solid #607490;background:#0a1423;col
       const seen = new Set();
       for (const a of approvals) {
         const key = isObject(a) && typeof a.domain === 'string' ? rosterKey(genesis, a.domain) : null;
-        if (!key || seen.has(a.domain) || !(await verifySignature(key, genesisDigest, a.signature))) return { check: 'genesis-signature', detail: 'a genesis signature does not verify' };
+        const gk = key ? await signatureKind(key, genesisSigText(genesis.coinId, genesisDigest, a.domain), genesisDigest, a.signature) : null;
+        if (!key || seen.has(a.domain) || gk === null) return { check: 'genesis-signature', detail: 'a genesis signature does not verify' };
+        if (gk === 'legacy' && state.zero === 'v2') return { check: 'genesis-signature', detail: a.domain + ' signed the genesis in the older format on a coin whose first entry is in the newer one' };
         seen.add(a.domain);
       }
       for (const m of genesis.roster) if (!seen.has(m.domain)) return { check: 'genesis-signature', detail: m.domain + ' has not signed the genesis' };
@@ -170,13 +188,14 @@ input{width:100%;max-width:560px;border:1px solid #607490;background:#0a1423;col
     try { digest = await sha256Hex(canonical(genesis)); } catch (e) { digest = ''; }
     if (digest !== genesisDigest) return { ok: false, checked: 0, lastHash: null, problem: { index: null, check: 'genesis-digest', detail: 'the genesis does not match its digest' } };
     let prev = genesisDigest, next = 0, after = -1;
+    const state = { previous: null, zero: null, v2From: null };
     while (next <= upTo) {
       if (isCancelled && isCancelled()) return { ok: false, checked: next, lastHash: prev, cancelled: true };
       const page = await fetchPage(after);
       if (!page || !Array.isArray(page.entries) || !page.entries.length) return { ok: false, checked: next, lastHash: prev, problem: { index: next, check: 'missing', detail: 'the scanner has no entry ' + next } };
       for (const item of page.entries) {
         if (next > upTo) break;
-        const bad = await checkEntry(genesis, genesisDigest, item, next, prev);
+        const bad = await checkEntry(genesis, genesisDigest, item, next, prev, state);
         if (bad) return { ok: false, checked: next, lastHash: prev, problem: { index: next, check: bad.check, detail: bad.detail } };
         prev = item.hash;
         next++;
@@ -184,12 +203,13 @@ input{width:100%;max-width:560px;border:1px solid #607490;background:#0a1423;col
       after = page.entries[page.entries.length - 1].entry.index;
       if (onProgress) onProgress(next, upTo + 1);
     }
-    return { ok: true, checked: next, lastHash: prev };
+    return { ok: true, checked: next, lastHash: prev, v2From: state.v2From };
   }
 
   // A head statement a domain signed: its fields, its signature against the roster key, and (when it carries the entry's
   // public form) that the form has the hash and the authority signed that hash.
-  async function verifyHead(genesis, head) {
+  // `opts.v2From` is the first index a verified chain showed in format 2: an authority signature in format 1 at or after it is refused.
+  async function verifyHead(genesis, head, opts) {
     const payload = isObject(head) ? head.payload : null;
     if (!isObject(payload)) return { ok: false, reason: 'no statement' };
     const fields = Object.keys(payload).sort().join(',');
@@ -199,7 +219,10 @@ input{width:100%;max-width:560px;border:1px solid #607490;background:#0a1423;col
     if (!key || !(await verifySignature(key, canonical(payload), head.signature))) return { ok: false, reason: 'the signature does not verify' };
     if (head.public !== undefined && head.public !== null) {
       if (!isObject(head.public) || head.public.index !== payload.index || (await sha256Hex(canonical(head.public))) !== payload.hash) return { ok: false, reason: 'the entry does not have that hash' };
-      if (!(await verifySignature(rosterKey(genesis, genesis.authority), payload.hash, head.authoritySignature))) return { ok: false, reason: 'the authority did not sign that entry' };
+      const kind = await signatureKind(rosterKey(genesis, genesis.authority), entrySigText(genesis.coinId, payload.index, payload.hash, genesis.authority), payload.hash, head.authoritySignature);
+      if (kind === null) return { ok: false, reason: 'the authority did not sign that entry' };
+      const from = opts && Number.isInteger(opts.v2From) ? opts.v2From : null;
+      if (kind === 'legacy' && from !== null && payload.index >= from) return { ok: false, reason: 'the authority signed that entry in the older format after the newer one' };
     }
     return { ok: true, reason: '' };
   }
@@ -208,10 +231,12 @@ input{width:100%;max-width:560px;border:1px solid #607490;background:#0a1423;col
   async function verifySignedEntry(genesis, item) {
     if (!isObject(item) || !isObject(item.public) || typeof item.hash !== 'string') return { ok: false, reason: 'no entry' };
     if ((await sha256Hex(canonical(item.public))) !== item.hash) return { ok: false, reason: 'the entry does not have that hash' };
-    return (await verifySignature(rosterKey(genesis, genesis.authority), item.hash, item.authoritySignature)) ? { ok: true, reason: '' } : { ok: false, reason: 'the authority did not sign it' };
+    // Evidence only shows what the authority signed, so either format counts.
+    const kind = await signatureKind(rosterKey(genesis, genesis.authority), entrySigText(genesis.coinId, item.public.index, item.hash, genesis.authority), item.hash, item.authoritySignature);
+    return kind !== null ? { ok: true, reason: '' } : { ok: false, reason: 'the authority did not sign it' };
   }
 
-  const api = { canonical, sha256Hex, spkiOfPem, derToRaw, verifySignature, fingerprint, approvalBytes, checkEntry, verifyChain, verifyHead, verifySignedEntry };
+  const api = { canonical, sha256Hex, spkiOfPem, derToRaw, verifySignature, fingerprint, approvalBytes, genesisSigText, entrySigText, signatureKind, checkEntry, verifyChain, verifyHead, verifySignedEntry };
   root.ScanVerify = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 </script>
@@ -228,6 +253,8 @@ input{width:100%;max-width:560px;border:1px solid #607490;background:#0a1423;col
   const REF = /^[A-Za-z0-9_-]{16,200}$/;
   const INT = /^\d{1,9}$/;
   let token = 0;
+  // Where a chain this page verified first showed a format 2 authority signature, by coin, so a head statement is not read around it.
+  const v2Seen = new Map();
 
   const ATTRS = new Set(['class', 'title', 'id', 'type', 'placeholder', 'for', 'role', 'colspan', 'spellcheck', 'autocomplete', 'aria-label']);
   function h(tag, attrs, ...kids) {
@@ -343,8 +370,9 @@ input{width:100%;max-width:560px;border:1px solid #607490;background:#0a1423;col
           isCancelled: () => cancelled || mine !== token
         });
         if (mine !== token) return;
+        if (res.ok && Number.isInteger(res.v2From)) v2Seen.set(c.genesis.coinId, res.v2From);
         if (res.ok) status.textContent = 'Verified ' + res.checked + ' entries, 0 to ' + (res.checked - 1) + '. Every entry has the hash of its own contents and extends the one before it from the genesis (digest ' + short(c.genesisDigest)
-          + '). The authority, ' + c.genesis.authority + ', signed each one and each has at least ' + c.genesis.threshold + ' of ' + c.genesis.roster.length + ' approvals from the roster domains. Balances were not replayed.';
+          + '). The authority, ' + c.genesis.authority + ', signed each one and each has at least ' + c.genesis.threshold + ' of ' + c.genesis.roster.length + ' approvals from the roster domains.' + (res.v2From === null ? ' All signatures are in the original format (the bare hash).' : res.v2From === 0 ? ' The coin was opened with signatures that name the coin, the position and the signer.' : ' Entries 0 to ' + (res.v2From - 1) + ' carry the original signature format (the bare hash); from entry ' + res.v2From + ' they name the coin, the position and the signer, and the original format is no longer accepted after that point.') + ' Balances were not replayed.';
         else if (res.cancelled) status.textContent = 'Stopped after ' + res.checked + ' entries.';
         else status.textContent = 'Does not verify' + (res.problem.index === null ? '' : ' at entry ' + res.problem.index) + ' (' + res.problem.check + '): ' + res.problem.detail + '. ' + res.checked + ' earlier entries were fine.';
       } catch (e) { if (mine === token) status.textContent = e.message; }
@@ -487,7 +515,7 @@ input{width:100%;max-width:560px;border:1px solid #607490;background:#0a1423;col
     const g = c.genesis;
     const frozen = c.state === 'frozen' ? await evidenceBlock(g, c.evidence) : [];
     const checks = [];
-    for (const row of d.domains) checks.push(row.head ? await V.verifyHead(g, row.head) : null);
+    for (const row of d.domains) checks.push(row.head ? await V.verifyHead(g, row.head, { v2From: v2Seen.has(g.coinId) ? v2Seen.get(g.coinId) : null }) : null);
     if (t !== token) return;
     const bad = checks.filter((x) => x && !x.ok).length;
     const sum = SUMMARY[d.summary] || ['', ''];

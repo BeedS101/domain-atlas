@@ -170,6 +170,16 @@ taken, the coin stops with `rollback-detected` (503), and the operator replays t
 send while a domain shows less. What this does and does not cover, the recovery steps and what an independent witness needs are in
 `docs/chain-labs-rollback-protection.md`. Back up a live ledger with `VACUUM INTO`, not by copying the file.
 
+## Signature format 2
+
+Domain keys sign genesis digests and entry hashes. The legacy format signs the bare hex string; format 2 signs a typed message that names its purpose,
+the coin, the signer's domain and the entry index, so a signature cannot be reused for another purpose or coin. `lib/sigformat.php` holds the messages, the
+rule that a coin never goes back to the legacy format after a verified format 2 signature, the activation record kept outside the database
+(`<database>.checkpoints/signature-format.log`) and the readiness check in which each partner proves, with a signed answer bound to a fresh challenge,
+that it verifies format 2. Signing stays in the legacy format until an operator takes `spend34/sigformat-activate`; verification of both formats is
+permanent for historical records. Release every domain (with the new `lib/sigformat.php`), the scanner and the wallet first, then activate partners
+before authorities. After activation recovery is forward to compatible code, not a return to earlier code. See `docs/chain-labs-signature-format.md`.
+
 ## TEST-GOLD faucet (labs 17 and 18)
 
 `faucet.php` credits 50 TEST-GOLD to every wallet key that signs a claim, once per key. **There is no supply cap and no limit on how many
@@ -248,6 +258,10 @@ its line in `SOURCE.sha256`.
     node test/chain-labs-testgold.js
     node test/chain-labs-catchup-http.js
     php test/chain-labs-purchase-closure.php
+    php test/chain-labs-sigformat.php
+    php test/chain-labs-sigformat-activation.php
+    node test/chain-labs-sigformat-http.js
+    node test/chain-labs-wallet-verify.js
 
 The wallet screen and the scanner page are checked in a real browser (needs Chromium and a display; not part of the workflow):
 

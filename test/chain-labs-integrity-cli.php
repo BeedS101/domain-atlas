@@ -110,7 +110,7 @@ t($one['code'] === 0 && str_contains($one['out'], 'AAA') && !str_contains($one['
 
 // Run from where it is deployed, with no options: the private folder is the one beside the web root, as the endpoint finds it.
 mkdir($s['work'] . '/public/chain-labs/lib', 0777, true);
-foreach (['integrity-cli.php', 'ledger.php', 'checkpoint.php'] as $f) copy(__DIR__ . '/../chain-labs/lib/' . $f, $s['work'] . '/public/chain-labs/lib/' . $f);
+foreach (['integrity-cli.php', 'ledger.php', 'checkpoint.php', 'sigformat.php'] as $f) copy(__DIR__ . '/../chain-labs/lib/' . $f, $s['work'] . '/public/chain-labs/lib/' . $f);
 $p = proc_open([PHP_BINARY, $s['work'] . '/public/chain-labs/lib/integrity-cli.php'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 $deployed = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
 $deployedCode = proc_close($p);
@@ -210,7 +210,7 @@ mkdir($inside, 0777, true);
 copy($s['file'], $inside . '/chain34.sqlite');
 mkdir($copy . '/chain-labs/lib', 0777, true);
 copy($CLI, $copy . '/chain-labs/lib/integrity-cli.php');
-foreach (['ledger.php', 'checkpoint.php'] as $f) copy(__DIR__ . '/../chain-labs/lib/' . $f, $copy . '/chain-labs/lib/' . $f);
+foreach (['ledger.php', 'checkpoint.php', 'sigformat.php'] as $f) copy(__DIR__ . '/../chain-labs/lib/' . $f, $copy . '/chain-labs/lib/' . $f);
 $p = proc_open([PHP_BINARY, $copy . '/chain-labs/lib/integrity-cli.php', '--private=' . $inside], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 $out = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
 $code = proc_close($p);

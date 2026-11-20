@@ -264,6 +264,8 @@ step that closes this, and is a design decision for the operator rather than a c
   that was shown as its third argument.
 - New responses: `rollback-detected`, `checkpoint-conflict`, `checkpoint-corrupt` and `checkpoint-unavailable` (503); `not-halted`,
   `confirm-mismatch`, `not-damaged`, `database-invalid`, `entries-missing`, `not-frozen` and `not-resumable` (409); `reason-needed` (400).
+- The record that a domain has moved to signature format 2 is a further file in the same folder, `signature-format.log`, so an older database put back does not
+  take signing back to the legacy format (`docs/chain-labs-signature-format.md`, section 5).
 - Not covered: tables that are not part of the entry log (the sale journal and the approval and closed-sale rows, section 8) are not
   journaled, so a restore of an older database does not bring them back through `restore`; they travel with the database backup.
 

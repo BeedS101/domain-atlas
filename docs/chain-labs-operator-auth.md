@@ -230,3 +230,11 @@ xvfb-run -a node test/manual-chain-labs-studio-consent.js # the partner's page i
 accept a coin another domain proposes (`docs/chain-labs-partner-consent.md`). They take a signed request only: the operator token is refused for
 them from the first day, before and after activation. They are in the table of actions, so a key's `actions` list can name them and activation counts
 the two that change something among those every active, proven key must cover. `grant-actions` gives them to a limited key.
+
+## 14. Signature format actions
+
+`spend34/sigformat-status` (reading) and `spend34/sigformat-activate` (changing) belong to the move to signature format 2
+(`docs/chain-labs-signature-format.md`). They take a signed request only: the operator token is refused for them, before and after activation. A key's
+`actions` list can name them, `grant-actions` can give the reading one to a limited key without the changing one, and activation of signed-only
+requests counts the changing one among those every active, proven key must cover. `sigformat-activate` needs `confirm: true` in its arguments, since
+turning on format 2 signing cannot be undone.

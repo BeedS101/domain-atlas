@@ -150,6 +150,15 @@ decide whether to offer Buy, and the domain refuses anything it cannot do.
   not by one receipt.
 - **A single authority coin** rests on its authority alone.
 
+## 4.1 Signature format 2
+
+The wallet verifies a genesis signature and an authority signature in either format (`docs/chain-labs-signature-format.md`): format 2 first, format 1
+only for a bare lowercase hex digest. For each coin it keeps `v2From` with the genesis pin, the lowest index at which it has seen a verified
+format 2 authority signature, and then refuses a format 1 authority signature at or after it, whether it comes from a whole chain read or from one
+receipt (`spend_verify_receipt` on the server side names the previous hash so the same rule applies there). A coin whose entry 0 is in format 2
+needs genesis signatures in format 2 from every domain. Receipts and genesis signatures from before stay valid. A wallet from before this
+change cannot verify a format 2 receipt, so wallets are released before any domain activates.
+
 ## 5. Compatibility
 
 No endpoint or receipt format changed. The wallet's functions keep their names and results; the new outcomes are the error codes `genesis-changed` and

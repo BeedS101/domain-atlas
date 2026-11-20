@@ -402,6 +402,69 @@ const both = (...hooks) => async (url, init, forward) => { for (const h of hooks
     line(await refusal(noReceipt.send(await noReceipt.prepareSend(A, allOf.id, bob.key, '1'))) === 'bad-receipt', 'a receipt missing a part is refused, not read as it stands');
     const noGenesis = through(alice, st, edit('action=coin&coin=', (j) => { delete j.genesisDigest; }));
     line(await refusedHere(noGenesis.send(await noGenesis.prepareSend(A, sgl.id, bob.key, '1')), 'wrong-genesis'), 'a coin answer with no digest is refused, and nothing is signed');
+
+    console.log('\n== signature format 2: the domain key signs typed messages');
+    {
+    const listed = async (names = [A]) => { const stt = freshState(); const w = Chain.create(envFor(alice, stt)); for (const n of names) await w.addDomain(n); return stt; };
+    // The PHP domains still sign in format 1 here (nothing is activated), so format 2 answers are made from the honest ones by re-signing with the
+    // domains' own keys, the way a domain that had activated it would answer.
+    const nodeOf = { [A]: a, [B]: b, [C]: c };
+    const entText = (coinId, index, hash, domain) => canon({ type: 'atlas.ledger.entry.authority', v: 1, coinId, index, hash, domain });
+    const genText = (coinId, digest, domain) => canon({ type: 'atlas.ledger.genesis.signature', v: 1, coinId, digest, domain });
+    const asV2 = (over = {}) => (j) => {
+      const r = j.receipt;
+      r.authoritySignature = derSign(over.node || a, entText(over.coinId || r.coinId, over.index !== undefined ? over.index : r.entry.index, r.hash, over.domain || A));
+    };
+    const asV2Zero = (coinId, domains, keep) => (j) => {
+      const r = j.receipt;
+      if (!r || !r.entry || r.entry.index !== 0) return;
+      r.authoritySignature = derSign(a, entText(coinId, 0, r.hash, A));
+      r.approvals = r.approvals.map((x) => (keep && keep.includes(x.domain) ? x : { domain: x.domain, signature: derSign(nodeOf[x.domain], genText(coinId, r.entry.prevHash, x.domain)) }));
+    };
+    const formatPin = (state, coinId) => { const rec = state.domains.find((d) => d.domain === A); return rec && rec.genesis ? rec.genesis[coinId] : null; };
+    const history = await listed();
+    const plain = Chain.create(envFor(alice, history));
+    const old1 = await plain.send(await plain.prepareSend(A, sgl.id, bob.key, '1'));
+    line(old1.status === 'done' && formatPin(history, sgl.id) && formatPin(history, sgl.id).v2From === null, 'a coin signed in format 1 throughout is accepted as before, and nothing has moved to format 2 yet', formatPin(history, sgl.id));
+    const moving = through(alice, history, edit('action=propose', asV2()));
+    const first = await moving.send(await moving.prepareSend(A, sgl.id, bob.key, '1'));
+    line(first.status === 'done' && formatPin(history, sgl.id).v2From === first.receipt.entry.index && first.receipt.entry.index > old1.receipt.entry.index, 'the first format 2 authority signature is accepted and the wallet remembers the index it appeared at', formatPin(history, sgl.id));
+    line(await refusal(plain.send(await plain.prepareSend(A, sgl.id, bob.key, '1'))) === 'bad-receipt', 'after that a receipt in format 1 for a later entry is refused');
+    const again = await moving.send(await moving.prepareSend(A, sgl.id, bob.key, '1'));
+    line(again.status === 'done' && formatPin(history, sgl.id).v2From === first.receipt.entry.index, 'a receipt in format 2 is still accepted, and the remembered index does not move up');
+
+    const stray = await listed();
+    const strayIn = (hook) => { const w = through(alice, stray, edit('action=propose', hook)); return w; };
+    const wrongPurpose = strayIn((j) => { const r = j.receipt; r.authoritySignature = derSign(a, genText(r.coinId, r.hash, A)); });
+    line(await refusal(wrongPurpose.send(await wrongPurpose.prepareSend(A, sgl.id, bob.key, '1'))) === 'bad-receipt', 'a genesis signature over the entry\'s hash is not an authority signature for the entry');
+    const wrongIndex = strayIn(asV2({ index: 777 }));
+    line(await refusal(wrongIndex.send(await wrongIndex.prepareSend(A, sgl.id, bob.key, '1'))) === 'bad-receipt', 'a format 2 signature made for another index is refused');
+    const wrongCoin = strayIn(asV2({ coinId: 'e'.repeat(32) }));
+    line(await refusal(wrongCoin.send(await wrongCoin.prepareSend(A, sgl.id, bob.key, '1'))) === 'bad-receipt', 'one made for another coin is refused');
+    const wrongName = strayIn(asV2({ domain: B }));
+    line(await refusal(wrongName.send(await wrongName.prepareSend(A, sgl.id, bob.key, '1'))) === 'bad-receipt', 'one that names another signer is refused');
+    const wrongKey = strayIn(asV2({ node: b }));
+    line(await refusal(wrongKey.send(await wrongKey.prepareSend(A, sgl.id, bob.key, '1'))) === 'bad-receipt', 'and one signed by another domain\'s key');
+    line(formatPin(stray, sgl.id) && formatPin(stray, sgl.id).v2From === null, 'none of those moved the remembered index', formatPin(stray, sgl.id));
+
+    const born = await listed();
+    const bornWallet = through(alice, born, both(edit('action=receipt&coin=', asV2Zero(sgl.id, [A])), edit('action=propose', asV2())));
+    const bornSend = await bornWallet.send(await bornWallet.prepareSend(A, sgl.id, bob.key, '1'));
+    line(bornSend.status === 'done' && formatPin(born, sgl.id).v2From === 0, 'a coin opened in format 2 (entry 0 and its genesis signatures) is accepted, and format 2 is remembered from entry 0', formatPin(born, sgl.id));
+    const bornPlain = Chain.create(envFor(alice, born));
+    line(await refusal(bornPlain.send(await bornPlain.prepareSend(A, sgl.id, bob.key, '1'))) === 'bad-receipt', 'a format 1 receipt on such a coin is refused');
+    const mixedZero = through(alice, await listed(), edit('action=receipt&coin=', (j) => { const r = j.receipt; if (r && r.entry && r.entry.index === 0) r.authoritySignature = derSign(a, entText(sgl.id, 0, r.hash, A)); }));
+    line(await refusedHere(mixedZero.send(await mixedZero.prepareSend(A, sgl.id, bob.key, '1')), 'wrong-genesis'), 'a format 2 entry 0 whose genesis signature is in format 1 is refused, and nothing is signed');
+    const legacyZeroNewGenesis = through(alice, await listed(), edit('action=receipt&coin=', (j) => { const r = j.receipt; if (r && r.entry && r.entry.index === 0) r.approvals = r.approvals.map((x) => ({ domain: x.domain, signature: derSign(nodeOf[x.domain], genText(sgl.id, r.entry.prevHash, x.domain)) })); }));
+    const lz = await legacyZeroNewGenesis.send(await legacyZeroNewGenesis.prepareSend(A, sgl.id, bob.key, '1')).catch((e) => e);
+    line(lz.status === 'done', 'a coin whose entry 0 is in format 1 may still carry genesis signatures in format 2', lz.code || lz);
+    const multiBorn = await listed([A, B, C]);
+    const multiWallet = through(alice, multiBorn, both(edit('action=receipt&coin=', asV2Zero(allOf.id, [A, B, C])), edit('action=propose', asV2())));
+    const multiSend = await multiWallet.send(await multiWallet.prepareSend(A, allOf.id, bob.key, '1'));
+    line(multiSend.status === 'done' && multiSend.receipt.approvals.length === 2, 'a coin of several domains opened in format 2 is accepted with its partners\' approvals', multiSend.code || multiSend.status);
+    const multiMixed = through(alice, await listed([A, B, C]), edit('action=receipt&coin=', asV2Zero(allOf.id, [A, B, C], [C])));
+    line(await refusedHere(multiMixed.send(await multiMixed.prepareSend(A, allOf.id, bob.key, '1')), 'wrong-genesis'), 'one partner\'s genesis signature left in format 1 under a format 2 entry 0 is refused');
+    }
   } finally {
     S.cleanup();
   }

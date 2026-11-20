@@ -77,6 +77,7 @@ const SPEND34_STATUS = [
     'not-halted' => 409, 'confirm-mismatch' => 409, 'reason-needed' => 400, 'not-damaged' => 409, 'database-invalid' => 409, 'entries-missing' => 409, 'not-frozen' => 409, 'not-resumable' => 409,
     'legacy-authorization' => 409, 'wrong-authority' => 409, 'wrong-genesis' => 409, 'unknown-base' => 409,
     'needs-consent' => 409, 'consent-declined' => 409, 'consent-mismatch' => 409, 'already-signed' => 409, 'consent-unavailable' => 503,
+    'signature-downgrade' => 409, 'partner-needs-upgrade' => 409, 'genesis-legacy-signature' => 409, 'signature-format-unavailable' => 503, 'not-ready' => 409,
 ];
 function fail34(LedgerError $e): never
 {
@@ -224,6 +225,8 @@ try {
         $payload = is_array($authorization) ? ($authorization['payload'] ?? null) : null;
         if (!is_array($payload) || !is_string($payload['coinId'] ?? null) || !preg_match('/^[a-f0-9]{32}$/D', $payload['coinId'])) reply34(400, ['ok' => false, 'error' => 'Expected a signed transfer']);
         $coin = ledger_coin($db, $payload['coinId']);
+        // Refused before anything is queued when this domain cannot say which signature format it signs in.
+        if ($coin['genesis']['authority'] === $host) ledger_sig_activated($db, $host);
         if ($coin['mode'] !== 'single') {
             if ($coin['genesis']['authority'] !== $host) reply34(409, ['ok' => false, 'code' => 'not-authority', 'error' => 'Propose to the authority of this coin', 'authority' => $coin['genesis']['authority']]);
             reply34(...execute_multi34($db, $node, $send, $payload['coinId'], $authorization, $now));
@@ -280,6 +283,33 @@ try {
         if ($reason !== null && !is_string($reason)) reply34(400, ['ok' => false, 'error' => 'Invalid reason']);
         $by = (string) ($auth['keyFp'] ?? '');
         reply34(200, ['ok' => true, 'proposal' => $action === 'consent-accept' ? consent_accept($db, $node, $coinId, $genesisDigest, $by, $now) : consent_decline($db, $node, $coinId, $genesisDigest, $reason, $by, $now)]);
+    }
+    // Signature format 2: whether this domain and its partners are ready, and activating it. Signed requests only; activation is not undone.
+    if (in_array($action, ['sigformat-status', 'sigformat-activate'], true)) {
+        $auth = operator34($action, body34(8192));
+        $m = $auth['args'];
+        try {
+            $state = sigformat_state($db, $host);
+            if ($action === 'sigformat-status') {
+                $readiness = $state['state'] === 'active' ? null : peer_sigformat_readiness($db, $node, $send, $now);
+                reply34(200, ['ok' => true, 'sigformat' => sigformat_public($state), 'readiness' => $readiness]);
+            }
+            if (($m['confirm'] ?? null) !== true) reply34(400, ['ok' => false, 'code' => 'confirm-needed', 'error' => 'Activating signature format 2 cannot be undone. Send confirm: true to do it.']);
+            $recover = ($m['recover'] ?? false) === true;
+            if ($state['state'] === 'active' || ($state['state'] === 'unavailable' && $recover)) {
+                // Already active, or the operator is repairing a lost or damaged record: no readiness is asked again, since nothing new is signed in a new format.
+                $done = sigformat_record_activation($db, $host, $now, $recover);
+                reply34(200, ['ok' => true, 'sigformat' => sigformat_public($done), 'already' => $done['already']]);
+            }
+            if ($state['state'] === 'unavailable') ledger_fail('signature-format-unavailable', $state['reason'] . '. Repair it with recover: true after checking the record.');
+            if (($m['discardPendingSignatures'] ?? false) === true) sigformat_discard_pending_legacy($db, $host);
+            $readiness = peer_sigformat_readiness($db, $node, $send, $now);
+            if (!$readiness['ready']) reply34(409, ['ok' => false, 'code' => 'not-ready', 'error' => 'Format 2 is not activated: a partner cannot verify it yet, or a coin still waiting to open holds an older genesis signature.', 'readiness' => $readiness]);
+            $done = sigformat_record_activation($db, $host, $now, false);
+            reply34(200, ['ok' => true, 'sigformat' => sigformat_public($done), 'already' => false]);
+        } catch (LedgerError $e) {
+            reply34(SPEND34_STATUS[$e->reason] ?? 400, ['ok' => false, 'code' => $e->reason, 'error' => $e->getMessage()]);
+        }
     }
     // Operator actions.
     if (in_array($action, ['open', 'grant', 'recover', 'compare', 'evidence', 'purchase-recover', 'purchase-cancel', 'integrity', 'restore', 'accept-rollback', 'reseal', 'resume'], true)) {
@@ -359,7 +389,7 @@ try {
                 }
             }
             if (!$matches) reply34(409, ['ok' => false, 'code' => 'pending-mismatch', 'error' => 'This coin was registered but not opened, and it no longer matches its coin record']);
-            ledger_add_genesis_signature($db, $coinId, $host, ledger_genesis_sign($genesis, $domainPrivate));
+            ledger_add_genesis_signature($db, $coinId, $host, ledger_genesis_sign_own($db, $genesis, $domainPrivate, $host));
             ledger_activate($db, $coinId, $domainPrivate);
             reply34(201, ['ok' => true, 'coin' => ledger_public_coin($db, $coinId), 'treasuryRef' => $genesis['treasuryRef']]);
         }
@@ -371,7 +401,7 @@ try {
             'initialUnits' => (string) $row['initial_units'], 'treasuryKey' => $treasury['key'], 'mode' => 'single', 'visibility' => $isPrivate ? 'private' : 'public',
             'roster' => [['domain' => $host, 'key' => $domainPublic]], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null, 'purchase' => $policy]);
         ledger_register($db, $genesis, $treasury['key'], $secret);
-        ledger_add_genesis_signature($db, $coinId, $host, ledger_genesis_sign($genesis, $domainPrivate));
+        ledger_add_genesis_signature($db, $coinId, $host, ledger_genesis_sign_own($db, $genesis, $domainPrivate, $host));
         ledger_activate($db, $coinId, $domainPrivate);
         reply34(201, ['ok' => true, 'coin' => ledger_public_coin($db, $coinId), 'treasuryRef' => $genesis['treasuryRef']]);
     }
@@ -437,7 +467,7 @@ try {
             reply34(...execute_multi34($db, $node, $send, $coinId, $authorization, $now));
         }
         $prepared = ledger_grant($db, $coinId, ledger_treasury_key_load($private, $coinId), $to, $amount, $now);
-        $done = ledger_commit($db, $coinId, $prepared, ledger_sign($domainPrivate, $prepared['hash']), [], $now);
+        $done = ledger_commit($db, $coinId, $prepared, ledger_sign_entry($db, $coinId, $domainPrivate, (int) $prepared['public']['index'], $prepared['hash']), [], $now);
         reply34(201, ['ok' => true, 'receipt' => spend_receipt($db, $coinId, $done['index'])]);
     }
     reply34(404, ['ok' => false, 'error' => 'Unknown action']);
