@@ -1,4 +1,4 @@
-# Lints the chain-labs PHP, checks it against the recorded source hashes and runs the refusal smoke test, and the ledger store, coin form, spending, multi authority, purchase, wallet module, scanner and endpoint tests. It deploys
+# Lints the chain-labs PHP, checks it against the recorded source hashes and runs the refusal smoke test, and the ledger store, coin form, spending, multi authority, purchase, wallet module, scanner, operator authentication and endpoint tests. It deploys
 # nothing and needs no secrets. The labs use PHP 8.1 features (never return type, array_is_list).
 name: chain-labs
 
@@ -22,6 +22,15 @@ on:
       - 'test/chain-labs-market.php'
       - 'test/chain-labs-market-http.js'
       - 'test/chain-labs-policy-http.js'
+      - 'test/chain-labs-consent.php'
+      - 'test/chain-labs-consent-http.js'
+      - 'test/chain-labs-operator.php'
+      - 'test/chain-labs-operator-http.js'
+      - 'test/chain-labs-operator-cli.js'
+      - 'test/chain-labs-operator-sunset.js'
+      - 'test/chain-labs-operator-separation.js'
+      - 'tools/chainlabs-operator.js'
+      - 'tools/lib/chainlabs-operator.js'
       - 'extension/chain-labs-wallet.js'
       - 'test/support/**'
       - '.github/workflows/chain-labs.yml'
@@ -44,6 +53,15 @@ on:
       - 'test/chain-labs-market.php'
       - 'test/chain-labs-market-http.js'
       - 'test/chain-labs-policy-http.js'
+      - 'test/chain-labs-consent.php'
+      - 'test/chain-labs-consent-http.js'
+      - 'test/chain-labs-operator.php'
+      - 'test/chain-labs-operator-http.js'
+      - 'test/chain-labs-operator-cli.js'
+      - 'test/chain-labs-operator-sunset.js'
+      - 'test/chain-labs-operator-separation.js'
+      - 'tools/chainlabs-operator.js'
+      - 'tools/lib/chainlabs-operator.js'
       - 'extension/chain-labs-wallet.js'
       - 'test/support/**'
       - '.github/workflows/chain-labs.yml'
@@ -94,3 +112,10 @@ jobs:
           php test/chain-labs-market.php
           node test/chain-labs-market-http.js
           node test/chain-labs-policy-http.js
+          php test/chain-labs-consent.php
+          node test/chain-labs-consent-http.js
+          php test/chain-labs-operator.php
+          node test/chain-labs-operator-http.js
+          node test/chain-labs-operator-cli.js
+          node test/chain-labs-operator-sunset.js
+          node test/chain-labs-operator-separation.js
