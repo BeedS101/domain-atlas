@@ -79,6 +79,7 @@ $pub=openssl_pkey_get_public($pem);$der=toDer($rawSig);
 // The wallet signs a page's payload wrapped as {ctx, origin, payload} (SPEC.md §3.8.1), never bare.
 $signed=['ctx'=>'atlas.bridge.sign/1','origin'=>$origin,'payload'=>$pending['payload']];
 if($pub===false||$der===false||openssl_verify(canonical($signed),$der,$pub,OPENSSL_ALGO_SHA256)!==1)out(401,['ok'=>false,'error'=>'Wallet signature failed verification']);
+// The transaction is begun with SQL, so PDO does not know of it: it is ended with SQL too, not with PDO::rollBack().
 try{
  $db->exec('BEGIN IMMEDIATE');
  $stmt=$db->prepare('SELECT tx_id FROM claims WHERE public_key=?');$stmt->execute([$key]);$previous=$stmt->fetchColumn();
@@ -89,4 +90,4 @@ try{
  $stmt=$db->prepare('INSERT INTO claims(public_key,claimed_at,tx_id) VALUES(?,?,?)');$stmt->execute([$key,gmdate('c'),$tx]);
  $db->exec('COMMIT');
  out(200,['ok'=>true,'claimed'=>50,'asset'=>'TEST-GOLD','receipt'=>$tx,'balance'=>50,'message'=>'Test GOLD claimed on this standalone PHP node; no validator quorum']);
-}catch(Throwable $e){if($db->inTransaction())$db->rollBack();out(500,['ok'=>false,'error'=>'Faucet failed; no confirmed credit']);}
+}catch(Throwable $e){try{$db->exec('ROLLBACK');}catch(Throwable $ignored){}out(500,['ok'=>false,'error'=>'Faucet failed; no confirmed credit']);}

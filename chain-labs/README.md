@@ -9,7 +9,7 @@ here is a demonstration with no monetary value.
 | Labs | Files | What it does |
 | --- | --- | --- |
 | 16 | `login.html`, `verify.php` | Wallet signs a challenge; PHP verifies it. No assets involved. |
-| 17, 18 | `gold.html`, `send.html`, `faucet.php`, `transfer.php` | Single-domain TEST-GOLD faucet and wallet-approved transfer on SQLite. |
+| 17, 18 | `gold.html`, `send.html`, `faucet.php`, `transfer.php` | Single-domain TEST-GOLD faucet and wallet-approved transfer on SQLite. The faucet is unlimited by design (below). |
 | 19, 20 | `federation.html`, `federation.php`, `federation20.html`, `federation20.php` | Two domains exchange signed ping messages. |
 | 21, 22, 23 | `events21.*`, `events22.*`, `compare23.*` | Signed demo events, offline catch-up, and signed state-commitment comparison. No balances move. |
 | 25 | `supply25.*` | Read-only audit of each domain's own TEST-GOLD ledger. |
@@ -166,6 +166,21 @@ taken, the coin stops with `rollback-detected` (503), and the operator replays t
 send while a domain shows less. What this does and does not cover, the recovery steps and what an independent witness needs are in
 `docs/chain-labs-rollback-protection.md`. Back up a live ledger with `VACUUM INTO`, not by copying the file.
 
+## TEST-GOLD faucet (labs 17 and 18)
+
+`faucet.php` credits 50 TEST-GOLD to every wallet key that signs a claim, once per key. **There is no supply cap and no limit on how many
+keys can claim**: a key costs nothing to make, so anyone can create any amount of TEST-GOLD. That is intended for these labs, whose units
+are test units with no monetary value; they must never be accepted as, or exchanged for, anything of value. `transfer.php` moves 1 to 50 units
+between keys and refuses a transfer that the sender's balance cannot cover with HTTP 409. (The coins of the ledger, `spend34.php`, are
+separate: a coin there can carry a faucet policy with a maximum, a per-key limit and a cooldown.) `test/chain-labs-testgold.js` checks both
+endpoints, including the refusal and the unlimited claims.
+
+## Scheduled integrity check
+
+`lib/integrity-cli.php` checks every coin from the command line and is made for cron: the ledger invariants, the checkpoint, the journals and
+the permanent sale closures, one status per coin and a non-zero exit on a problem. It is read only and never repairs anything. How to run it,
+what each check means and a cPanel cron example with a log and an email on failure are in `docs/chain-labs-integrity-check.md`.
+
 ## Provenance
 
 The PHP files were imported from the deployed files. `SOURCE.sha256` records the SHA-256 of each file as it stands (PHP
@@ -189,6 +204,9 @@ its line in `SOURCE.sha256`.
     node test/chain-labs-wallet.js
     node test/chain-labs-scan-http.js
     node test/chain-labs-policy-http.js
+    node test/chain-labs-open-resume.js
+    php test/chain-labs-integrity-cli.php
+    node test/chain-labs-testgold.js
 
 The wallet screen and the scanner page are checked in a real browser (needs Chromium and a display; not part of the workflow):
 

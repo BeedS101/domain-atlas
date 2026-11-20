@@ -77,11 +77,12 @@ $signed=['ctx'=>'atlas.bridge.sign/1','origin'=>$origin,'payload'=>$pending['pay
 if($pub===false||$der===false||openssl_verify(canonical($signed),$der,$pub,OPENSSL_ALGO_SHA256)!==1)out(401,['ok'=>false,'error'=>'Signature failed verification']);
 $p=$pending['payload'];$to=$p['recipient'];$amount=$p['amount'];
 if(hash_equals($sender,$to))out(400,['ok'=>false,'error'=>'Cannot transfer to yourself']);
+// The transaction is begun with SQL, so PDO does not know of it: PDO::rollBack() and inTransaction() are not used, and it is ended with SQL.
 try{
  $db->exec('BEGIN IMMEDIATE');
  $stmt=$db->prepare('UPDATE accounts SET balance=balance-? WHERE public_key=? AND balance>=?');
  $stmt->execute([$amount,$sender,$amount]);
- if($stmt->rowCount()!==1){$db->rollBack();out(409,['ok'=>false,'error'=>'Insufficient TEST-GOLD balance']);}
+ if($stmt->rowCount()!==1){$db->exec('ROLLBACK');out(409,['ok'=>false,'error'=>'Insufficient TEST-GOLD balance']);}
  $stmt=$db->prepare('INSERT OR IGNORE INTO accounts(public_key,balance) VALUES(?,0)');$stmt->execute([$to]);
  $stmt=$db->prepare('UPDATE accounts SET balance=balance+? WHERE public_key=?');$stmt->execute([$amount,$to]);
  $tx=bin2hex(random_bytes(16));
@@ -89,4 +90,4 @@ try{
  $stmt->execute([$tx,$sender,$to,$amount,gmdate('c')]);
  $db->exec('COMMIT');
  out(200,['ok'=>true,'receipt'=>$tx,'amount'=>$amount,'sender'=>$sender,'recipient'=>$to,'warning'=>'Single PHP SQLite node; no BFT consensus or distributed finality']);
-}catch(Throwable $e){if($db->inTransaction())$db->rollBack();out(500,['ok'=>false,'error'=>'Transfer failed; no confirmed settlement']);}
+}catch(Throwable $e){try{$db->exec('ROLLBACK');}catch(Throwable $ignored){}out(500,['ok'=>false,'error'=>'Transfer failed; no confirmed settlement']);}

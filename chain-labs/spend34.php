@@ -11,7 +11,7 @@ declare(strict_types=1);
  *         the units and spends the credential, see lib/purchase.php; 202 while a multi authority sale waits for approvals).
  *         GET head: this domain's signed statement of the newest entry it holds, for anyone comparing domains.
  * Operator (private operator token): POST open (opens a coin of the coin registry as a ledger, a multi authority coin with
- *         its partner domains and an optional faucet or purchase policy), grant (a treasury spend), recover (finishes pending
+ *         its partner domains and an optional faucet or purchase policy; an open that stopped part way is finished by repeating it), grant (a treasury spend), recover (finishes pending
  *         multi authority proposals), compare (compares heads with the other domains and freezes the coin on a disagreement),
  *         evidence (why a coin is frozen), purchase-recover (finishes journaled sales), purchase-cancel (ends one that has no entry).
  * Domains: POST peer, a request signed by another domain of the coin (genesis, sync, approve, notify, head, freeze).
@@ -233,7 +233,7 @@ try {
         $known->execute([$coinId]);
         $state = $known->fetchColumn();
         $known->closeCursor();
-        if ($state !== false && !($multi && $state === 'pending')) reply34(409, ['ok' => false, 'code' => 'already-open', 'error' => 'This coin already has a ledger']);
+        if ($state !== false && $state !== 'pending') reply34(409, ['ok' => false, 'code' => 'already-open', 'error' => 'This coin already has a ledger']);
         if ($multi) {
             // A coin that is waiting for signatures keeps its genesis and reference secret, so opening can be repeated.
             $roster = json_decode((string) $row['roster'], true);
@@ -254,6 +254,30 @@ try {
                     'roster' => $members, 'threshold' => (int) $row['threshold'], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null, 'purchase' => $policy]);
             }
             peer_open_multi($db, $node, $genesis, $treasury['key'], $secret, $send, $now);
+            reply34(201, ['ok' => true, 'coin' => ledger_public_coin($db, $coinId), 'treasuryRef' => $genesis['treasuryRef']]);
+        }
+        if ($state === 'pending') {
+            // An attempt that stopped after the coin was registered and before it was activated: the registered genesis, reference secret and
+            // treasury key are finished, never replaced. They must still be what the coin's registry record gives, so a record that was changed
+            // since is not completed into a coin the operator did not confirm.
+            $held = ledger_coin($db, $coinId);
+            $genesis = $held['genesis'];
+            $keyFile = $private . '/treasury-' . $coinId . '.json';
+            $faucet = array_key_exists('faucet', $m) && $m['faucet'] !== null ? $m['faucet'] : ($genesis['faucet'] ?? null);
+            $matches = false;
+            if (is_file($keyFile)) {
+                try {
+                    $treasury = ledger_treasury_key_load($private, $coinId);
+                    $expected = ledger_genesis(['coinId' => $coinId, 'symbol' => $row['symbol'], 'name' => $row['name'], 'decimals' => (int) $row['decimals'], 'maxUnits' => (string) $row['max_units'],
+                        'initialUnits' => (string) $row['initial_units'], 'treasuryKey' => $treasury['key'], 'mode' => 'single', 'visibility' => ($row['visibility'] ?? 'public') === 'private' ? 'private' : 'public',
+                        'roster' => [['domain' => $host, 'key' => $domainPublic]], 'createdAt' => (string) $row['created_at'], 'refSecret' => $held['ref_secret'], 'faucet' => $faucet, 'purchase' => $policy]);
+                    $matches = $held['mode'] === 'single' && $held['treasury_key'] === $treasury['key'] && ledger_canonical($expected) === ledger_canonical($genesis);
+                } catch (LedgerError $e) {
+                }
+            }
+            if (!$matches) reply34(409, ['ok' => false, 'code' => 'pending-mismatch', 'error' => 'This coin was registered but not opened, and it no longer matches its coin record']);
+            ledger_add_genesis_signature($db, $coinId, $host, ledger_genesis_sign($genesis, $domainPrivate));
+            ledger_activate($db, $coinId, $domainPrivate);
             reply34(201, ['ok' => true, 'coin' => ledger_public_coin($db, $coinId), 'treasuryRef' => $genesis['treasuryRef']]);
         }
         $isPrivate = ($row['visibility'] ?? 'public') === 'private';

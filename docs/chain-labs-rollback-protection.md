@@ -172,6 +172,9 @@ accepted loss cannot be undone by any of them). None of them brings back spent f
 
 Wallets that saw the coin before the rollback keep their mark until the domain shows the kept entry again (section 7).
 
+A coin that nobody touches is not looked at by the guard, so a rollback of it would stay unnoticed. `chain-labs/lib/integrity-cli.php` checks every
+coin on a schedule, read only, and exits non-zero on a problem (`docs/chain-labs-integrity-check.md`); it never takes any of the steps above.
+
 ## 7. What the wallet keeps
 
 The signed holdings statement carries, per coin, the index and hash of the newest entry (`headIndex`, `headHash`). The wallet keeps the
@@ -266,6 +269,7 @@ step that closes this, and is a design decision for the operator rather than a c
 php test/chain-labs-rollback.php          # the guard in the library: rollback, crash, conflict, corruption, recovery, multi authority
 node test/chain-labs-rollback-http.js     # the same against the real endpoint and a killed server
 php test/chain-labs-rollback-purchase.php # sales under way when a database is put back
+php test/chain-labs-integrity-cli.php     # the scheduled read-only checker over every coin (docs/chain-labs-integrity-check.md)
 php test/chain-labs-purchase-closure.php  # closing a sale: both orders of a race, a restored database, interrupted and damaged closure files, one and several domains
 php test/chain-labs-approvals.php         # approvals kept across a restored database (docs/chain-labs-approvals.md)
 php test/chain-labs-evidence.php          # what freezes a multi authority coin, forged evidence, slow commits and the way back

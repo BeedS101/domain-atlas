@@ -463,6 +463,13 @@ const crashed = (r) => r.status === 0 || (r.status === 200 && r.json === null);
       const wrongToken = await holdCall({ action: 'status', credentialId: g.id, requestId: okIntent.payload.requestId, holdId: hid }, 'z'.repeat(48));
       line(wrongToken.status === 401, 'a wrong token reads nothing', wrongToken);
     }
+
+    console.log('\n== the issuer raised no PHP warning or notice in any step above');
+    {
+      // The PHP server writes every warning, notice and deprecation of a request to its error stream, which issuer.log collects.
+      const raised = issuer.log.join('').split('\n').filter((l) => /PHP (Warning|Notice|Deprecated|Fatal error|Parse error)/.test(l));
+      line(raised.length === 0, 'no request, cancellations included, raised a PHP warning, notice or deprecation', raised.slice(0, 3));
+    }
   } catch (e) {
     console.log('ERROR ' + e.stack);
     failures++;

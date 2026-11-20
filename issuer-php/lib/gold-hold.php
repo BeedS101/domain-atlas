@@ -467,7 +467,7 @@ function atlas_hold_cancel($credId, $requestId, $holdId, $now, $closure = null) 
             if ($problem !== null) throw new AtlasHoldError($code, 'delivery was begun for this hold; it can be cancelled only with a closure from the ledger: ' . $problem, 409);
             $changes['closure'] = $closure;
         }
-        $view = atlas_holds_modify(function (&$doc) use ($credId, $holdId, $changes) {
+        $view = atlas_holds_modify(function (&$doc) use ($credId, $holdId, $changes, $now) {
             atlas_hold_set($doc, $credId, $holdId, $changes);
             return atlas_hold_view($doc['holds'][$credId], $now);
         });
