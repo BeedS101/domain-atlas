@@ -156,7 +156,7 @@ function purchase_credit(PDO $db, array $node, array $treasury, array $row, ?cal
     $rid = $row['request_id'];
     $execute = function (string $digest) use ($db, $node, $coinId, $send, $now): int {
         $coin = ledger_coin($db, $coinId);
-        $receipt = $coin['mode'] === 'single' ? spend_execute($db, $coinId, $digest, $node['private'], $now) : peer_execute($db, $node, $coinId, $digest, $send, $now);
+        $receipt = $coin['mode'] === 'single' ? spend_execute($db, $coinId, $digest, $node['private'], $now, $node['clock'] ?? null) : peer_execute($db, $node, $coinId, $digest, $send, $now);
         return (int) $receipt['entry']['index'];
     };
     for ($attempt = 0;; $attempt++) {
@@ -186,6 +186,29 @@ function purchase_credit(PDO $db, array $node, array $treasury, array $row, ?cal
     }
 }
 
+// Closes the sale in this domain's own database and file, in the same write lock that finds no entry and no transfer waiting for it, so a
+// delivery prepared earlier is refused when it tries to commit and the request is never taken again. Returns the head it was closed at.
+function purchase_close_here(PDO $db, string $coinId, array $row): array
+{
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        if (ledger_request_entry($db, $coinId, $row['request_id']) !== null) ledger_fail('cannot-cancel', 'the units were delivered');
+        // The journal is read again under the lock: a transfer submitted since the caller looked is seen here.
+        $fresh = purchase_row($db, $coinId, $row['request_id']) ?? $row;
+        if ($fresh['proposal_digest'] !== null) {
+            $proposal = spend_proposal($db, $coinId, $fresh['proposal_digest']);
+            if ($proposal && $proposal['status'] === 'pending') ledger_fail('cannot-cancel', 'the transfer of this sale is still pending');
+        }
+        ledger_close_sale($db, $coinId, $row['request_id'], time());
+        $head = ledger_head($db, $coinId);
+        $db->exec('COMMIT');
+        return $head;
+    } catch (Throwable $e) {
+        ledger_rollback($db);
+        throw $e;
+    }
+}
+
 // The authority's signed statement that a sale can no longer be delivered, for the code that holds the credential to check before it frees
 // the credential after delivery was begun. It is made only here, after the ledger has looked: no entry delivers the request, and the
 // pending transfer of the sale (if any) has been rejected, so it cannot be executed later. Signed with this domain's key.
@@ -204,22 +227,7 @@ function purchase_closure(PDO $db, array $node, array $row, ?callable $send = nu
         // A coin of one domain has nobody to witness. What makes the closure true is the authority's own database: the sale is closed for good in
         // the same write lock that decides there is no entry and no transfer waiting for it, so a delivery that was prepared earlier is refused when
         // it tries to commit. The closure carries the coin's genesis, so whoever relies on it can see that the coin has no other domain.
-        $db->exec('BEGIN IMMEDIATE');
-        try {
-            if (ledger_request_entry($db, $coinId, $row['request_id']) !== null) ledger_fail('cannot-cancel', 'the units were delivered');
-            // The journal is read again under the lock: a transfer submitted since the caller looked is seen here.
-            $fresh = purchase_row($db, $coinId, $row['request_id']) ?? $row;
-            if ($fresh['proposal_digest'] !== null) {
-                $proposal = spend_proposal($db, $coinId, $fresh['proposal_digest']);
-                if ($proposal && $proposal['status'] === 'pending') ledger_fail('cannot-cancel', 'the transfer of this sale is still pending');
-            }
-            ledger_close_sale($db, $coinId, $row['request_id'], time());
-            $head = ledger_head($db, $coinId);
-            $db->exec('COMMIT');
-        } catch (Throwable $e) {
-            ledger_rollback($db);
-            throw $e;
-        }
+        $head = purchase_close_here($db, $coinId, $row);
         return $statement(2, $head, ['genesis' => $coin['genesis']]) + ['witnesses' => []];
     }
     if (ledger_request_entry($db, $coinId, $row['request_id']) !== null) ledger_fail('cannot-cancel', 'the units were delivered');
@@ -252,6 +260,10 @@ function purchase_closure(PDO $db, array $node, array $row, ?callable $send = nu
         if ($refused) ledger_fail('cannot-cancel', 'a domain approved an entry for this sale, so it may have been delivered');
         ledger_fail('busy', 'the other domains have not all witnessed that the sale is closed (' . count($witnesses) . ' of ' . $needed . ')');
     }
+    // The witnesses are in: no entry for this request can gather enough approvals any more. The closure is written down here too, before the
+    // credential is freed against it, so this domain never takes the request again or delivers it. Repeating this changes nothing, so a stop
+    // after the witnesses and before this line is finished by asking again.
+    purchase_close_here($db, $coinId, $row);
     return $closure + ['witnesses' => $witnesses];
 }
 

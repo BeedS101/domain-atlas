@@ -144,6 +144,43 @@ ledger_commit($db, $c['coin'], $other, ledger_sign($authPriv, $other['hash']), [
 t(refuses(fn() => spend_execute($db, $c['coin'], $staleP['digest'], $authPriv, $NOW + 40), 'stale'), 'a waiting proposal whose account moved is refused');
 t(spend_proposal($db, $c['coin'], $staleP['digest'])['status'] === 'rejected' && spend_proposal($db, $c['coin'], $staleP['digest'])['reason'] === 'stale', 'and is closed as rejected with the reason');
 
+echo "\n== expiry is read again, at the clock, when a one-domain coin writes\n";
+// The request began before the proposal ran out and the clock moved on while it waited for the database: the fresh reading decides.
+$exp = fn(int $at) => ['issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 10), 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $at)];
+[$xdb, $xfile] = fresh();
+$xc = make_coin($xdb, 'EXP');
+$xPriv = $xc['doms'][0]['priv'];
+$xa = owner(); $xb = owner();
+pay($xdb, $xc, $xc['treasury'], $xa['key'], '1000');
+$before = units($xdb, $xc, $xb['key']);
+$e1 = spend_submit($xdb, $xc['coin'], auth($xdb, $xc, $xa, $xb['key'], '7', $exp($NOW + 20)), $NOW);
+$headBefore = ledger_head($xdb, $xc['coin'])['index'];
+$verdict = why(fn() => spend_execute($xdb, $xc['coin'], $e1['digest'], $xPriv, $NOW, fn() => $NOW + 25));
+t(str_starts_with($verdict, 'expired') && units($xdb, $xc, $xb['key']) === $before && ledger_head($xdb, $xc['coin'])['index'] === $headBefore, 'a proposal that ran out after the request began is not written', $verdict);
+t(spend_proposal($xdb, $xc['coin'], $e1['digest'])['status'] === 'expired', 'and is closed as expired');
+$nonceUsed = $xdb->prepare('SELECT COUNT(*) FROM ledger_nonces WHERE coin_id=? AND nonce=?');
+$nonceUsed->execute([$xc['coin'], json_decode(spend_proposal($xdb, $xc['coin'], $e1['digest'])['authorization_json'], true)['payload']['nonce']]);
+t((int) $nonceUsed->fetchColumn() === 0, 'its nonce is not used up');
+$e2 = spend_submit($xdb, $xc['coin'], auth($xdb, $xc, $xa, $xb['key'], '8', $exp($NOW + 20)), $NOW);
+t(refuses(fn() => spend_execute($xdb, $xc['coin'], $e2['digest'], $xPriv, $NOW, fn() => $NOW + 20), 'expired'), 'the second it expires counts as expired');
+$e3 = spend_submit($xdb, $xc['coin'], auth($xdb, $xc, $xa, $xb['key'], '9', $exp($NOW + 20)), $NOW);
+$r3 = spend_execute($xdb, $xc['coin'], $e3['digest'], $xPriv, $NOW, fn() => $NOW + 19);
+t($r3['entry']['index'] === ledger_head($xdb, $xc['coin'])['index'] && spend_proposal($xdb, $xc['coin'], $e3['digest'])['status'] === 'executed', 'one second before it is written');
+$e4 = spend_submit($xdb, $xc['coin'], auth($xdb, $xc, $xa, $xb['key'], '1', $exp($NOW + 20)), $NOW);
+$r4 = spend_execute($xdb, $xc['coin'], $e4['digest'], $xPriv, $NOW, fn() => $NOW - 500);
+t($r4['entry']['index'] === ledger_head($xdb, $xc['coin'])['index'], 'a clock that reads behind the request changes nothing');
+$e5 = spend_submit($xdb, $xc['coin'], auth($xdb, $xc, $xa, $xb['key'], '1', $exp($NOW + 20)), $NOW);
+$r5 = spend_execute($xdb, $xc['coin'], $e5['digest'], $xPriv, $NOW + 1);
+t($r5['entry']['index'] === ledger_head($xdb, $xc['coin'])['index'], 'without a clock the request time is used, as before');
+$e6 = spend_submit($xdb, $xc['coin'], auth($xdb, $xc, $xa, $xb['key'], '1', $exp($NOW + 20)), $NOW);
+$swept = spend_recover($xdb, $xc['coin'], $xPriv, $NOW, fn() => $NOW + 30);
+t(str_starts_with($swept[$e6['digest']] ?? '', 'expired') && spend_proposal($xdb, $xc['coin'], $e6['digest'])['status'] === 'expired', 'recovery with a clock that is past it does not write it either', $swept);
+// The same proposal sent again after it ran out is closed, not stuck: the sender signs a new one.
+t(refuses(fn() => spend_execute($xdb, $xc['coin'], $e1['digest'], $xPriv, $NOW, fn() => $NOW + 25), 'closed'), 'a proposal that ran out stays closed');
+$e7 = spend_submit($xdb, $xc['coin'], auth($xdb, $xc, $xa, $xb['key'], '1'), $NOW);
+t($e7['status'] === 'pending', 'and the sender can propose again');
+spend_execute($xdb, $xc['coin'], $e7['digest'], $xPriv, $NOW, fn() => $NOW + 1);
+
 echo "\n== multi authority and frozen coins\n";
 $m = make_coin($db, 'MUL', 'multi', 'public', 2);
 $mp = spend_submit($db, $m['coin'], auth($db, $m, $m['treasury'], $alice['key'], '10'), $NOW);

@@ -48,7 +48,8 @@ if (is_file($private . '/gold-adapter.php')) {
     $adapter = require $private . '/gold-adapter.php';
     if (is_array($adapter) && is_callable($adapter['verify'] ?? null) && is_callable($adapter['revoked'] ?? null)) $gold = $adapter;
 }
-$node = ['domain' => $host, 'private' => $domainPrivate, 'pinned' => $peerConfig['pinned'], 'gold' => $gold];
+// 'clock' is the time read afresh: a transfer of a one-domain coin is checked against it, inside the write, for its expiry.
+$node = ['domain' => $host, 'private' => $domainPrivate, 'pinned' => $peerConfig['pinned'], 'gold' => $gold, 'clock' => static fn(): int => time()];
 try {
     $db = ledger_open($private . '/chain34.sqlite');
 } catch (Throwable $e) {
@@ -92,6 +93,29 @@ function operator34(array $m, string $admin): void
     if (!is_string($t) || !preg_match('/^[a-f0-9]{64}$/D', $t) || !hash_equals($admin, $t)) reply34(403, ['ok' => false, 'error' => 'Incorrect operator token']);
 }
 
+// The seconds in which a public read, made by anyone, does not ask the authority again for the same coin. Only these reads wait: a request
+// that approves an entry, a notice from the authority and the operator's recovery and comparison all catch up on their own.
+const CATCHUP_READ_SECONDS = 5;
+
+// Whether this read may ask the authority now: the first one in a window may, the others in it answer from the copy as it is. The window is
+// kept in this domain's own database. When it cannot be read or written the read goes ahead as it did before there was a window.
+function catchup_claim34(PDO $db, string $coinId, int $now): bool
+{
+    try {
+        $last = $db->prepare('SELECT at FROM ledger_catchup WHERE coin_id=?');
+        $last->execute([$coinId]);
+        $at = $last->fetchColumn();
+        if ($at !== false && (int) $at <= $now && (int) $at > $now - CATCHUP_READ_SECONDS) return false;
+        $db->prepare('INSERT OR IGNORE INTO ledger_catchup(coin_id,at) VALUES(?,0)')->execute([$coinId]);
+        // One statement decides who asks: of reads that arrive together, only the one whose update changes the row.
+        $claim = $db->prepare('UPDATE ledger_catchup SET at=? WHERE coin_id=? AND (at<=? OR at>?)');
+        $claim->execute([$now, $coinId, $now - CATCHUP_READ_SECONDS, $now]);
+        return $claim->rowCount() === 1;
+    } catch (Throwable $e) {
+        return true;
+    }
+}
+
 // A partner domain of a multi authority coin brings its copy level with the authority before it answers a read; an
 // authority that does not answer leaves the copy as it is.
 function catchup34(PDO $db, array $node, array $peerConfig, string $coinId, int $now): void
@@ -99,6 +123,7 @@ function catchup34(PDO $db, array $node, array $peerConfig, string $coinId, int 
     try {
         $coin = ledger_coin($db, $coinId);
         if ($coin['mode'] !== 'multi' || $coin['genesis']['authority'] === $node['domain'] || !in_array($coin['state'], ['pending', 'active'], true)) return;
+        if (!catchup_claim34($db, $coinId, $now)) return;
         peer_catch_up($db, $node, $coinId, peer_http_sender($peerConfig, 4), $now);
     } catch (Throwable $e) {
     }
@@ -177,7 +202,7 @@ try {
             if ($coin['genesis']['authority'] !== $host) reply34(409, ['ok' => false, 'code' => 'not-authority', 'error' => 'Propose to the authority of this coin', 'authority' => $coin['genesis']['authority']]);
             reply34(...execute_multi34($db, $node, $send, $payload['coinId'], $authorization, $now));
         }
-        reply34(201, ['ok' => true, 'receipt' => spend_submit_and_execute($db, $payload['coinId'], $authorization, $domainPrivate, $now)]);
+        reply34(201, ['ok' => true, 'receipt' => spend_submit_and_execute($db, $payload['coinId'], $authorization, $domainPrivate, $now, $node['clock'])]);
     }
 
     if ($action === 'purchase') {

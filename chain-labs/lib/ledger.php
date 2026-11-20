@@ -177,6 +177,8 @@ function ledger_schema(PDO $db): void
     $db->exec("CREATE TABLE IF NOT EXISTS ledger_authority_heads(coin_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('highest','latest')), idx INTEGER NOT NULL, issued_at INTEGER NOT NULL, statement_json TEXT NOT NULL, PRIMARY KEY(coin_id,kind))");
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT, coin_id TEXT NOT NULL, kind TEXT NOT NULL, detail_json TEXT NOT NULL, created_at INTEGER NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_peer_nonces(sender TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(sender,nonce))');
+    // When a public read last brought a partner's copy level with the authority, so that reads anyone can make do not each reach the authority.
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_catchup(coin_id TEXT PRIMARY KEY, at INTEGER NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_challenges(challenge TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_nonces(coin_id TEXT NOT NULL, owner_key TEXT NOT NULL, nonce TEXT NOT NULL, PRIMARY KEY(coin_id,owner_key,nonce))');
 }
@@ -770,7 +772,9 @@ function ledger_validate_prepared(PDO $db, string $coinId, array $prepared, int 
 
 // Writes a prepared entry once the authority has signed its hash and enough approvers have signed the approval bytes.
 // Everything is checked again inside one write transaction, so two commits of the same index cannot both succeed.
-function ledger_commit(PDO $db, string $coinId, array $prepared, string $authoritySignature, array $approvals, int $now, bool $history = false): array
+// $reading, when given, is the time read again inside that transaction: an owner's authorization whose expiry has come by then is not written, however
+// early the request that carries it began. Only the authority of a one-domain coin passes it; an entry that other domains approved is written at its own time.
+function ledger_commit(PDO $db, string $coinId, array $prepared, string $authoritySignature, array $approvals, int $now, bool $history = false, ?callable $reading = null): array
 {
     $db->exec('BEGIN IMMEDIATE');
     $restoring = false;
@@ -801,6 +805,10 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
         }
         if (count($approvers) < (int) $coin['threshold']) ledger_fail('not-enough-approvals', 'the entry has ' . count($approvers) . ' of ' . $coin['threshold'] . ' required approvals');
         $checked = ledger_validate_state($db, $coin, $public, $private, $now, $history);
+        if ($reading !== null && !$history) {
+            $expires = strtotime((string) ($private['authorization']['payload']['expiresAt'] ?? ''));
+            if ($expires !== false && max($reading(), $now) >= $expires) ledger_fail('expired', 'the proposal has expired');
+        }
         $t = $checked['t'];
         $at = $checked['at'];
         $fromRef = $checked['fromRef'];

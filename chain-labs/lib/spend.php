@@ -89,7 +89,9 @@ function spend_reject(PDO $db, string $coinId, string $digest, string $status, s
 // Executes a pending proposal of a single authority coin: checks it again against the current state, has the authority
 // sign it and writes it. Executing an executed proposal returns its receipt; a proposal that can no longer succeed is
 // closed with the reason. A coin with more than one domain needs the other approvals and is not executed here.
-function spend_execute(PDO $db, string $coinId, string $digest, string $authorityPrivatePem, int $now): array
+// $reading reads the time again while the entry is written, inside the write lock: a proposal whose expiry has come by then is not written,
+// however early the request began. Without it the request's own time is used.
+function spend_execute(PDO $db, string $coinId, string $digest, string $authorityPrivatePem, int $now, ?callable $reading = null): array
 {
     $coin = ledger_coin($db, $coinId);
     if ($coin['mode'] !== 'single') ledger_fail('needs-approvals', 'a multi authority coin needs approvals from the other domains');
@@ -105,7 +107,7 @@ function spend_execute(PDO $db, string $coinId, string $digest, string $authorit
             // A request that started earlier than the entry just written executes at that entry's time, not before it.
             $clock = max($now, ledger_head_time($db, $coinId));
             $prepared = ledger_prepare_transfer($db, $coinId, $authorization, $clock);
-            $done = ledger_commit($db, $coinId, $prepared, ledger_sign($authorityPrivatePem, $prepared['hash']), [], $clock);
+            $done = ledger_commit($db, $coinId, $prepared, ledger_sign($authorityPrivatePem, $prepared['hash']), [], $clock, false, $reading);
             break;
         } catch (LedgerError $e) {
             $current = spend_proposal($db, $coinId, $digest);
@@ -123,15 +125,15 @@ function spend_execute(PDO $db, string $coinId, string $digest, string $authorit
 
 // Submits a proposal and executes it at once. The proposal stays stored if the process stops in between, and recovery
 // finishes it.
-function spend_submit_and_execute(PDO $db, string $coinId, array $authorization, string $authorityPrivatePem, int $now): array
+function spend_submit_and_execute(PDO $db, string $coinId, array $authorization, string $authorityPrivatePem, int $now, ?callable $clock = null): array
 {
     $state = spend_submit($db, $coinId, $authorization, $now);
-    return spend_execute($db, $coinId, $state['digest'], $authorityPrivatePem, $now);
+    return spend_execute($db, $coinId, $state['digest'], $authorityPrivatePem, $now, $clock);
 }
 
 // After a crash: expire what ran out, then execute every proposal that is still valid, oldest first. Returns what each
 // pending proposal came to.
-function spend_recover(PDO $db, string $coinId, string $authorityPrivatePem, int $now): array
+function spend_recover(PDO $db, string $coinId, string $authorityPrivatePem, int $now, ?callable $clock = null): array
 {
     spend_expire($db, $coinId, $now);
     $rows = $db->prepare("SELECT digest FROM ledger_proposals WHERE coin_id=? AND status='pending' ORDER BY created_at, rowid");
@@ -139,7 +141,7 @@ function spend_recover(PDO $db, string $coinId, string $authorityPrivatePem, int
     $out = [];
     foreach ($rows->fetchAll(PDO::FETCH_COLUMN) as $digest) {
         try {
-            $receipt = spend_execute($db, $coinId, $digest, $authorityPrivatePem, $now);
+            $receipt = spend_execute($db, $coinId, $digest, $authorityPrivatePem, $now, $clock);
             $out[$digest] = 'executed at ' . $receipt['entry']['index'];
         } catch (LedgerError $e) {
             $out[$digest] = $e->reason;

@@ -208,6 +208,23 @@ const statementOk = (a, key) => a.statement.domain === A && a.statement.key === 
     line((await call('spend34', 'GET', 'action=coins', undefined, { host: B })).status === 200, 'another configured host answers');
     const direct = await new Promise((resolve) => http.get({ host: '127.0.0.1', port, path: '/lib/spend.php', headers: { host: A } }, (res) => { let b = ''; res.on('data', (d) => (b += d)); res.on('end', () => resolve({ status: res.statusCode, body: b })); }));
     line(direct.status === 404 && direct.body.trim() === '', 'a direct request for the library gets an empty 404');
+
+    console.log('\n== a transfer that runs out while its request waits for the database');
+    // Another process holds the ledger's write lock for longer than the transfer lives. The request began inside the window; the write happens after it.
+    const dave = wallet();
+    line((await op('grant', { coinId: pub.id, to: dave.key, amount: '100' })).status === 201, 'a wallet is funded for the check');
+    const shortLived = await transfer(dave, pub.id, bob.key, '5', { issuedAt: iso(NOW() - 5), expiresAt: iso(NOW() + 3) });
+    const holder = spawn('php', ['-r', '$d=new PDO("sqlite:"."' + path.join(priv, 'chain34.sqlite').replace(/\\/g, '/') + '");$d->exec("PRAGMA busy_timeout=100");$d->exec("BEGIN IMMEDIATE");echo "locked\n";flush();usleep(4500000);$d->exec("COMMIT");'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    await new Promise((resolve) => holder.stdout.once('data', resolve));
+    const late = await post('action=propose', { authorization: shortLived });
+    if (holder.exitCode === null) await new Promise((resolve) => holder.once('exit', resolve));
+    line(late.status === 409 && late.json.code === 'expired', 'it is refused as expired, not written after its expiry', late.json);
+    const lateView = await get('action=proposal&coin=' + pub.id + '&digest=' + crypto.createHash('sha256').update(canon(shortLived.payload)).digest('hex'));
+    line(lateView.status === 200 && lateView.json.proposal.status === 'expired', 'and its proposal is closed as expired', lateView.json);
+    const daveUnits = (await post('action=holdings', { key: dave.key })).json.statement.coins.find((c) => c.coinId === pub.id);
+    line(daveUnits && daveUnits.units === '100', 'nothing moved', daveUnits);
+    const fresh = await post('action=propose', { authorization: await transfer(dave, pub.id, bob.key, '5', { baseSeq: 0 }) });
+    line(fresh.status === 201, 'a new transfer from the same wallet is written as usual', fresh.json);
   } finally {
     server.kill();
     fs.rmSync(work, { recursive: true, force: true });

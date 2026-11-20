@@ -368,7 +368,16 @@ $bSnapshot = (function () use ($CLUSTER) { $d = tempnam(sys_get_temp_dir(), 'par
 purchase_cancel($mx['db'], $mx['gold'], $mx['coin'], $rqm['requestId'], $mx['node'], 'transport');
 $mc = $GIVEN[$rqm['requestId']][0] ?? null;
 t($mc !== null && $mc['payload']['v'] === 1 && count($mc['witnesses']) >= 1 && !array_key_exists('genesis', $mc['payload']), 'a sale of a coin of three domains is closed with its partners\' witnesses, in the form it had');
-t(!ledger_sale_closed($mx['db'], $mx['coin'], $rqm['requestId']), 'the authority itself writes no closure of its own: the partners decide');
+t(ledger_sale_closed($mx['db'], $mx['coin'], $rqm['requestId']) && closed_rows($mx, $rqm['requestId']) === 1 && closed_lines($mx, $rqm['requestId']) === 1, 'once the partners have witnessed, the authority records the closure too, in its database and in its file');
+t(count($GIVEN[$rqm['requestId']]) === 1 && locked($mx) === 0, 'and the credential was freed against the closure it was handed');
+t(refuses(fn() => sell($mx, $rqm), 'sale-closed') && locked($mx) === 0, 'the same request made again is refused before the credential is reserved again');
+$cut = $mx;
+$cut['send'] = fn(string $to, array $env) => ledger_fail('peer-down', 'down');
+t(refuses(fn() => sell($cut, $rqm), 'sale-closed') && locked($mx) === 0, 'also while the partners cannot be reached');
+// A delivery prepared for it is refused by the authority's own commit, whatever the approvals.
+$prepared = ledger_prepare_transfer($mx['db'], $mx['coin'], ledger_grant_authorization($mx['db'], $mx['coin'], $mx['treasury'], $buyer['key'], '200', max($NOW, ledger_head_time($mx['db'], $mx['coin'])),
+    ['requestId' => $rqm['requestId'], 'price' => 20], ['intent' => $rqm['intent'], 'credential' => $rqm['credential']]), max($NOW, ledger_head_time($mx['db'], $mx['coin'])));
+t(refuses(fn() => ledger_commit($mx['db'], $mx['coin'], $prepared, ledger_sign($mx['node']['private'], $prepared['hash']), [], max($NOW, ledger_head_time($mx['db'], $mx['coin']))), 'sale-closed'), 'and an entry delivering it is not committed by the authority');
 t(ledger_sale_closed(ndb('b.example'), $c['coin'], $rqm['requestId']), 'a witnessing partner has the sale closed');
 // The partner is put back to a copy from before it witnessed.
 $bfile = $CLUSTER['b.example']['file'];
@@ -389,6 +398,55 @@ $verdict = why(fn() => purchase_cancel($my['db'], $my['gold'], $my['coin'], $rqy
 t(str_starts_with($verdict, 'busy') && !ledger_sale_closed($my['db'], $my['coin'], $rqy['requestId']), 'with the partners down the cancel waits and closes nothing at the authority', $verdict);
 $res = recover($my);
 t(str_starts_with($res[$rqy['requestId']] ?? '', 'done'), 'so the sale can still be delivered when they are back', $res);
+
+echo "\n== closing a sale of several domains: an interrupted record, an interrupted release\n";
+$mz = multi_ctx(null, terms());
+$mz['file'] = $CLUSTER['a.example']['file'];
+watch_release($mz);
+$rqz2 = request($mz, owner(), 100, 20);
+$CRASH_AT = 'journaled';
+try { sell($mz, $rqz2); } catch (RuntimeException $e) {}
+t(locked($mz) === 1, 'a journaled sale holds its credential');
+// The authority cannot write its record: the partners witness and the credential stays held, so nothing is freed on a closure the authority does not keep.
+$closedPath = $mz['file'] . '.checkpoints/' . $mz['coin'] . '.closed';
+@mkdir(dirname($closedPath), 0777, true);
+@unlink($closedPath);
+mkdir($closedPath);
+$verdict = why(fn() => purchase_cancel($mz['db'], $mz['gold'], $mz['coin'], $rqz2['requestId'], $mz['node'], 'transport'));
+t(str_starts_with($verdict, 'checkpoint-unavailable') && closed_rows($mz, $rqz2['requestId']) === 0 && locked($mz) === 1 && purchase_row($mz['db'], $mz['coin'], $rqz2['requestId'])['status'] === 'decided', 'when the authority cannot record the closure the cancel fails and the credential stays held', $verdict);
+t(ledger_sale_closed(ndb('b.example'), $mz['coin'], $rqz2['requestId']), 'although the partners did witness');
+rmdir($closedPath);
+purchase_cancel($mz['db'], $mz['gold'], $mz['coin'], $rqz2['requestId'], $mz['node'], 'transport');
+t(closed_rows($mz, $rqz2['requestId']) === 1 && closed_lines($mz, $rqz2['requestId']) === 1 && locked($mz) === 0 && purchase_row($mz['db'], $mz['coin'], $rqz2['requestId'])['status'] === 'abandoned', 'asking again records it once, frees the credential and ends the sale');
+purchase_cancel($mz['db'], $mz['gold'], $mz['coin'], $rqz2['requestId'], $mz['node'], 'transport');
+t(closed_rows($mz, $rqz2['requestId']) === 1 && closed_lines($mz, $rqz2['requestId']) === 1, 'and a third time adds nothing');
+
+// The release is interrupted after the closure is recorded: recovery frees the credential against the same closure and does not deliver.
+$mr = multi_ctx(null, terms());
+$mr['file'] = $CLUSTER['a.example']['file'];
+$releaseOnce = $mr['gold']['release'];
+$interrupt = true;
+$mr['gold']['release'] = function (string $requestId, string $credentialId = '', ?callable $closure = null) use ($releaseOnce, &$interrupt): void {
+    if ($closure !== null) $closure();
+    if ($interrupt) { $interrupt = false; throw new RuntimeException('release interrupted'); }
+    $releaseOnce($requestId, $credentialId, $closure);
+};
+$rqr = request($mr, owner(), 100, 20);
+$CRASH_AT = 'journaled';
+try { sell($mr, $rqr); } catch (RuntimeException $e) {}
+try { purchase_cancel($mr['db'], $mr['gold'], $mr['coin'], $rqr['requestId'], $mr['node'], 'transport'); } catch (RuntimeException $e) {}
+t(closed_rows($mr, $rqr['requestId']) === 1 && locked($mr) === 1, 'the closure is recorded and the credential still held after an interrupted release');
+$res = recover($mr);
+t(($res[$rqr['requestId']] ?? '') !== '' && str_starts_with($res[$rqr['requestId']], 'sale-closed') && locked($mr) === 0 && sold_entries($mr, $rqr['requestId']) === 0 && purchase_row($mr['db'], $mr['coin'], $rqr['requestId'])['status'] === 'abandoned', 'recovery frees it and delivers nothing', $res);
+
+// A sale already delivered is never closed at the authority, whatever the partners say.
+$md = multi_ctx(null, terms());
+$md['file'] = $CLUSTER['a.example']['file'];
+watch_release($md);
+$rqd = request($md, owner(), 100, 20);
+sell($md, $rqd);
+t(sold_entries($md, $rqd['requestId']) === 1, 'a delivered sale has its entry');
+t(refuses(fn() => purchase_cancel($md['db'], $md['gold'], $md['coin'], $rqd['requestId'], $md['node'], 'transport'), 'cannot-cancel') && closed_rows($md, $rqd['requestId']) === 0 && closed_lines($md, $rqd['requestId']) === 0, 'cancelling it is refused and nothing is closed at the authority');
 
 echo "\n" . ($failures === 0 ? 'ALL ' . $total . ' CHAIN-LABS PURCHASE CLOSURE CHECKS PASSED' : $failures . ' of ' . $total . ' checks FAILED') . "\n";
 exit($failures === 0 ? 0 : 1);

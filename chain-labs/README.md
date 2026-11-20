@@ -175,6 +175,18 @@ between keys and refuses a transfer that the sender's balance cannot cover with 
 separate: a coin there can carry a faucet policy with a maximum, a per-key limit and a cooldown.) `test/chain-labs-testgold.js` checks both
 endpoints, including the refusal and the unlimited claims.
 
+## Expiry, closing a sale and public reads (one-domain transfers, several-domain sales)
+
+- A transfer on a coin of one domain is checked against the clock again inside the write of its entry: a proposal whose expiry has come by then
+  is refused as `expired` and closed, however early the request that carried it began (for instance one that waited for the database). An
+  entry that the other domains of a coin approved is not checked this way: they signed it for its own time, and it is written at that time.
+- When a sale of a coin of several domains is closed with its partners' witnesses, the authority records the closure in its own database and
+  `<coin>.closed` before the credential is freed. The same request is then refused (`sale-closed`) and no entry for it is committed.
+- A partner domain brings its copy level with the authority before it answers `action=coin`, `receipt` or `proposal`. Anyone can make those
+  reads, so a coin is brought level at most once in 5 seconds; the rest answer from the copy as it is. The time of the last one is kept in the
+  domain's own database (`ledger_catchup`). Requests that approve an entry, notices from the authority, and the operator's `recover` and
+  `compare` always catch up and do not use it. The table is created when the database is opened.
+
 ## Scheduled integrity check
 
 `lib/integrity-cli.php` checks every coin from the command line and is made for cron: the ledger invariants, the checkpoint, the journals and
@@ -207,6 +219,8 @@ its line in `SOURCE.sha256`.
     node test/chain-labs-open-resume.js
     php test/chain-labs-integrity-cli.php
     node test/chain-labs-testgold.js
+    node test/chain-labs-catchup-http.js
+    php test/chain-labs-purchase-closure.php
 
 The wallet screen and the scanner page are checked in a real browser (needs Chromium and a display; not part of the workflow):
 
