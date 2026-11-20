@@ -81,9 +81,19 @@ function open_coin(int $n, ?int $threshold, string $visibility = 'public', ?arra
         'mode' => 'multi', 'visibility' => $visibility, 'roster' => $roster, 'threshold' => $threshold, 'createdAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 3600), 'refSecret' => $secret, 'faucet' => $faucet, 'purchase' => $purchase]);
     return ['genesis' => $genesis, 'coin' => $genesis['coinId'], 'treasury' => $treasury, 'secret' => $secret, 'roster' => array_column($roster, 'domain')];
 }
+// Opens a coin the way the authority's operator does once the partners' operators have accepted it: the first attempt gives every partner the
+// proposal, each partner that is waiting accepts the exact genesis, and a second attempt opens the coin. Tests of consent itself call
+// peer_open_multi and the consent functions directly.
 function open_now(array $c): void
 {
     global $NOW;
+    try {
+        peer_open_multi(ndb('a.example'), node('a.example'), $c['genesis'], $c['treasury']['key'], $c['secret'], 'transport', $NOW);
+        return;
+    } catch (LedgerError $e) {
+        if ($e->reason !== 'needs-consent') throw $e;
+        foreach (array_keys($e->detail['waiting'] ?? []) as $domain) consent_accept(ndb($domain), node($domain), $c['coin'], ledger_genesis_digest($c['genesis']), 'test-operator', $NOW);
+    }
     peer_open_multi(ndb('a.example'), node('a.example'), $c['genesis'], $c['treasury']['key'], $c['secret'], 'transport', $NOW);
 }
 function auth(string $at, array $c, array $from, string $to, string $amount, array $over = []): array

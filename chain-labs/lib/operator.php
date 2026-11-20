@@ -41,7 +41,13 @@ const OPERATOR_ACTIONS = [
     'spend34/integrity' => false, 'spend34/evidence' => false, 'coin26/preview' => false,
     'operator/check' => false, 'operator/audit' => false,
     'operator/activate' => true,
+    // A partner operator's consent to the genesis of a coin another domain proposes (lib/consent.php).
+    'spend34/consent-list' => false, 'spend34/consent-accept' => true, 'spend34/consent-decline' => true,
 ];
+
+// Actions that never take the operator token, not even before the token's date and before signed requests are activated: they are new, so
+// nothing depends on a token for them, and a consent is the last thing to leave to the weaker credential.
+const OPERATOR_SIGNED_ONLY = ['spend34/consent-list' => true, 'spend34/consent-accept' => true, 'spend34/consent-decline' => true];
 
 final class OperatorError extends RuntimeException
 {
@@ -422,6 +428,7 @@ function operator_signed(string $private, array $roster, PDO $db, string $host, 
 
 function operator_legacy(string $private, array $roster, PDO $db, string $action, array $body, int $now): array
 {
+    if (isset(OPERATOR_SIGNED_ONLY[$action])) operator_refuse($db, $now, $action, null, 'signature-required', 'This action takes a signed operator request only; an operator token is not accepted for it.', 403);
     if (!operator_legacy_open($now)) operator_refuse($db, $now, $action, null, 'legacy-ended', 'Operator tokens are no longer accepted. Sign the request with an operator key.', 403);
     if ($roster['legacySha'] === null) operator_refuse($db, $now, $action, null, 'legacy-disabled', 'This domain does not accept an operator token. Sign the request with an operator key.', 403);
     if (operator_sensitive($action) && operator_ratchet_active($private, $db)) operator_refuse($db, $now, $action, null, 'signature-required', 'This action now needs a signed operator request; a token is no longer accepted for it.', 403);

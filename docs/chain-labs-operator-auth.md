@@ -199,8 +199,11 @@ for what it signed, and compare the ledger with `integrity` and `evidence`.
 
 ```
 node tools/chainlabs-operator.js keygen|roster-init|roster-line|verify|activate|audit|call ...   (signing; --help lists the options)
-php chain-labs/lib/operator-cli.php status|audit|audit-verify|add-key|revoke|remove-key|set-token|clear-token   (on the server, over SSH)
+php chain-labs/lib/operator-cli.php status|audit|audit-verify|add-key|grant-actions|set-actions|revoke|remove-key|set-token|clear-token   (on the server, over SSH)
 ```
+
+`grant-actions` adds actions to a key that is limited to some, and `set-actions` replaces its list (or lifts the limit with `all`), without removing the key and
+adding it again; the key, its label and whether it was revoked are unchanged.
 
 `call <action> --identity FILE --url https://domain --json '{...}'` signs once and sends. `--host` overrides the signed domain name, for a test
 server on this computer (the URL may then be `http://127.0.0.1:port`; any other plain `http` URL is refused). `operator-cli.php` is never served over
@@ -216,4 +219,14 @@ node test/chain-labs-operator-sunset.js      # the end of the token over HTTP, a
 node test/chain-labs-operator-separation.js  # the demonstration labs' token and the chain labs operator credential
 xvfb-run -a node test/manual-chain-labs-studio.js         # the Studio signs in a real browser, the key never leaves it
 xvfb-run -a node test/manual-chain-labs-studio-legacy.js  # the page from before signed requests, until the token ends and after activation
+php test/chain-labs-consent.php              # partner consent: records, review, accept and decline, fail closed, bounds, upgrade
+node test/chain-labs-consent-http.js         # consent through the real endpoints, signed-only actions, scoped keys, replay of a needs-consent answer
+xvfb-run -a node test/manual-chain-labs-studio-consent.js # the partner's page in a real browser
 ```
+
+## 13. Consent actions
+
+`spend34/consent-list` (reading), `spend34/consent-accept` and `spend34/consent-decline` are the actions of a partner operator who is asked to
+accept a coin another domain proposes (`docs/chain-labs-partner-consent.md`). They take a signed request only: the operator token is refused for
+them from the first day, before and after activation. They are in the table of actions, so a key's `actions` list can name them and activation counts
+the two that change something among those every active, proven key must cover. `grant-actions` gives them to a limited key.

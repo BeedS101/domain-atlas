@@ -115,7 +115,22 @@ function call(n, file, method, query, body) {
 const get = (n, q) => call(n, 'spend34', 'GET', q);
 const { withNonce } = require('./support/holdings-nonce');
 const post = (n, q, body) => call(n, 'spend34', 'POST', q, withNonce(q, body));
-const op = (n, action, body) => call(n, 'spend34', 'POST', 'action=' + action, CL.sign(n.operator, n.domain, 'spend34/' + action, body));
+// The partners' operators accept a proposed coin before it opens. This test is not about consent, so when the authority answers needs-consent
+// each partner that is waiting accepts the exact genesis, as its operator would, and the open is asked for again.
+async function accept(n, coinId) {
+  const listed = await call(n, 'spend34', 'POST', 'action=consent-list', CL.sign(n.operator, n.domain, 'spend34/consent-list', {}));
+  const proposal = listed.json.proposals.find((x) => x.coinId === coinId);
+  return call(n, 'spend34', 'POST', 'action=consent-accept', CL.sign(n.operator, n.domain, 'spend34/consent-accept', { coinId, digest: proposal.genesisDigest }));
+}
+const op = async (n, action, body) => {
+  const send = () => call(n, 'spend34', 'POST', 'action=' + action, CL.sign(n.operator, n.domain, 'spend34/' + action, body));
+  let res = await send();
+  if (action === 'open' && res.status === 409 && res.json && res.json.code === 'needs-consent') {
+    for (const p of res.json.partners.filter((x) => x.state === 'awaiting')) await accept(nodes[p.domain], body.coinId);
+    res = await send();
+  }
+  return res;
+};
 const createCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', CL.sign(n.operator, n.domain, 'coin26/create', CL.coinRequest(symbol, extra)));
 const NOW = () => Math.floor(Date.now() / 1000);
 const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');

@@ -76,6 +76,7 @@ const SPEND34_STATUS = [
     'rollback-detected' => 503, 'checkpoint-conflict' => 503, 'checkpoint-corrupt' => 503, 'checkpoint-unavailable' => 503,
     'not-halted' => 409, 'confirm-mismatch' => 409, 'reason-needed' => 400, 'not-damaged' => 409, 'database-invalid' => 409, 'entries-missing' => 409, 'not-frozen' => 409, 'not-resumable' => 409,
     'legacy-authorization' => 409, 'wrong-authority' => 409, 'wrong-genesis' => 409, 'unknown-base' => 409,
+    'needs-consent' => 409, 'consent-declined' => 409, 'consent-mismatch' => 409, 'already-signed' => 409, 'consent-unavailable' => 503,
 ];
 function fail34(LedgerError $e): never
 {
@@ -266,6 +267,20 @@ try {
             reply34(503, ['ok' => false, 'code' => 'operator-state-unavailable', 'error' => 'The operator records cannot be read or written, so nothing was changed.']);
         }
     }
+    // A partner operator's consent to a coin another domain proposes: reviewing it, accepting it, declining it. Signed requests only.
+    if (in_array($action, ['consent-list', 'consent-accept', 'consent-decline'], true)) {
+        $auth = operator34($action, body34(8192));
+        $m = $auth['args'];
+        if ($action === 'consent-list') reply34(200, ['ok' => true, 'proposals' => consent_list($db, $node)]);
+        $coinId = $m['coinId'] ?? null;
+        $genesisDigest = $m['digest'] ?? null;
+        if (!is_string($coinId) || !preg_match('/^[a-f0-9]{32}$/D', $coinId)) reply34(400, ['ok' => false, 'error' => 'Invalid coinId']);
+        if (!is_string($genesisDigest) || !preg_match('/^[a-f0-9]{64}$/D', $genesisDigest)) reply34(400, ['ok' => false, 'error' => 'A consent names the genesis digest it is for']);
+        $reason = $m['reason'] ?? null;
+        if ($reason !== null && !is_string($reason)) reply34(400, ['ok' => false, 'error' => 'Invalid reason']);
+        $by = (string) ($auth['keyFp'] ?? '');
+        reply34(200, ['ok' => true, 'proposal' => $action === 'consent-accept' ? consent_accept($db, $node, $coinId, $genesisDigest, $by, $now) : consent_decline($db, $node, $coinId, $genesisDigest, $reason, $by, $now)]);
+    }
     // Operator actions.
     if (in_array($action, ['open', 'grant', 'recover', 'compare', 'evidence', 'purchase-recover', 'purchase-cancel', 'integrity', 'restore', 'accept-rollback', 'reseal', 'resume'], true)) {
         $m = operator34($action, body34(65536))['args'];
@@ -315,8 +330,14 @@ try {
                     'initialUnits' => (string) $row['initial_units'], 'treasuryKey' => $treasury['key'], 'mode' => 'multi', 'visibility' => $isPrivate ? 'private' : 'public',
                     'roster' => $members, 'threshold' => (int) $row['threshold'], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null, 'purchase' => $policy]);
             }
-            peer_open_multi($db, $node, $genesis, $treasury['key'], $secret, $send, $now);
-            reply34(201, ['ok' => true, 'coin' => ledger_public_coin($db, $coinId), 'treasuryRef' => $genesis['treasuryRef']]);
+            try {
+                peer_open_multi($db, $node, $genesis, $treasury['key'], $secret, $send, $now);
+            } catch (LedgerError $e) {
+                // A 4xx answer, so the request is recorded as not carried out and the operator can sign a new open as soon as the partners accepted.
+                if ($e->reason === 'needs-consent') reply34(409, ['ok' => false, 'code' => 'needs-consent', 'error' => $e->getMessage(), 'partners' => consent_partner_view($db, $coinId, $e->detail['waiting'] ?? [])]);
+                throw $e;
+            }
+            reply34(201, ['ok' => true, 'coin' => ledger_public_coin($db, $coinId), 'treasuryRef' => $genesis['treasuryRef'], 'partners' => consent_partner_view($db, $coinId)]);
         }
         if ($state === 'pending') {
             // An attempt that stopped after the coin was registered and before it was activated: the registered genesis, reference secret and

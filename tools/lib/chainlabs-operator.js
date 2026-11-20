@@ -25,8 +25,8 @@ function canonical(v, top) {
 }
 
 // The actions that change something live 60 seconds at most; the others 120.
-const CHANGING = new Set(['spend34/open', 'spend34/grant', 'spend34/recover', 'spend34/compare', 'spend34/purchase-recover', 'spend34/purchase-cancel', 'spend34/restore', 'spend34/accept-rollback', 'spend34/reseal', 'spend34/resume', 'coin26/create', 'operator/activate']);
-const READING = new Set(['spend34/integrity', 'spend34/evidence', 'coin26/preview', 'operator/check', 'operator/audit']);
+const CHANGING = new Set(['spend34/open', 'spend34/grant', 'spend34/recover', 'spend34/compare', 'spend34/consent-accept', 'spend34/consent-decline', 'spend34/purchase-recover', 'spend34/purchase-cancel', 'spend34/restore', 'spend34/accept-rollback', 'spend34/reseal', 'spend34/resume', 'coin26/create', 'operator/activate']);
+const READING = new Set(['spend34/consent-list', 'spend34/integrity', 'spend34/evidence', 'coin26/preview', 'operator/check', 'operator/audit']);
 const ACTIONS = new Set([...CHANGING, ...READING]);
 const lifetimeFor = (action) => (CHANGING.has(action) ? 60 : 120);
 

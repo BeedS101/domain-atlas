@@ -76,6 +76,24 @@ const php = (priv, args) => spawnSync('php', [path.join(ROOT, 'chain-labs/lib/op
     line(php(priv, ['add-key', '--key=' + second.publicKey, '--actions=spend34/grant,nonsense']).status !== 0, 'an unknown action is refused');
     line(php(priv, ['add-key', '--key=not-a-key']).status !== 0, 'and so is a key that is not one');
     line(php(priv, ['add-key', '--key=' + second.publicKey, '--label=treasury', '--actions=spend34/grant']).status === 0, 'a key limited to one action is added');
+    // A limited key is given more actions, or a new list, without being removed and added again.
+    const rosterNow = () => JSON.parse(fs.readFileSync(path.join(priv, 'chainlabs-operators.json'), 'utf8'));
+    const fp2 = require('crypto').createHash('sha256').update(second.publicKey).digest('hex').slice(0, 16);
+    const consent = ['spend34/consent-list', 'spend34/consent-accept', 'spend34/consent-decline'];
+    const g1 = php(priv, ['grant-actions', '--fingerprint=' + fp2, '--actions=' + consent.join(',')]);
+    line(g1.status === 0 && JSON.stringify(rosterNow().keys[1].actions) === JSON.stringify(['spend34/grant', ...consent]), 'grant-actions adds actions to a limited key and keeps the ones it had', [g1.stdout, rosterNow().keys[1]]);
+    line(php(priv, ['grant-actions', '--fingerprint=' + fp2, '--actions=spend34/consent-list,spend34/grant']).status === 0 && rosterNow().keys[1].actions.length === 4, 'granting an action the key has already changes nothing');
+    line(rosterNow().keys[1].publicKey === second.publicKey && rosterNow().keys[1].label === 'treasury' && !rosterNow().keys[1].revoked, 'the key, its label and its standing are untouched');
+    line(php(priv, ['grant-actions', '--fingerprint=' + fp2, '--actions=nonsense']).status !== 0 && rosterNow().keys[1].actions.length === 4, 'an unknown action is refused and nothing is written');
+    line(php(priv, ['grant-actions', '--fingerprint=0000000000000000', '--actions=spend34/grant']).status === 2, 'a key that is not on the roster is refused');
+    const g0 = php(priv, ['grant-actions', '--key=' + identity.publicKey, '--actions=spend34/consent-list']);
+    line(g0.status === 0 && !('actions' in rosterNow().keys[0]) && /every action/.test(g0.stdout), 'a key that may take every action stays that way, and the tool says so', g0.stdout);
+    line(php(priv, ['set-actions', '--fingerprint=' + fp2, '--actions=spend34/integrity']).status === 0 && JSON.stringify(rosterNow().keys[1].actions) === JSON.stringify(['spend34/integrity']), 'set-actions replaces the list');
+    line(php(priv, ['set-actions', '--fingerprint=' + fp2, '--actions=all']).status === 0 && !('actions' in rosterNow().keys[1]), 'set-actions with all lifts the limit');
+    line(php(priv, ['set-actions', '--fingerprint=' + fp2]).status === 2 && php(priv, ['set-actions', '--fingerprint=' + fp2, '--actions=']).status === 2, 'set-actions needs an explicit list or all');
+    php(priv, ['set-actions', '--fingerprint=' + fp2, '--actions=spend34/grant']);
+    line(/spend34\/grant/.test(php(priv, ['status']).stdout), 'status shows a key\'s actions');
+    line(['consent-list', 'consent-accept', 'consent-decline'].every((x) => S.OP.ACTIONS.has('spend34/' + x)) && S.OP.READING.has('spend34/consent-list') && S.OP.CHANGING.has('spend34/consent-accept') && S.OP.CHANGING.has('spend34/consent-decline'), 'the command line tool knows the three consent actions, the list as a read and the other two as changes');
     const saved = JSON.parse(fs.readFileSync(path.join(priv, 'chainlabs-operators.json'), 'utf8'));
     line(saved.keys.length === 2 && saved.keys[1].actions[0] === 'spend34/grant', 'it is in the file');
     const tok = php(priv, ['set-token']);

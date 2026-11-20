@@ -10,8 +10,11 @@
 //   node tools/chainlabs-operator.js audit    --identity operator.json --url https://a.example [--limit 50]
 //   node tools/chainlabs-operator.js call <action> --identity operator.json --url https://a.example [--json '{"coinId":"..."}'] [--json-file FILE] [--allow-repeat]
 //
-// <action> is one of spend34/{open,grant,recover,compare,purchase-recover,purchase-cancel,restore,accept-rollback,reseal,resume,integrity,evidence},
-// coin26/{create,preview} or operator/{check,activate,audit}. --url names the domain; --host overrides the name that is signed, for a test server.
+// <action> is one of spend34/{open,grant,recover,compare,purchase-recover,purchase-cancel,restore,accept-rollback,reseal,resume,integrity,evidence,
+// consent-list,consent-accept,consent-decline},
+// coin26/{create,preview} or operator/{check,activate,audit}. The three consent actions are for the operator of a partner domain, and take a
+// signed request only: `call spend34/consent-list` shows the coins other domains propose, with every term; `call spend34/consent-accept --json
+// '{"coinId":"...","digest":"..."}'` accepts exactly that coin and genesis digest; consent-decline takes the same and an optional "reason". --url names the domain; --host overrides the name that is signed, for a test server.
 // A request whose answer is lost is sent again, the same signed request, until it expires: the domain answers it from its record and never carries
 // the action out twice. When no answer ever arrives the outcome is reported as unknown; read the ledger (integrity, evidence) before signing it again.
 'use strict';

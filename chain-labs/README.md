@@ -134,7 +134,10 @@ the web server in front of it.
 Opening a registered coin: the operator calls `open` on the authority domain with a signed operator request (the studio page has the
 button and signs with a key file chosen in the page). The coin is opened once; a second call is refused, and a multi coin that stopped because a partner did not answer is
 finished by the same call, which asks only the domains that have not signed. A multi coin is open only when every roster
-domain has signed its genesis. A partner needs the authority's key pinned (`chainlabs-peers.json` in its private folder, or
+domain has signed its genesis, and a partner signs only after its own operator has accepted that exact coin and genesis digest
+(`consent-list`, `consent-accept` and `consent-decline`, signed requests only, in the studio page under "Coins proposed to this domain";
+`docs/chain-labs-partner-consent.md`). The first `open` sends the proposal and answers `409 needs-consent` with the partners that have not
+accepted; when they have, a new signed `open` opens the coin. Upgrade the partner domains before the authority. A partner needs the authority's key pinned (`chainlabs-peers.json` in its private folder, or
 `peer_public_pem_b64` of its federation configuration for the two-domain pair) and the authority needs the partner's; `open`
 names a partner with no pinned key. Nothing is minted into any wallet: a key holds units only after a `grant` from the treasury.
 
@@ -233,6 +236,8 @@ its line in `SOURCE.sha256`.
     node test/chain-labs-holdings-binding.js
     node test/chain-labs-scan-http.js
     node test/chain-labs-policy-http.js
+    php test/chain-labs-consent.php
+    node test/chain-labs-consent-http.js
     php test/chain-labs-operator.php
     node test/chain-labs-operator-http.js
     node test/chain-labs-operator-cli.js

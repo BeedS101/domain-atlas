@@ -14,15 +14,16 @@ const LEDGER_MAX_COOLDOWN_SECONDS = 2592000;
 
 final class LedgerError extends RuntimeException
 {
-    public function __construct(public readonly string $reason, string $message)
+    // $detail carries structured facts that go with the reason (which partners have not accepted a coin, say); it is never printed as text.
+    public function __construct(public readonly string $reason, string $message, public readonly array $detail = [])
     {
         parent::__construct($message);
     }
 }
 
-function ledger_fail(string $reason, string $message): never
+function ledger_fail(string $reason, string $message, array $detail = []): never
 {
-    throw new LedgerError($reason, $message);
+    throw new LedgerError($reason, $message, $detail);
 }
 
 require_once __DIR__ . '/checkpoint.php';
@@ -181,6 +182,35 @@ function ledger_schema(PDO $db): void
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_catchup(coin_id TEXT PRIMARY KEY, at INTEGER NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_challenges(challenge TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_nonces(coin_id TEXT NOT NULL, owner_key TEXT NOT NULL, nonce TEXT NOT NULL, PRIMARY KEY(coin_id,owner_key,nonce))');
+    // What each partner told the authority about its consent when it signed a genesis. The authority shows it to its operator; it is the partner's own report.
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_consent_reports(coin_id TEXT NOT NULL, domain TEXT NOT NULL, status TEXT NOT NULL, recorded_at INTEGER, reported_at INTEGER NOT NULL, PRIMARY KEY(coin_id,domain))');
+    ledger_consent_schema($db);
+}
+
+// The consent records of a partner (lib/consent.php). They are installed together with a marker, in one transaction, and only when neither exists:
+// a pending coin the database holds at that moment was registered before consent existed, and is recorded as `legacy`, the one status that signs
+// without an operator's acceptance. A database that has one of the two tables and not the other is not installed over: the records are ambiguous,
+// every use of them refuses, and nothing is taken for consent.
+function ledger_consent_schema(PDO $db): void
+{
+    $present = static fn(): array => $db->query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('ledger_consents','ledger_consent_meta')")->fetchAll(PDO::FETCH_COLUMN);
+    if ($present() !== []) return;
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        if ($present() === []) {
+            $now = time();
+            $db->exec("CREATE TABLE ledger_consents(
+                coin_id TEXT PRIMARY KEY, genesis_digest TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('legacy','awaiting','accepted','declined')),
+                received_at INTEGER NOT NULL, decided_at INTEGER, decided_by TEXT, reason TEXT, signed_at INTEGER)");
+            $db->exec('CREATE TABLE ledger_consent_meta(id INTEGER PRIMARY KEY CHECK(id = 1), upgraded_at INTEGER NOT NULL)');
+            $db->exec("INSERT INTO ledger_consents(coin_id,genesis_digest,status,received_at) SELECT coin_id,genesis_digest,'legacy'," . $now . " FROM ledger_coins WHERE state='pending'");
+            $db->exec('INSERT INTO ledger_consent_meta(id,upgraded_at) VALUES(1,' . $now . ')');
+        }
+        $db->exec('COMMIT');
+    } catch (Throwable $e) {
+        ledger_rollback($db);
+        throw $e;
+    }
 }
 
 // ---------- genesis ----------

@@ -9,6 +9,10 @@ declare(strict_types=1);
 //   audit-verify                whether the audit chain is intact
 //   add-key --key=KEY [--label=TEXT] [--actions=a,b,c]
 //                               adds a public key; without --actions the key may take every action
+//   grant-actions --key=KEY|--fingerprint=FP --actions=a,b,c
+//                               adds actions to a key that is limited to some; a key that may take every action already is left as it is
+//   set-actions --key=KEY|--fingerprint=FP --actions=a,b,c|all
+//                               replaces the key's list of actions, or with `all` lifts the limit
 //   revoke --key=KEY|--fingerprint=FP
 //                               marks a key revoked; a revoked key signs nothing and stays on the list so that it cannot be added again by mistake
 //   remove-key --key=KEY|--fingerprint=FP
@@ -58,7 +62,7 @@ function operator_cli_main(array $argv): int
     $err = static fn(string $t) => fwrite(STDERR, $t . "\n");
     $command = $argv[1] ?? '';
     if ($command === '' || $command === '--help' || $command === '-h') {
-        $out("php operator-cli.php <status|audit|audit-verify|add-key|revoke|remove-key|set-token|clear-token> [--private=DIR] [--domain=NAME] [--key=KEY] [--fingerprint=FP] [--label=TEXT] [--actions=a,b] [--limit=N]");
+        $out("php operator-cli.php <status|audit|audit-verify|add-key|grant-actions|set-actions|revoke|remove-key|set-token|clear-token> [--private=DIR] [--domain=NAME] [--key=KEY] [--fingerprint=FP] [--label=TEXT] [--actions=a,b] [--limit=N]");
         return $command === '' ? 2 : 0;
     }
     $opts = [];
@@ -116,6 +120,33 @@ function operator_cli_main(array $argv): int
             $doc['keys'][] = $entry;
             operator_cli_write($private, $doc);
             $out('added ' . operator_fingerprint($key) . ($entry['label'] !== '' ? ' (' . $entry['label'] . ')' : '') . '; it takes effect on the next request');
+            return 0;
+        }
+        if ($command === 'grant-actions' || $command === 'set-actions') {
+            $given = $opts['actions'] ?? '';
+            $doc = operator_cli_read($private, $domain);
+            $i = operator_cli_find($doc, $opts['key'] ?? null, $opts['fingerprint'] ?? null);
+            if ($i < 0) { $err('no such key on the roster'); return 2; }
+            $fp = operator_fingerprint($doc['keys'][$i]['publicKey']);
+            $all = $command === 'set-actions' && $given === 'all';
+            $list = array_values(array_unique(array_filter(array_map('trim', explode(',', $given)), static fn($a) => $a !== '')));
+            if (!$all) {
+                if ($list === []) { $err('--actions needs a list of actions' . ($command === 'set-actions' ? ', or all' : '')); return 2; }
+                foreach ($list as $a) if (!isset(OPERATOR_ACTIONS[$a])) { $err('unknown action ' . substr($a, 0, 40)); return 2; }
+            }
+            if ($all) {
+                unset($doc['keys'][$i]['actions']);
+                $out($fp . ' may now take every action');
+            } elseif ($command === 'grant-actions' && !isset($doc['keys'][$i]['actions'])) {
+                $out($fp . ' may take every action already; nothing was changed');
+                return 0;
+            } else {
+                $now = $command === 'grant-actions' ? array_values(array_unique(array_merge(is_array($doc['keys'][$i]['actions']) ? $doc['keys'][$i]['actions'] : [], $list))) : $list;
+                $doc['keys'][$i]['actions'] = $now;
+                $out($fp . ' may take: ' . implode(', ', $now));
+            }
+            operator_cli_write($private, $doc);
+            $out('it takes effect on the next request; the key itself, its label and its standing are unchanged');
             return 0;
         }
         if ($command === 'revoke' || $command === 'remove-key') {

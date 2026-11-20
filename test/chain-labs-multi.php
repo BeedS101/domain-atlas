@@ -33,7 +33,9 @@ $sendGenesis = function (array $g, array $cc, string $from = 'a.example', ?array
     return fn() => transport('b.example', peer_envelope(node($from), 'b.example', 'genesis', ['genesis' => $g, 'treasuryKey' => $cc['treasury']['key'], 'refSecret' => null], $NOW));
 };
 [$cc, $g] = $fresh();
-t(is_string($sendGenesis($g, $cc)()['signature'] ?? null), 'a partner signs a genesis that names it with its own key');
+t(refuses($sendGenesis($g, $cc), 'needs-consent'), 'a partner answers a genesis that names it with its own key with needs-consent, until its operator accepts');
+consent_accept(ndb('b.example'), node('b.example'), $cc['coin'], ledger_genesis_digest($g), 'test-operator', $NOW);
+t(is_string($sendGenesis($g, $cc)()['signature'] ?? null), 'and signs it once the operator has accepted it');
 t(isset($sendGenesis($g, $cc)()['signature']), 'and signs the same genesis again');
 [$cc, $g] = $fresh();
 $wrongKey = $g['roster'];
@@ -51,7 +53,7 @@ t(refuses($sendGenesis($g, $cc, 'c.example'), 'bad-genesis'), 'refused: a genesi
 [$cc, $g] = $fresh();
 t(refuses($sendGenesis(array_merge($g, ['treasuryRef' => owner()['key']]), $cc), 'bad-genesis'), 'refused: a genesis whose treasury does not match the treasury key it came with');
 [$cc, $g] = $fresh();
-$sendGenesis($g, $cc)();
+try { $sendGenesis($g, $cc)(); } catch (LedgerError $e) {}
 $g2 = $g;
 $g2['name'] = 'Another coin';
 t(refuses($sendGenesis($g2, $cc), 'exists'), 'refused: a different coin on an id the partner already holds');

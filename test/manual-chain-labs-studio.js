@@ -103,6 +103,11 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     line((await scan(a, 'action=coins')).json.coins.length === 1, 'and the scanner does not list it');
     await start(b);
     await sleep(500);
+    // The partner is back, but its operator has to accept the proposal on its own domain before it signs: the first press sends the proposal.
+    await card('OSC').getByRole('button', { name: 'Finish opening on the ledger' }).click();
+    const waiting = await settle(/Could not open OSC/);
+    line(/b\.example: has not accepted yet/.test(waiting), 'with the partner back, it has not accepted the proposal yet, and the page says so', waiting);
+    line((await S.consentAccept(b, osc.id)).status === 200, 'the partner operator accepts that coin on b.example');
     await card('OSC').getByRole('button', { name: 'Finish opening on the ledger' }).click();
     const done = await settle(/OSC is open on the ledger/);
     line(/Every partner domain signed the genesis/.test(done), 'when the partner is back the same button opens it', done);

@@ -139,10 +139,22 @@ const target = (n) => ({ base: 'http://127.0.0.1:' + n.port, host: n.domain });
 const signedOp = (n, action, body, opts = {}) => OP.callOperator(target(n), opts.as || n.operator, action.includes('/') ? action : 'spend34/' + action, body || {}, opts);
 const op = async (n, action, body) => {
   if (action === 'open' && body && body.purchase !== undefined && body.purchase !== null) { registerPolicy(n, body.coinId, body.purchase); const { purchase, ...rest } = body; body = rest; }
-  const res = await signedOp(n, action, body, { repeat: true });
+  let res = await signedOp(n, action, body, { repeat: true });
+  // The partners' operators accept a proposed coin before it opens. Tests that are not about consent do what those operators do, then ask again.
+  if (action === 'open' && res.status === 409 && res.json && res.json.code === 'needs-consent') {
+    for (const p of res.json.partners.filter((x) => x.state === 'awaiting')) await consentAccept(nodes[p.domain], body.coinId);
+    res = await signedOp(n, action, body, { repeat: true });
+  }
   if (action === 'open' && res.json && res.json.ok) await remember(n, body.coinId);
   return res;
 };
+// The operator of a partner reads the proposal for a coin and accepts exactly that genesis.
+async function consentAccept(n, coinId) {
+  const listed = await signedOp(n, 'spend34/consent-list', {}, { repeat: true });
+  const proposal = listed.json && listed.json.proposals ? listed.json.proposals.find((x) => x.coinId === coinId) : null;
+  if (!proposal) throw new Error('no proposal for ' + coinId + ' on ' + n.domain);
+  return signedOp(n, 'spend34/consent-accept', { coinId, digest: proposal.genesisDigest }, { repeat: true });
+}
 const coinRequest = (symbol, extra = {}) => ({ name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', ...extra });
 const createCoin = (n, symbol, extra = {}) => signedOp(n, 'coin26/create', coinRequest(symbol, extra));
 // The same two as they were made before signed requests, with the operator token.
@@ -184,4 +196,4 @@ function cleanup() {
   for (const n of Object.values(nodes)) killGroup(n);
   fs.rmSync(work, { recursive: true, force: true });
 }
-module.exports = { OP, writeRoster, target, signedOp, legacyOp, legacyCreateCoin, coinRequest, bindingOf, remember, A, B, C, D, nodes, issuer, issuerKey, POLICY, b64u, canon, sleep, wallet, start, stop, call, get, post, scan, op, createCoin, NOW, iso, transfer, units, headOf, level, levelOk, hex, credential, cleanup };
+module.exports = { OP, consentAccept, writeRoster, target, signedOp, legacyOp, legacyCreateCoin, coinRequest, bindingOf, remember, A, B, C, D, nodes, issuer, issuerKey, POLICY, b64u, canon, sleep, wallet, start, stop, call, get, post, scan, op, createCoin, NOW, iso, transfer, units, headOf, level, levelOk, hex, credential, cleanup };

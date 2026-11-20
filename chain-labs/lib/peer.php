@@ -6,6 +6,7 @@ declare(strict_types=1);
 // Include-only: a direct request gets a 404.
 if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; }
 require_once __DIR__ . '/spend.php';
+require_once __DIR__ . '/consent.php';
 
 const PEER_MAX_AGE_SECONDS = 120;
 const PEER_MAX_PENDING_COINS = 100;
@@ -69,7 +70,7 @@ function peer_handle(PDO $db, array $node, array $envelope, int $now, callable $
 {
     [$from, $action, $body] = peer_open($db, $node, $envelope, $now);
     return match ($action) {
-        'genesis' => peer_on_genesis($db, $node, $from, $body),
+        'genesis' => peer_on_genesis($db, $node, $from, $body, $now),
         'sync' => peer_on_sync($db, $node, $from, $body, $now),
         'approve' => peer_on_approve($db, $node, $from, $body, $now, $send),
         'notify' => peer_on_notify($db, $node, $from, $body, $now, $send),
@@ -82,9 +83,11 @@ function peer_handle(PDO $db, array $node, array $envelope, int $now, callable $
 
 // ---------- opening a coin together ----------
 
-// A partner receives a genesis from the authority. It signs only a genesis that names itself with its own key, names
-// every other domain with the key it pinned, and comes from the authority it names.
-function peer_on_genesis(PDO $db, array $node, string $from, array $body): array
+// A partner receives a genesis from the authority. It checks that the genesis names this domain with its own key, names every other domain
+// with the key it pinned, and comes from the authority it names. It then records the genesis as a proposal and signs only when this domain's
+// operator has accepted that exact genesis (lib/consent.php). An answer of needs-consent or consent-declined is not a failure of the
+// proposal: the authority asks again. A signature is never given when the consent record cannot be read or written.
+function peer_on_genesis(PDO $db, array $node, string $from, array $body, int $now): array
 {
     $genesis = $body['genesis'] ?? null;
     $treasuryKey = $body['treasuryKey'] ?? null;
@@ -105,18 +108,48 @@ function peer_on_genesis(PDO $db, array $node, string $from, array $body): array
     }
     if (!$named) ledger_fail('not-in-roster', 'this domain is not in the roster');
     $coinId = $genesis['coinId'] ?? null;
-    $existing = is_string($coinId) && preg_match('/^[a-f0-9]{32}$/D', $coinId) ? $db->prepare('SELECT genesis_digest,state FROM ledger_coins WHERE coin_id=?') : null;
-    if ($existing) {
-        $existing->execute([$coinId]);
-        $row = $existing->fetch(PDO::FETCH_ASSOC);
-        if ($row) {
-            if ($row['genesis_digest'] !== ledger_genesis_digest($genesis)) ledger_fail('exists', 'a different coin has this id');
-            return ['signature' => ledger_genesis_sign($genesis, $node['private'])];
+    $digest = ledger_genesis_digest($genesis);
+    consent_ready($db);
+    $verdict = null;
+    $report = null;
+    $signature = null;
+    try {
+        $db->exec('BEGIN IMMEDIATE');
+        try {
+            $row = null;
+            if (is_string($coinId) && preg_match('/^[a-f0-9]{32}$/D', $coinId)) {
+                $existing = $db->prepare('SELECT genesis_digest,state FROM ledger_coins WHERE coin_id=?');
+                $existing->execute([$coinId]);
+                $row = $existing->fetch(PDO::FETCH_ASSOC) ?: null;
+                $existing->closeCursor();
+            }
+            if ($row) {
+                if ($row['genesis_digest'] !== $digest) ledger_fail('exists', 'a different coin has this id');
+                if ($row['state'] !== 'pending') {
+                    // A coin that is already open: this domain signed it when it was opened; nothing is decided here.
+                    $verdict = 'sign';
+                    $report = consent_echo_for($db, $coinId);
+                } else {
+                    [$verdict, $report] = consent_decide_signature($db, $coinId, $digest, $now);
+                }
+            } else {
+                if (consent_waiting_count($db) >= PEER_MAX_PENDING_COINS) ledger_fail('busy', 'too many coins are waiting for signatures');
+                ledger_register($db, $genesis, $treasuryKey, $secret);
+                consent_add_proposal($db, $coinId, $digest, $now);
+                $verdict = 'awaiting';
+            }
+            if ($verdict === 'sign') $signature = ledger_genesis_sign($genesis, $node['private']);
+            $db->exec('COMMIT');
+        } catch (Throwable $e) {
+            ledger_rollback($db);
+            throw $e;
         }
+    } catch (PDOException $e) {
+        consent_unavailable('a record cannot be written');
     }
-    if ((int) $db->query("SELECT COUNT(*) FROM ledger_coins WHERE state='pending'")->fetchColumn() >= PEER_MAX_PENDING_COINS) ledger_fail('busy', 'too many coins are waiting for signatures');
-    ledger_register($db, $genesis, $treasuryKey, $secret);
-    return ['signature' => ledger_genesis_sign($genesis, $node['private'])];
+    if ($verdict === 'awaiting') ledger_fail('needs-consent', 'the operator of ' . $node['domain'] . ' has not accepted this coin yet');
+    if ($verdict === 'declined') ledger_fail('consent-declined', 'the operator of ' . $node['domain'] . ' has declined this coin');
+    return $report === null ? ['signature' => $signature] : ['signature' => $signature, 'consent' => $report];
 }
 
 // The authority opens a multi coin: it registers the coin, collects every partner's genesis signature, opens the coin
@@ -139,10 +172,24 @@ function peer_open_multi(PDO $db, array $node, array $genesis, string $treasuryK
     $have = $db->prepare('SELECT domain FROM ledger_genesis_sigs WHERE coin_id=?');
     $have->execute([$coinId]);
     $signed = array_flip($have->fetchAll(PDO::FETCH_COLUMN));
+    // Every partner is asked in one attempt, so each sees the proposal; one that has not accepted, or declined, does not stop the others.
+    $waiting = [];
     foreach ($genesis['roster'] as $member) {
         if (isset($signed[$member['domain']])) continue;
-        $answer = $send($member['domain'], peer_envelope($node, $member['domain'], 'genesis', ['genesis' => $genesis, 'treasuryKey' => $treasuryKey, 'refSecret' => $refSecret], $now));
+        try {
+            $answer = $send($member['domain'], peer_envelope($node, $member['domain'], 'genesis', ['genesis' => $genesis, 'treasuryKey' => $treasuryKey, 'refSecret' => $refSecret], $now));
+        } catch (LedgerError $e) {
+            if ($e->reason !== 'needs-consent' && $e->reason !== 'consent-declined') throw $e;
+            $waiting[$member['domain']] = $e->reason === 'needs-consent' ? 'awaiting' : 'declined';
+            continue;
+        }
         ledger_add_genesis_signature($db, $coinId, $member['domain'], (string) ($answer['signature'] ?? ''));
+        consent_report_save($db, $coinId, $member['domain'], $answer['consent'] ?? null, $now);
+    }
+    if ($waiting) {
+        $names = [];
+        foreach ($waiting as $domain => $why) $names[] = $domain . ' (' . $why . ')';
+        ledger_fail('needs-consent', 'These partners have not accepted this coin: ' . implode(', ', $names), ['waiting' => $waiting]);
     }
     ledger_activate($db, $coinId, $node['private']);
     peer_notify_all($db, $node, $coinId, $send, $now);

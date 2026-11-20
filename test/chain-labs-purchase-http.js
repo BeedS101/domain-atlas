@@ -134,7 +134,18 @@ function registerPolicy(n, coinId, policy) {
 }
 const op = async (n, action, body) => {
   if (action === 'open' && body && body.purchase !== undefined && body.purchase !== null) { registerPolicy(n, body.coinId, body.purchase); const { purchase, ...rest } = body; body = rest; }
-  const res = await call(n, 'spend34', 'POST', 'action=' + action, CL.sign(n.operator, n.domain, 'spend34/' + action, body));
+  const send = () => call(n, 'spend34', 'POST', 'action=' + action, CL.sign(n.operator, n.domain, 'spend34/' + action, body));
+  let res = await send();
+  // The partners' operators accept a proposed coin before it opens; this test is not about consent, so they accept and the open is asked for again.
+  if (action === 'open' && res.status === 409 && res.json && res.json.code === 'needs-consent') {
+    for (const p of res.json.partners.filter((x) => x.state === 'awaiting')) {
+      const m = nodes[p.domain];
+      const listed = await call(m, 'spend34', 'POST', 'action=consent-list', CL.sign(m.operator, m.domain, 'spend34/consent-list', {}));
+      const proposal = listed.json.proposals.find((x) => x.coinId === body.coinId);
+      await call(m, 'spend34', 'POST', 'action=consent-accept', CL.sign(m.operator, m.domain, 'spend34/consent-accept', { coinId: body.coinId, digest: proposal.genesisDigest }));
+    }
+    res = await send();
+  }
   if (action === 'open' && res.json && res.json.ok) {
     const c = (await get(n, 'action=coin&coin=' + body.coinId)).json;
     if (c && c.ok) bound[body.coinId] = { authority: c.genesis.authority, genesis: c.genesisDigest };
