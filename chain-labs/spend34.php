@@ -256,12 +256,14 @@ try {
     // The operator's own layer: proving a key, switching to signed requests only, reading the audit table.
     if (in_array($action, ['operator-check', 'operator-activate', 'operator-audit'], true)) {
         $auth = operator34($action, body34(8192));
-        if ($action === 'operator-check') reply34(200, operator_check($private, $host, $auth, time()));
-        if ($action === 'operator-audit') reply34(200, operator_audit_answer($private, (int) ($auth['args']['limit'] ?? 50)));
         try {
+            if ($action === 'operator-check') reply34(200, operator_check($private, $host, $auth, time()));
+            if ($action === 'operator-audit') reply34(200, operator_audit_answer($private, (int) ($auth['args']['limit'] ?? 50)));
             reply34(200, operator_activate($private, $host, $auth, $auth['args'], time()));
         } catch (OperatorError $e) {
             reply34($e->status, ['ok' => false, 'code' => $e->reason, 'error' => $e->getMessage()] + $e->extra);
+        } catch (Throwable $e) {
+            reply34(503, ['ok' => false, 'code' => 'operator-state-unavailable', 'error' => 'The operator records cannot be read or written, so nothing was changed.']);
         }
     }
     // Operator actions.

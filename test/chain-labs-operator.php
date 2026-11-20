@@ -19,6 +19,10 @@ function t(bool $ok, string $text, mixed $detail = null): void
     if (!$ok) $failures++;
     echo ($ok ? 'PASS ' : 'FAIL ') . $text . (!$ok && $detail !== null ? ' :: ' . substr(is_string($detail) ? $detail : json_encode($detail), 0, 300) : '') . "\n";
 }
+function authorize2(string $dir, string $action, array $body, int $now): array
+{
+    return operator_authorize($dir, 'a.example', $action, 'POST', $body, $now);
+}
 function refused(callable $fn): string
 {
     try { $fn(); } catch (OperatorError $e) { return $e->reason; } catch (Throwable $e) { return get_class($e) . ': ' . $e->getMessage(); }
@@ -126,8 +130,24 @@ operator_finish($private, $g1, 201, ['ok' => true], $NOW);
 t(refused(fn() => authorize('spend34/grant', signed($root, 'spend34/grant', ['coinId' => str_repeat('e', 32), 'to' => $recipient, 'amount' => '7'], $NOW + 10), $NOW + 10)) === 'duplicate-request', 'the same action signed again with a new nonce is not carried out a second time');
 $rep = authorize('spend34/grant', signed($root, 'spend34/grant', ['coinId' => str_repeat('e', 32), 'to' => $recipient, 'amount' => '7'], $NOW + 10, [], ['repeat' => true]), $NOW + 10);
 t(($rep['via'] ?? '') === 'signed', 'unless it is signed to be repeated');
+operator_finish($private, $rep, 201, ['ok' => true], $NOW + 10);
 $later = authorize('spend34/grant', signed($root, 'spend34/grant', ['coinId' => str_repeat('e', 32), 'to' => $recipient, 'amount' => '7'], $NOW + 400), $NOW + 400);
 t(($later['via'] ?? '') === 'signed', 'or until the window for it has passed');
+operator_finish($private, $later, 201, ['ok' => true], $NOW + 400);
+
+echo "\n== a request that was interrupted is never carried out again by accident\n";
+$cutOriginal = signed($root, 'spend34/grant', ['coinId' => str_repeat('9', 32), 'to' => $recipient, 'amount' => '3'], $NOW + 500);
+$cut = authorize('spend34/grant', $cutOriginal, $NOW + 500);
+t(($cut['via'] ?? '') === 'signed', 'a grant is accepted, and the process ends before its outcome is recorded');
+$cutBody = signed($root, 'spend34/grant', ['coinId' => str_repeat('9', 32), 'to' => $recipient, 'amount' => '3'], $NOW + 505);
+t(refused(fn() => authorize('spend34/grant', $cutBody, $NOW + 505)) === 'duplicate-request', 'the same grant signed again is refused');
+$tenMinutes = signed($root, 'spend34/grant', ['coinId' => str_repeat('9', 32), 'to' => $recipient, 'amount' => '3'], $NOW + 1200);
+t(refused(fn() => authorize('spend34/grant', $tenMinutes, $NOW + 1200)) === 'duplicate-request', 'and still ten minutes later, as nobody knows whether it was made');
+t(refused(fn() => authorize('spend34/grant', $tenMinutes, $NOW + 1201)) === 'duplicate-request', 'however many times it is tried');
+$decided = authorize('spend34/grant', signed($root, 'spend34/grant', ['coinId' => str_repeat('9', 32), 'to' => $recipient, 'amount' => '3'], $NOW + 1300, [], ['repeat' => true]), $NOW + 1300);
+t(($decided['via'] ?? '') === 'signed', 'until the operator has looked at the ledger and signs it to be repeated');
+operator_finish($private, $decided, 201, ['ok' => true], $NOW + 1300);
+t(refused(fn() => authorize('spend34/grant', $cutOriginal, $NOW + 520)) === 'in-progress', 'the interrupted request itself, sent again, is told its outcome is not known and is not carried out');
 
 echo "\n== the roster and what a key may do\n";
 t(refused(fn() => authorize('spend34/grant', signed($studio, 'spend34/grant', $req, $NOW + 1000), $NOW + 1000)) === 'action-not-permitted', 'a key may not take an action that is not in its list');
@@ -143,7 +163,8 @@ t(true, 'a key with a list takes no action outside it');
 t(($c = authorize('operator/check', signed($treasury, 'operator/check', [], $NOW + 2000), $NOW + 2000))['via'] === 'signed', 'every active key may prove itself with operator/check');
 roster(['keys' => [['publicKey' => $root['key'], 'revoked' => true], ['publicKey' => $studio['key']]]]);
 t(refused(fn() => authorize('spend34/integrity', signed($root, 'spend34/integrity', [], $NOW + 3000), $NOW + 3000)) === 'not-operator', 'a revoked key is refused at once');
-t(($x = authorize('spend34/grant', signed($studio, 'spend34/grant', $req, $NOW + 3000), $NOW + 3000))['via'] === 'signed', 'a key whose actions list is absent may take every action');
+$req2 = ['coinId' => str_repeat('a', 32), 'to' => $recipient, 'amount' => '11'];
+t(($x = authorize('spend34/grant', signed($studio, 'spend34/grant', $req2, $NOW + 3000), $NOW + 3000))['via'] === 'signed', 'a key whose actions list is absent may take every action');
 roster(['keys' => [['publicKey' => $studio['key'], 'actions' => 'spend34/grant']]]);
 t(refused(fn() => authorize('spend34/grant', signed($studio, 'spend34/grant', $req, $NOW + 4000), $NOW + 4000)) === 'action-not-permitted', 'an actions value that is not a list gives the key no action');
 roster(['keys' => [['publicKey' => $studio['key'], 'actions' => ['spend34/nothing']]]]);
@@ -244,6 +265,42 @@ t($e !== null && $e->reason === 'bad-request', 'activation needs its confirmatio
 t(refused(fn() => operator_authorize($private3, $HOST, 'operator/activate', 'POST', signed($treasury, 'operator/activate', ['confirm' => 'activate-signed-operator'], $T2 + 3), $T2 + 3)) === 'action-not-permitted', 'a key without the activation action cannot activate');
 $ratchetFile = operator_paths($private2)['ratchet'];
 t(is_file($ratchetFile) && (fileperms($ratchetFile) & 0077) === 0, 'the activation is a file in the private folder that only its owner can read');
+
+echo "\n== records that are lost or damaged never open anything\n";
+unlink($ratchetFile);
+t(operator_ratchet_active($private2), 'the activation is also kept in the database, so a deleted marker file does not undo it');
+t(refused(fn() => $legacy('spend34/grant', $T2 + 5)) === 'signature-required', 'and a token is still refused for an action that changes something');
+$status = operator_status($private2, $HOST, $T2 + 5);
+t($status['activated'] === true, 'the status says so');
+file_put_contents($ratchetFile, '{}');
+unlink($private2 . '/chainlabs-operator.sqlite');
+t(operator_ratchet_active($private2), 'a deleted database does not undo it either, while the marker file is there');
+t(refused(fn() => $legacy('spend34/grant', $T2 + 6)) === 'signature-required', 'a token is refused after the database is lost');
+$fresh = authorize2($private2, 'spend34/integrity', signed($root, 'spend34/integrity', [], $T2 + 7), $T2 + 7);
+t(($fresh['via'] ?? '') === 'signed', 'and a signed request starts a new database and works');
+
+$private4 = sys_get_temp_dir() . '/chainlabs-operator-test4-' . bin2hex(random_bytes(4));
+mkdir($private4, 0700);
+register_shutdown_function(static function () use ($private4) { foreach (glob($private4 . '/*') ?: [] as $f) { is_dir($f) ? @rmdir($f) : @unlink($f); } @rmdir($private4); });
+file_put_contents($private4 . '/chainlabs-operators.json', json_encode(['domain' => $HOST, 'legacyTokenSha256' => hash('sha256', $token), 'keys' => [['publicKey' => $root['key']]]]));
+file_put_contents($private4 . '/chainlabs-operator.sqlite', str_repeat("not a database\n", 200));
+t(refused(fn() => operator_authorize($private4, $HOST, 'spend34/grant', 'POST', signed($root, 'spend34/grant', $req, $T2 + 10), $T2 + 10)) === 'operator-state-unavailable', 'a damaged operator database refuses a signed request');
+t(refused(fn() => operator_authorize($private4, $HOST, 'spend34/grant', 'POST', ['adminToken' => $token, 'coinId' => str_repeat('a', 32)], $T2 + 10)) === 'operator-state-unavailable', 'and a token');
+t(refused(fn() => operator_authorize($private4, $HOST, 'spend34/integrity', 'POST', signed($root, 'spend34/integrity', [], $T2 + 10), $T2 + 10)) === 'operator-state-unavailable', 'and a request that only reads');
+unlink($private4 . '/chainlabs-operator.sqlite');
+mkdir($private4 . '/chainlabs-operator.sqlite');
+t(refused(fn() => operator_authorize($private4, $HOST, 'spend34/grant', 'POST', signed($root, 'spend34/grant', $req, $T2 + 11), $T2 + 11)) === 'operator-state-unavailable', 'a database that cannot be opened refuses too');
+t(operator_ratchet_active($private4), 'and one that cannot be read counts as activated');
+rmdir($private4 . '/chainlabs-operator.sqlite');
+$ok4 = operator_authorize($private4, $HOST, 'spend34/integrity', 'POST', signed($root, 'spend34/integrity', [], $T2 + 12), $T2 + 12);
+t(($ok4['via'] ?? '') === 'signed', 'with a readable database again it works');
+file_put_contents($private4 . '/chainlabs-operators.json', '{"domain":');
+t(refused(fn() => operator_authorize($private4, $HOST, 'spend34/integrity', 'POST', signed($root, 'spend34/integrity', [], $T2 + 13), $T2 + 13)) === 'operator-roster-invalid', 'a roster that is cut short refuses everything');
+file_put_contents($private4 . '/chainlabs-operators.json', json_encode(['domain' => $HOST, 'keys' => [['publicKey' => $root['key']]]]));
+chmod($private4 . '/chainlabs-operators.json', 0666);
+t(refused(fn() => operator_authorize($private4, $HOST, 'spend34/integrity', 'POST', signed($root, 'spend34/integrity', [], $T2 + 14), $T2 + 14)) === 'operator-roster-unsafe', 'so does one that anyone can write');
+unlink($private4 . '/chainlabs-operators.json');
+t(refused(fn() => operator_authorize($private4, $HOST, 'spend34/integrity', 'POST', signed($root, 'spend34/integrity', [], $T2 + 15), $T2 + 15)) === 'operator-not-configured', 'and so does a missing one');
 
 echo "\n" . ($failures === 0 ? 'ALL ' . $total . ' CHAIN-LABS OPERATOR CHECKS PASSED' : $failures . ' of ' . $total . ' checks FAILED') . "\n";
 exit($failures === 0 ? 0 : 1);

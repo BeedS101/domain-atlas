@@ -22,6 +22,7 @@ const OPERATOR_LIFETIME_SECONDS = 120;
 const OPERATOR_SENSITIVE_LIFETIME_SECONDS = 60;
 const OPERATOR_SKEW_SECONDS = 30;
 const OPERATOR_DUPLICATE_SECONDS = 300;
+const OPERATOR_PENDING_KEEP_SECONDS = 86400;
 const OPERATOR_FAIL_LIMIT = 10;
 const OPERATOR_FAIL_WINDOW_SECONDS = 300;
 const OPERATOR_NONCE_CAP = 20000;
@@ -99,6 +100,7 @@ function operator_roster(string $private, string $host): array
 {
     $file = operator_paths($private)['roster'];
     if (!is_file($file)) throw new OperatorError('operator-not-configured', 'This domain has no operator keys yet. Put chainlabs-operators.json in the private folder.', 503);
+    clearstatcache(true, $file);
     $perms = @fileperms($file);
     if ($perms === false || ($perms & 0002) !== 0) throw new OperatorError('operator-roster-unsafe', 'The operator roster can be written by anyone, so it is not used.', 503);
     $size = @filesize($file);
@@ -152,6 +154,7 @@ function operator_db(string $private): PDO
     $db->exec('CREATE TABLE IF NOT EXISTS operator_failures(client TEXT NOT NULL, at INTEGER NOT NULL)');
     $db->exec('CREATE INDEX IF NOT EXISTS operator_failures_client ON operator_failures(client, at)');
     $db->exec('CREATE TABLE IF NOT EXISTS operator_verified(key_fp TEXT PRIMARY KEY, at INTEGER NOT NULL)');
+    $db->exec('CREATE TABLE IF NOT EXISTS operator_state(name TEXT PRIMARY KEY, value TEXT NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS operator_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, event TEXT NOT NULL, action TEXT, key_fp TEXT, nonce_fp TEXT,
         digest TEXT, client TEXT, code TEXT, status INTEGER, detail TEXT, prev TEXT NOT NULL, hash TEXT NOT NULL)');
     if ($new) @chmod($file, 0600);
@@ -267,9 +270,18 @@ function operator_refuse(PDO $db, int $now, string $action, ?string $keyFp, stri
 
 // ---------- the signed path ----------
 
-function operator_ratchet_active(string $private): bool
+// Whether signed requests are required for the actions that change something. Activation is kept twice, as the marker file in the private
+// folder and as a row in the operator database, and either one is enough: losing one of them (a cleaned folder, a restored copy of one file)
+// does not let the token back in. A database that cannot be read counts as activated.
+function operator_ratchet_active(string $private, ?PDO $db = null): bool
 {
-    return is_file(operator_paths($private)['ratchet']);
+    if (is_file(operator_paths($private)['ratchet'])) return true;
+    try {
+        $db ??= operator_db($private);
+        return $db->query("SELECT 1 FROM operator_state WHERE name = 'ratchet'")->fetchColumn() !== false;
+    } catch (Throwable $e) {
+        return true;
+    }
 }
 
 // Authorizes one operator request. $body is the decoded request body, $method the HTTP method. Returns:
@@ -277,6 +289,18 @@ function operator_ratchet_active(string $private): bool
 //   ['replay' => ['status' => int, 'body' => array]]                          the same signed request was already carried out: answer with this
 // and throws OperatorError for everything else.
 function operator_authorize(string $private, string $host, string $action, string $method, array $body, int $now): array
+{
+    try {
+        return operator_authorize_checked($private, $host, $action, $method, $body, $now);
+    } catch (OperatorError $e) {
+        throw $e;
+    } catch (Throwable $e) {
+        // The operator database could not be opened, read or written (damaged, locked, not writable). Nothing is carried out without a record of it.
+        throw new OperatorError('operator-state-unavailable', 'The operator records cannot be read or written, so no operator action was taken.', 503);
+    }
+}
+
+function operator_authorize_checked(string $private, string $host, string $action, string $method, array $body, int $now): array
 {
     if (!isset(OPERATOR_ACTIONS[$action])) throw new OperatorError('unknown-action', 'Unknown operator action.', 400);
     $roster = operator_roster($private, $host);
@@ -348,7 +372,7 @@ function operator_signed(string $private, array $roster, PDO $db, string $host, 
 
     operator_begin($db);
     try {
-        $db->prepare('DELETE FROM operator_nonces WHERE expires_at < ?')->execute([$now - OPERATOR_SKEW_SECONDS]);
+        $db->prepare('DELETE FROM operator_nonces WHERE expires_at < ?')->execute([$now]);
         $seen = $db->prepare('SELECT digest, status, http_status, response FROM operator_nonces WHERE key_fp = ? AND nonce = ?');
         $seen->execute([$fp, $nonce]);
         $row = $seen->fetch(PDO::FETCH_ASSOC);
@@ -372,7 +396,9 @@ function operator_signed(string $private, array $roster, PDO $db, string $host, 
             throw new OperatorError('busy', 'Too many recent operator requests. Try again shortly.', 503);
         }
         if ($sensitive && !array_key_exists('repeat', $auth)) {
-            $dup = $db->prepare("SELECT status, at FROM operator_nonces WHERE intent = ? AND at > ? AND status IN ('started','done') ORDER BY at DESC LIMIT 1");
+            // A request that was accepted and has no outcome may have been carried out, so it holds back an identical one until `repeat` is signed
+            // (its record is kept a day); one that finished holds it back for the duplicate window.
+            $dup = $db->prepare("SELECT status, at FROM operator_nonces WHERE intent = ? AND (status = 'started' OR (status = 'done' AND at > ?)) ORDER BY at DESC LIMIT 1");
             $dup->execute([$intent, $now - OPERATOR_DUPLICATE_SECONDS]);
             $earlier = $dup->fetch(PDO::FETCH_ASSOC);
             if ($earlier) {
@@ -382,7 +408,7 @@ function operator_signed(string $private, array $roster, PDO $db, string $host, 
             }
         }
         $db->prepare("INSERT INTO operator_nonces(key_fp,nonce,digest,intent,action,status,at,expires_at) VALUES(?,?,?,?,?,'started',?,?)")
-            ->execute([$fp, $nonce, $digest, $intent, $action, $now, $expires + OPERATOR_SKEW_SECONDS]);
+            ->execute([$fp, $nonce, $digest, $intent, $action, $now, $now + OPERATOR_PENDING_KEEP_SECONDS]);
         operator_audit($db, 'accepted', ['action' => $action, 'key_fp' => $fp, 'nonce_fp' => $nonceFp, 'digest' => $digest, 'detail' => $detail], $now);
         operator_end($db, true);
     } catch (OperatorError $e) {
@@ -398,7 +424,7 @@ function operator_legacy(string $private, array $roster, PDO $db, string $action
 {
     if (!operator_legacy_open($now)) operator_refuse($db, $now, $action, null, 'legacy-ended', 'Operator tokens are no longer accepted. Sign the request with an operator key.', 403);
     if ($roster['legacySha'] === null) operator_refuse($db, $now, $action, null, 'legacy-disabled', 'This domain does not accept an operator token. Sign the request with an operator key.', 403);
-    if (operator_sensitive($action) && operator_ratchet_active($private)) operator_refuse($db, $now, $action, null, 'signature-required', 'This action now needs a signed operator request; a token is no longer accepted for it.', 403);
+    if (operator_sensitive($action) && operator_ratchet_active($private, $db)) operator_refuse($db, $now, $action, null, 'signature-required', 'This action now needs a signed operator request; a token is no longer accepted for it.', 403);
     $retry = operator_retry_after($db, $now);
     if ($retry > 0) { operator_audit($db, 'throttled', ['action' => $action, 'code' => 'rate-limited', 'status' => 429], $now); throw new OperatorError('rate-limited', 'Too many failed attempts. Try again later.', 429, ['retryAfter' => $retry]); }
     $token = $body['adminToken'];
@@ -423,7 +449,7 @@ function operator_finish(string $private, array $auth, int $status, array $body,
             if (!is_string($text) || strlen($text) > OPERATOR_STORED_RESPONSE_MAX) $text = json_encode(['ok' => $status < 400, 'note' => 'The answer was too large to keep. The action was carried out once.']);
             $fp = (string) $auth['keyFp'];
             // A request that was refused or failed is kept as failed: it is answered again from the record, and does not stand in the way of signing it anew.
-            $db->prepare('UPDATE operator_nonces SET status=?, http_status=?, response=? WHERE key_fp=? AND nonce=?')->execute([$status >= 400 ? 'failed' : 'done', $status, $text, $fp, $auth['nonce']]);
+            $db->prepare('UPDATE operator_nonces SET status=?, http_status=?, response=?, expires_at=? WHERE key_fp=? AND nonce=?')->execute([$status >= 400 ? 'failed' : 'done', $status, $text, $now + OPERATOR_DUPLICATE_SECONDS + OPERATOR_SKEW_SECONDS, $fp, $auth['nonce']]);
             operator_audit($db, 'outcome', ['action' => $auth['action'], 'key_fp' => $fp, 'nonce_fp' => substr(hash('sha256', (string) $auth['nonce']), 0, 16), 'digest' => $auth['digest'], 'code' => $code, 'status' => $status], $now);
         } elseif (($auth['via'] ?? null) === 'legacy') {
             operator_audit($db, 'outcome', ['action' => $auth['action'], 'code' => $code, 'status' => $status, 'detail' => 'legacy-token'], $now);
@@ -444,7 +470,7 @@ function operator_check(string $private, string $host, array $auth, int $now): a
     $key = null;
     foreach ($roster['keys'] as $k) if ($k['fingerprint'] === $auth['keyFp']) $key = $k;
     return ['ok' => true, 'verified' => true, 'key' => ['fingerprint' => $auth['keyFp'], 'label' => $key['label'] ?? '', 'actions' => $key['actions'] ?? 'all'],
-        'ratchet' => operator_ratchet_active($private), 'legacy' => ['open' => operator_legacy_open($now), 'until' => operator_iso(OPERATOR_LEGACY_UNTIL), 'tokenSet' => $roster['legacySha'] !== null]];
+        'ratchet' => operator_ratchet_active($private, $db), 'legacy' => ['open' => operator_legacy_open($now), 'until' => operator_iso(OPERATOR_LEGACY_UNTIL), 'tokenSet' => $roster['legacySha'] !== null]];
 }
 
 // The actions that change something and have no active, verified key that may take them.
@@ -475,8 +501,9 @@ function operator_activate(string $private, string $host, array $auth, array $ar
     $missing = operator_uncovered($private, $roster, $db);
     if ($missing) throw new OperatorError('activation-not-ready', 'Some actions have no verified key that may take them.', 409, ['missing' => $missing]);
     $file = operator_paths($private)['ratchet'];
-    $already = is_file($file);
-    if (!$already) {
+    $already = operator_ratchet_active($private, $db);
+    $db->prepare("INSERT OR IGNORE INTO operator_state(name, value) VALUES('ratchet', ?)")->execute([operator_iso($now)]);
+    if (!is_file($file)) {
         $tmp = $file . '.tmp';
         file_put_contents($tmp, json_encode(['activatedAt' => operator_iso($now), 'key' => $auth['keyFp']], JSON_UNESCAPED_SLASHES));
         @chmod($tmp, 0600);
@@ -501,5 +528,5 @@ function operator_status(string $private, string $host, int $now): array
     $keys = [];
     foreach ($roster['keys'] as $k) $keys[] = ['fingerprint' => $k['fingerprint'], 'label' => $k['label'], 'actions' => $k['actions'] ?? 'all', 'revoked' => $k['revoked'], 'verified' => isset($verified[$k['fingerprint']])];
     return ['domain' => $host, 'keys' => $keys, 'tokenSet' => $roster['legacySha'] !== null, 'legacyOpen' => operator_legacy_open($now), 'legacyUntil' => operator_iso(OPERATOR_LEGACY_UNTIL),
-        'activated' => operator_ratchet_active($private), 'uncovered' => operator_uncovered($private, $roster, $db), 'audit' => operator_audit_verify($db)];
+        'activated' => operator_ratchet_active($private, $db), 'uncovered' => operator_uncovered($private, $roster, $db), 'audit' => operator_audit_verify($db)];
 }

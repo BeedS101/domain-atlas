@@ -66,6 +66,7 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     await card('GOPH').getByRole('button', { name: 'Open on the ledger' }).click();
     line(/not an operator key of this domain/.test(await settle(/not an operator key/)), 'a key that is not on the roster is refused');
     line((await get(a, 'action=coins')).json.coins.length === 0 && (await page.locator('#keyFile').inputValue()) === '', 'nothing was opened, and the file chooser is emptied');
+    line(!(await page.locator('#keyKeep').isChecked()) && /No key loaded/.test(await page.locator('#keyState').innerText()), 'by default the key is forgotten after every action, a refused one included');
     await page.getByRole('button', { name: 'Forget the key' }).click();
     line(/No key loaded/.test(await page.locator('#keyState').innerText()), 'the key can be forgotten');
     await page.setInputFiles('#keyFile', { name: 'x.json', mimeType: 'application/json', buffer: Buffer.from('{"publicKey":"x"}') });
@@ -73,7 +74,8 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     line(true, 'a file that is not a key is refused');
     const limited = S.OP.newIdentity();
     S.writeRoster(a, { keys: [{ publicKey: a.operator.publicKey, label: 'root' }, { publicKey: limited.publicKey, label: 'studio only', actions: ['spend34/open', 'spend34/grant', 'coin26/create', 'coin26/preview'] }] });
-    await loadKey(a.operator);
+    await page.locator('#keyKeep').check();
+    line(/five minutes/.test(await loadKey(a.operator)), 'the five minute choice is the user\'s, and says so');
     await page.getByRole('button', { name: 'Check this key' }).click();
     await page.waitForFunction(() => /has proved itself/.test(document.getElementById('keyState').innerText));
     line(/on the roster as root.*Actions: all.*not activated yet/.test(await page.locator('#keyState').innerText()), 'a key can prove itself, and the page says what it may do and whether signed requests are required');
@@ -145,26 +147,28 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     const sigs = sent.map((b) => { try { return JSON.parse(b); } catch (e) { return null; } }).filter((b) => b && b.payload);
     line(sigs.length > 5 && sigs.every((b) => b.payload.adminAuth.domain === 'a.example' && b.payload.adminAuth.method === 'POST' && [a.operator.publicKey, stranger.publicKey].includes(b.proof.publicKey)), 'every request was signed for this domain and method by a key the page was given', sigs.length);
 
-    console.log('\n== the key is used once when asked');
+    console.log('\n== the default: the key is used once');
     await page.locator('#grantTo').fill(w.key);
     await page.locator('#grantAmount').fill('1');
-    await page.locator('#keyOnce').check();
+    await page.locator('#keyKeep').uncheck();
     await grant();
     const once = await settle(/Granted|Could not grant/);
-    line(/Granted 1 GOPH/.test(once) && /No key loaded/.test(await page.locator('#keyState').innerText()), 'it is forgotten after the action', [once, await page.locator('#keyState').innerText()]);
-    await page.locator('#keyOnce').uncheck();
+    line(/Granted 1 GOPH/.test(once) && /No key loaded/.test(await page.locator('#keyState').innerText()), 'the key is forgotten after the action', [once, await page.locator('#keyState').innerText()]);
     await grant();
     line(/Load an operator key first/.test(await settle(/Could not grant/)), 'and the next action needs it again');
     await loadKey(limited);
     await grant();
     const dupMsg = await settle(/Could not grant/);
     line(/duplicate-request/.test(dupMsg), 'an identical grant a moment later is refused as a duplicate, not made twice', dupMsg);
+    await loadKey(limited);
     await page.locator('#opRepeat').check();
     await grant();
     line(/Granted 1 GOPH/.test(await settle(/Granted 1 GOPH/)) && !(await page.locator('#opRepeat').isChecked()), 'it is made when signed to be repeated, and that choice is not kept');
+    await loadKey(limited);
     await page.getByRole('button', { name: 'Check this key' }).click();
     await page.waitForFunction(() => /studio only/.test(document.getElementById('keyState').innerText));
-    line(/Actions: spend34\/open, spend34\/grant, coin26\/create, coin26\/preview/.test(await page.locator('#keyState').innerText()), 'a limited key shows its actions');
+    const checked = await page.locator('#keyState').innerText();
+    line(/Actions: spend34\/open, spend34\/grant, coin26\/create, coin26\/preview/.test(checked) && /forgotten after use/.test(checked), 'a limited key shows its actions, and is forgotten after the check too');
 
     console.log('\n== the legacy token, until its date');
     if (Date.now() < Date.UTC(2027, 2, 1)) {

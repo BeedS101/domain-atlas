@@ -29,8 +29,9 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     page.on('pageerror', (e) => errors.push(e.message));
     await page.goto('https://a.example/chain-labs/coin26.html');
     await page.waitForSelector('#goldOn');
-    await page.setInputFiles('#keyFile', { name: 'operator.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(a.operator)) });
-    await page.waitForFunction(() => /^Key loaded/.test(document.getElementById('keyState').innerText));
+    const loadKey = async () => { await page.setInputFiles('#keyFile', { name: 'operator.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(a.operator)) }); await page.waitForFunction(() => /^Key loaded/.test(document.getElementById('keyState').innerText)); };
+    await page.check('#keyKeep');
+    await loadKey();
     const text = (sel) => page.locator(sel).innerText();
     const msg = () => text('#message');
     const settle = async (re) => { await page.waitForFunction((src) => new RegExp(src).test(document.getElementById('message').innerText), re.source, { timeout: 15000 }); return msg(); };
@@ -87,6 +88,22 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     const refused = await settle(/Could not create coin: .*Purchase policy/);
     line(/above the limit per 24 hours/.test(refused) && await page.locator('#review').isHidden(), 'the reason is shown and no review appears', refused);
     line((await call(a, 'coin26', 'GET', 'action=list')).json.coins.every((c) => c.symbol !== 'BAD'), 'nothing was created');
+    console.log('\n== with the key forgotten after every action, a review is kept while it is chosen again');
+    await page.uncheck('#keyKeep');
+    await loadKey();
+    await base('KEY');
+    await page.check('#goldOn');
+    await fill('coinsPerAu', '100'); await fill('minPrice', '1'); await fill('perKey', '1000'); await fill('perDay', '10000'); await fill('issuerKey', issuerKey);
+    await page.click('#create');
+    await settle(/Nothing is created yet/);
+    line(/choose the key file again/.test(await msg()) && /No key loaded/.test(await text('#keyState')), 'the preview used the key and forgot it, and the page says so');
+    await page.click('#create');
+    await settle(/Choose the key file again to confirm/);
+    line(await page.locator('#review').isVisible() && (await call(a, 'coin26', 'GET', 'action=list')).json.coins.every((c) => c.symbol !== 'KEY'), 'pressing again without the key keeps the review and creates nothing');
+    await loadKey();
+    await page.click('#create');
+    await settle(/Gold purchase policy: recorded|Could not create/);
+    line((await call(a, 'coin26', 'GET', 'action=list')).json.coins.some((c) => c.symbol === 'KEY'), 'with the key chosen again the coin is created');
     line(errors.length === 0, 'the page raised no errors', errors);
   } finally {
     await browser.close();

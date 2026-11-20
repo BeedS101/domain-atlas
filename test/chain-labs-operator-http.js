@@ -201,6 +201,78 @@ const forgetFailures = (n) => require('child_process').execFileSync('php', ['-r'
       line(keyed.status === 200, 'while a signed request still gets through', keyed.json);
     }
 
+    forgetFailures(a);
+    console.log('\n== an action that was cut short is not carried out again by accident');
+    const toCut = { coinId: coin.id, to: bob.key, amount: '9' };
+    const cutSigned = OP.signRequest(a.operator, { domain: A, action: 'spend34/grant', request: toCut });
+    const cutFirst = await post(a, 'action=grant', cutSigned);
+    const before = await units(a, bob, coin.id);
+    require('child_process').execFileSync('php', ['-r', '$d=new PDO("sqlite:".$argv[1]);$q=$d->prepare("UPDATE operator_nonces SET status=\'started\', http_status=NULL, response=NULL WHERE nonce=?");$q->execute([$argv[2]]);', path.join(a.priv, 'chainlabs-operator.sqlite'), cutSigned.payload.adminAuth.nonce]);
+    const cutAgain = await post(a, 'action=grant', cutSigned);
+    line(cutFirst.status === 201 && cutAgain.status === 409 && cutAgain.json.code === 'in-progress' && cutAgain.json.outcomeUnknown === true && (await units(a, bob, coin.id)) === before, 'the same request sent again is told its outcome is not known, and nothing is granted', cutAgain.json);
+    const cutNew = await signedOp(a, 'grant', toCut);
+    line(cutNew.status === 409 && cutNew.json.code === 'duplicate-request' && (await units(a, bob, coin.id)) === before, 'signing it afresh is refused as well, even long after', cutNew.json);
+    const cutDecided = await signedOp(a, 'grant', toCut, { repeat: true });
+    line(cutDecided.status === 201 && (await units(a, bob, coin.id)) === String(BigInt(before) + 9n), 'and it is made once the operator has decided to repeat it');
+
+    console.log('\n== records that cannot be read refuse operator actions and leave the public ledger alone');
+    const dbFile = path.join(a.priv, 'chainlabs-operator.sqlite');
+    const dbSaved = fs.readFileSync(dbFile);
+    fs.writeFileSync(dbFile, Buffer.from('not a database '.repeat(300)));
+    const dmg = [await signedOp(a, 'grant', { coinId: coin.id, to: bob.key, amount: '4' }), await signedOp(a, 'integrity', { coinId: coin.id }), await signedOp(a, 'operator/check', {}), await signedOp(a, 'operator/audit', {})];
+    line(dmg.every((r) => r.status === 503 && r.json.code === 'operator-state-unavailable'), 'a damaged operator database refuses every operator action', dmg.map((r) => [r.status, r.json && r.json.code]));
+    if (beforeEnd) {
+      const dmgToken = await legacyOp(a, 'grant', { coinId: coin.id, to: bob.key, amount: '4' });
+      line(dmgToken.status === 503, 'and a token', dmgToken.status);
+    }
+    line((await get(a, 'action=coins')).status === 200 && (await post(a, 'action=holdings', { key: bob.key })).status === 200 && (await units(a, bob, coin.id)) === String(BigInt(before) + 9n), 'while the public routes answer and nothing was granted');
+    fs.rmSync(dbFile);
+    fs.mkdirSync(dbFile);
+    line((await signedOp(a, 'grant', { coinId: coin.id, to: bob.key, amount: '4' })).status === 503, 'a database that cannot be opened refuses too');
+    fs.rmdirSync(dbFile);
+    fs.writeFileSync(dbFile, dbSaved);
+    line((await signedOp(a, 'integrity', { coinId: coin.id })).status === 200, 'putting the records back is all it takes');
+    const ratchetFile = path.join(a.priv, 'chainlabs-operator-ratchet.json');
+    fs.rmSync(ratchetFile);
+    if (beforeEnd) line((await legacyOp(a, 'grant', { coinId: coin.id, to: bob.key, amount: '1' })).json.code === 'signature-required', 'a deleted activation marker does not bring the token back for changing actions');
+    fs.writeFileSync(ratchetFile, '{}', { mode: 0o600 });
+    fs.rmSync(dbFile);
+    if (beforeEnd) line((await legacyOp(a, 'grant', { coinId: coin.id, to: bob.key, amount: '1' })).json.code === 'signature-required', 'nor does a deleted database, while the marker is there');
+    line((await signedOp(a, 'integrity', { coinId: coin.id })).status === 200, 'and a signed request starts a new one');
+    forgetFailures(a);
+
+    console.log('\n== rotating keys and recovering a lost key leave the ledger as it was');
+    const trust = async () => {
+      const files = [];
+      const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) walk(f); else files.push([path.relative(a.priv, f), require('crypto').createHash('sha256').update(fs.readFileSync(f)).digest('hex')]); } };
+      for (const n of fs.readdirSync(a.priv)) if (/checkpoints$/.test(n)) walk(path.join(a.priv, n));
+      const head = (await get(a, 'action=coin&coin=' + coin.id)).json.head;
+      return JSON.stringify({ head, files: files.sort() });
+    };
+    const trustBefore = await trust();
+    line(JSON.parse(trustBefore).files.length > 0, 'the ledger keeps a checkpoint log and journal for the coin');
+    const cli = (...args) => require('child_process').spawnSync('php', [path.join(__dirname, '..', 'chain-labs', 'lib', 'operator-cli.php'), ...args, '--private=' + a.priv, '--domain=' + A], { encoding: 'utf8' });
+    const next = OP.newIdentity();
+    line(cli('add-key', '--key=' + next.publicKey, '--label=replacement').status === 0, 'a replacement key is added from the command line, which needs no signature and touches no ledger file');
+    const proved = await signedOp(a, 'operator/check', {}, { as: next });
+    line(proved.status === 200 && proved.json.verified === true && proved.json.ratchet === true, 'the new key proves itself while signed requests are still required', proved.json);
+    line(cli('revoke', '--key=' + a.operator.publicKey).status === 0 && (await signedOp(a, 'integrity', { coinId: coin.id })).json.code === 'not-operator', 'the old key is revoked and is refused at once');
+    const viaNew = await signedOp(a, 'grant', { coinId: coin.id, to: alice.key, amount: '1' }, { as: next });
+    line(viaNew.status === 201, 'the new key signs a grant', viaNew.json);
+    if (beforeEnd) line((await legacyOp(a, 'grant', { coinId: coin.id, to: alice.key, amount: '1' })).json.code === 'signature-required', 'and nobody can fall back to the token');
+    const trustAfterOps = await trust();
+    const headBefore = JSON.parse(trustBefore).head, headAfter = JSON.parse(trustAfterOps).head;
+    line(headAfter.index === headBefore.index + 1 && JSON.parse(trustAfterOps).files.length >= JSON.parse(trustBefore).files.length, 'the only change to the ledger is the one grant that was signed: its head moved by one entry, and its history was kept', [headBefore, headAfter]);
+    const integrity = await signedOp(a, 'integrity', { coinId: coin.id }, { as: next });
+    line(integrity.status === 200 && JSON.stringify(integrity.json).includes('"ok":true'), 'and the integrity check of the coin passes', integrity.json);
+    const trustQuiet = await trust();
+    await signedOp(a, 'operator/check', {}, { as: next });
+    await signedOp(a, 'operator/audit', { limit: 5 }, { as: next });
+    line((await trust()) === trustQuiet, 'checking a key and reading the audit change nothing in the ledger or its checkpoints');
+    const aud = await signedOp(a, 'operator/audit', { limit: 200 }, { as: next });
+    line(aud.json.chain.ok === true, 'the audit trail is intact across the change of keys');
+    writeRoster(a);
+
     console.log('\n== public ledger routes never depend on the operator layer');
     fs.unlinkSync(path.join(a.priv, 'chainlabs-operators.json'));
     const cfg = path.join(a.priv, 'federation20-config.php');
