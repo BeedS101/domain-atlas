@@ -124,6 +124,24 @@ const stateOn = async (n, coinId) => { const r = await get(n, 'action=coin&coin=
     const stillLimited = await signedOp(b, 'spend34/evidence', { coinId: coin.id }, { as: scoped });
     line(stillLimited.status === 403, 'while it still may not take actions it was not given', stillLimited.json);
 
+    console.log('== a key scoped to the consent actions from the start takes them, without operator/check');
+    const only = OP.newIdentity();
+    const addedOnly = cli(b, 'add-key', '--key=' + only.publicKey, '--label=partner-consent', '--actions=spend34/consent-list,spend34/consent-accept,spend34/consent-decline', '--domain=' + B);
+    const onlyFp = (addedOnly.out.match(/added ([a-f0-9]{16})/) || [])[1];
+    line(addedOnly.code === 0 && new RegExp(onlyFp + '[^\\n]*not yet verified[^\\n]*consent-list').test(cli(b, 'status').out), 'the key is on the roster with only the three consent actions, and has never proved itself with operator/check', cli(b, 'status').out);
+    const c5 = (await createCoin(a, 'CN5', { mode: 'multi', partners: [B, C] })).json;
+    await open(a, c5.id);
+    const dig5 = await digestOf(c5.id);
+    const sl5 = await list(b, { as: only });
+    const seen5 = sl5.json && sl5.json.proposals ? sl5.json.proposals.find((p) => p.coinId === c5.id) : null;
+    line(sl5.status === 200 && seen5 && seen5.genesisDigest === dig5 && seen5.terms.symbol === 'CN5', 'it calls consent-list successfully and sees the full proposal', sl5.json);
+    const sa5 = await accept(b, c5.id, dig5, { as: only });
+    line(sa5.status === 200 && sa5.json.proposal.status === 'accepted', 'and consent-accept', sa5.json);
+    const sd5 = await decline(b, c5.id, dig5, 'changed my mind', { as: only });
+    line(sd5.status === 200 && sd5.json.proposal.status === 'declined', 'and consent-decline', sd5.json);
+    const outside = [await signedOp(b, 'spend34/evidence', { coinId: coin.id }, { as: only }), await signedOp(b, 'spend34/grant', { coinId: coin.id, to: 'x', amount: '1' }, { as: only, repeat: true }), await signedOp(b, 'spend34/open', { coinId: coin.id }, { as: only, repeat: true })];
+    line(outside.every((r) => r.status === 403 && r.json.code === 'action-not-permitted'), 'while it may take nothing else', outside.map((r) => r.json));
+
     console.log('== a consent record that cannot be used never signs');
     const c4 = (await createCoin(a, 'CN4', { mode: 'multi', partners: [B, C] })).json;
     sqlExec(b, 'DROP TABLE ledger_consents');
