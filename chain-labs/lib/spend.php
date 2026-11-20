@@ -15,7 +15,7 @@ const SPEND_HOLDINGS_MAX_COINS = 50;
 // Reasons that close a proposal for good, as opposed to failures that leave it pending for a retry.
 const SPEND_FINAL_REASONS = ['expired', 'stale', 'insufficient', 'replayed', 'bad-signature', 'bad-authorization', 'no-account', 'faucet-amount', 'faucet-limit',
     'duplicate-purchase', 'purchase-key-limit', 'purchase-day-limit', 'purchase-too-small', 'bad-purchase', 'no-purchase-policy', 'revoked-credential',
-    'legacy-authorization', 'wrong-authority', 'wrong-genesis', 'unknown-base'];
+    'legacy-authorization', 'wrong-authority', 'wrong-genesis', 'unknown-base', 'sale-closed'];
 
 function spend_digest(array $authorization): string
 {

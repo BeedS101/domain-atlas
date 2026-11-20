@@ -274,6 +274,95 @@ const crashed = (r) => r.status === 0 || (r.status === 200 && r.json === null);
       }
     }
 
+    console.log('\n== a sale of a single authority coin that was begun and failed');
+    {
+      const pem = (d) => nodes[d].pair.publicKey.export({ type: 'spki', format: 'pem' });
+      const configure = (sole) => fs.writeFileSync(path.join(issuer.bundle, 'lib', 'atlas-gold-hold-config.json'), JSON.stringify({ enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: { [A]: pem(A), [B]: pem(B) }, ...(sole === undefined ? {} : { soleAuthorityClosures: sole }) }));
+      const baseEntries = await entries(a, sell.id);
+      const sellGenesis = (await get(a, 'action=coin&coin=' + sell.id)).json.genesis;
+      const oscGenesis = (await get(a, 'action=coin&coin=' + osc.id)).json.genesis;
+      const closureFor = (domain, g, coinId, genesis, over, witnesses) => {
+        const payload = { type: 'atlas.ledger.purchase.closure', v: 2, domain, coinId, requestId: g.requestId, credentialId: g.cred.id, price: 20, headIndex: 0, headHash: '0'.repeat(64), closedAt: iso(NOW()), genesis, ...(over || {}) };
+        return { payload, signature: crypto.sign('sha256', Buffer.from(canon(payload)), nodes[domain].pair.privateKey).toString('base64url'), witnesses: witnesses || [] };
+      };
+      const cancelWith = (g, closure) => holdCall({ action: 'cancel', credentialId: g.cred.id, requestId: g.requestId, holdId: holdIdOf(g.cred.id, g.requestId), closure });
+      const stillDelivering = (g) => holdOf(g.cred) && holdOf(g.cred).state === 'delivering';
+
+      // The issuer does not list any domain for one-domain closures.
+      configure();
+      const w = wallet();
+      const g = await mint(w, 100);
+      crashAt(a, 'begun');
+      const stuck = await buy(a, w, sell.id, g, 20);
+      line(crashed(stuck.res) && holdOf(g).state === 'delivering' && await units(a, w, sell.id) === '0', 'a begun sale of a single authority coin that has no entry', [stuck.res.status, holdOf(g) && holdOf(g).state]);
+      const bare = await holdCall({ action: 'cancel', credentialId: g.id, requestId: stuck.requestId, holdId: holdIdOf(g.id, stuck.requestId) });
+      line(bare.status === 409 && bare.body.code === 'closure-required' && holdOf(g).state === 'delivering', 'the token alone cannot free the Gold', bare);
+      const off = await op(a, 'purchase-cancel', { coinId: sell.id, requestId: stuck.requestId });
+      line(off.status !== 200 && JSON.stringify(off.json).includes('closure-not-accepted') && holdOf(g).state === 'delivering' && (await trySplit(g, w)).status !== 200, 'with no domain listed the ledger closes the sale but the issuer keeps the Gold held, with its own refusal', [off.status, off.json]);
+      const honest = closureFor(A, stuck, sell.id, sellGenesis);
+      const refused = await cancelWith(stuck, honest);
+      line(refused.status === 409 && refused.body.code === 'sole-authority-closure-disabled' && stillDelivering({ cred: g }), 'the issuer\'s refusal has a code of its own, apart from a closure that is wrong', refused);
+      const again = await buy(a, w, sell.id, g, 20, { requestId: stuck.requestId, intent: stuck.intent });
+      line(again.res.status !== 201 && await units(a, w, sell.id) === '0', 'the closed sale is not delivered when the same request is made again', [again.res.status, again.res.json]);
+      const recovered = await recover(a, sell.id);
+      line(await units(a, w, sell.id) === '0' && (await entries(a, sell.id)) === baseEntries && stillDelivering({ cred: g }), 'recovery does not deliver it and does not free the Gold either', recovered.json);
+      // Time does not free it.
+      line(holdOf(g).state === 'delivering', 'a delivering hold is still delivering, however long it has been');
+
+      // Opted in for the one domain.
+      configure([A]);
+      const viaB = closureFor(B, stuck, sell.id, sellGenesis);
+      const r1 = await cancelWith(stuck, viaB);
+      line(r1.status === 409 && r1.body.code === 'closure-required' && /owner named/.test(r1.body.error) && stillDelivering({ cred: g }), 'another trusted domain cannot close it, even with a valid signature', r1);
+      const other = JSON.parse(JSON.stringify(sellGenesis));
+      other.name = 'Another coin';
+      const r2 = await cancelWith(stuck, closureFor(A, stuck, sell.id, other));
+      line(r2.status === 409 && r2.body.code === 'closure-required' && /genesis is not the one the owner signed/.test(r2.body.error) && stillDelivering({ cred: g }), 'a genesis other than the one the owner signed is refused', r2);
+      const r3 = await cancelWith(stuck, closureFor(A, stuck, sell.id, sellGenesis, null, [{ payload: {}, signature: 'x' }]));
+      line(r3.status === 409 && /carries no witnesses/.test(r3.body.error) && stillDelivering({ cred: g }), 'a one-domain closure that brings witnesses is refused', r3);
+      const r4 = await cancelWith(stuck, closureFor(A, stuck, sell.id, sellGenesis, { requestId: hex(16) }));
+      line(r4.status === 409 && /another sale/.test(r4.body.error) && stillDelivering({ cred: g }), 'a closure of another request is refused', r4);
+      const r5 = await cancelWith(stuck, closureFor(A, stuck, sell.id, sellGenesis, { closedAt: iso(NOW() - 3000) }));
+      line(r5.status === 409 && /not recent/.test(r5.body.error) && stillDelivering({ cred: g }), 'a stale closure is refused', r5);
+      const r6 = await cancelWith(stuck, closureFor(A, stuck, sell.id, sellGenesis, { v: 1 }));
+      line(r6.status === 409 && /wrong fields/.test(r6.body.error) && stillDelivering({ cred: g }), 'a version 1 closure that carries a genesis is refused', r6);
+      const lone = { ...sellGenesis, roster: [...sellGenesis.roster, { domain: B, key: pem(B) }] };
+      const r7 = await cancelWith(stuck, closureFor(A, stuck, sell.id, lone));
+      line(r7.status === 409 && /genesis is not the one/.test(r7.body.error) && stillDelivering({ cred: g }), 'a genesis with a second domain added is not the signed one', r7);
+      const finished = await op(a, 'purchase-cancel', { coinId: sell.id, requestId: stuck.requestId });
+      const h = holdOf(g);
+      line(finished.status === 200 && h.state === 'cancelled' && h.closure.payload.v === 2 && h.closure.witnesses.length === 0 && h.closure.payload.domain === A, 'with the domain listed the same cancel frees the Gold and the hold keeps the closure', [finished.status, finished.json, h && h.state]);
+      line((await trySplit(g, w)).status === 200 && await units(a, w, sell.id) === '0' && (await entries(a, sell.id)) === baseEntries, 'the owner can spend the Gold and nothing was delivered', await units(a, w, sell.id));
+      const reopened = await buy(a, w, sell.id, g, 20, { requestId: stuck.requestId, intent: stuck.intent });
+      line(reopened.res.status !== 201 && await units(a, w, sell.id) === '0', 'the closed request still delivers nothing', [reopened.res.status, reopened.res.json]);
+
+      // A sale that was delivered is not closed.
+      const w2 = wallet();
+      const g2 = await mint(w2, 100);
+      const done = await buy(a, w2, sell.id, g2, 20);
+      line(done.res.status === 201 && await units(a, w2, sell.id) === '200', 'a sale of a single authority coin goes through', done.res.status);
+      const no = await op(a, 'purchase-cancel', { coinId: sell.id, requestId: done.requestId });
+      line(no.status !== 200 && await units(a, w2, sell.id) === '200', 'a delivered sale is not cancelled', [no.status, no.json]);
+      const forgedLate = await cancelWith(done, closureFor(A, done, sell.id, sellGenesis));
+      line(forgedLate.status === 409 && forgedLate.body.code === 'finalized' && revokeCount(g2.id) === 1, 'and a closure for it frees nothing at the issuer, because the Gold was spent', forgedLate);
+      const replay = await buy(a, w2, sell.id, g2, 20, { requestId: done.requestId, intent: done.intent });
+      line(replay.res.status === 200 || replay.res.status === 201, 'the same request again returns the delivery that was made', replay.res.status);
+      line(await units(a, w2, sell.id) === '200' && (await entries(a, sell.id)) === baseEntries + 1, 'without delivering a second time', await units(a, w2, sell.id));
+
+      // A coin of several domains does not take the one-domain form, whoever is listed.
+      const w3 = wallet();
+      const g3 = await mint(w3, 100);
+      fs.writeFileSync(path.join(b.priv, 'issuer-key-override.txt'), issuerKey.slice(0, -2) + 'AA');
+      const multi = await buy(a, w3, osc.id, g3, 20);
+      line(multi.res.status !== 201 && holdOf(g3).state === 'delivering', 'a begun sale of a coin of two domains', multi.res.status);
+      const sole = await cancelWith(multi, closureFor(A, multi, osc.id, oscGenesis));
+      line(sole.status === 409 && /issued by that domain alone/.test(sole.body.error) && holdOf(g3).state === 'delivering' && (await trySplit(g3, w3)).status !== 200, 'the authority of a coin of two domains cannot close it alone, even when listed', sole);
+      fs.rmSync(path.join(b.priv, 'issuer-key-override.txt'));
+      const witnessed = await op(a, 'purchase-cancel', { coinId: osc.id, requestId: multi.requestId });
+      line(witnessed.status === 200 && holdOf(g3).state === 'cancelled' && holdOf(g3).closure.payload.v === 1 && holdOf(g3).closure.witnesses.length === 1, 'it is closed with its partner\'s witness as before', [witnessed.status, witnessed.json]);
+      configure();
+    }
+
     console.log('\n== cancelling a sale that was begun');
     {
       const w = wallet();

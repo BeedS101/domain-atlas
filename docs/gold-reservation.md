@@ -99,37 +99,41 @@ can have been delivered. A `delivering` hold is cancelled only with a **closure*
   refuses to witness, and the sale stays `delivering` until it is finalized or resolved by hand.
 
 The issuer needs as many witnesses as it takes to make a commit impossible without them: with `p` partners and a threshold `t`, `p - t + 2` (one for two domains
-of two, two for three domains of two). All witnesses must describe the same genesis, roster and threshold; every signer must be listed in `ledgerAuthorities` of
-`lib/atlas-gold-hold-config.json` (`{"a.example": "<PEM public key>"}`); the authority's statement must be at most 15 minutes old. The adapter asks for a
-closure only when the issuer answers `closure-required`. The issuer keeps the whole closure in the hold record. A coin of one domain has nobody to witness, so a
-begun sale of such a coin is never cancelled this way. With no `ledgerAuthorities`, a delivering hold cannot be cancelled by anyone until the file is changed.
+of two, two for three domains of two). All witnesses must describe the same genesis, roster and threshold, and that genesis must be the digest the owner signed in the
+purchase intent, with the authority the intent names; every signer must be listed in `ledgerAuthorities` of `lib/atlas-gold-hold-config.json`
+(`{"a.example": "<PEM public key>"}`); the authority's statement must be at most 15 minutes old. The adapter asks for a
+closure only when the issuer answers `closure-required`. The issuer keeps the whole closure in the hold record. With no `ledgerAuthorities`, a delivering hold
+cannot be cancelled by anyone until the file is changed.
 
-### 3b. Partner verification
+### 3c. A coin of one domain
 
-`GET /atlas/ledger/gold-hold-status?credentialId=...&requestId=...` (public, read-only, on only while holds are on) returns the hold's state
-signed with the issuer's key: `atlas.gold.hold.status` with the credential, request, coin, price, receiving key, owner, a digest of the owner's
-signed intent and the state (`held`, `delivering`, `finalized`, `cancelled`, `lapsed`). Nothing is returned for a request id that holds
-nothing, and the id cannot be guessed. A domain that approves a sale (the `holding` hook of `chain-labs/lib/gold-issuer.php`, called from
-`purchase_check_entry`) fetches this itself and approves only if the signature is the issuer's named in the coin's policy, every field matches the
-entry's sale (same coin, price, receiving key, owner and the digest of the intent in the entry), the status is under five minutes old, and the state is
-`delivering` or `finalized`. An issuer that cannot be reached is a transient refusal (the sale waits); a hold that is missing, only `held`, cancelled,
-or for another sale is a refusal. So an authority that never held the Gold, held it without beginning delivery, or held it for a different
-sale cannot collect the partner's approval, and a hold the issuer has cancelled cannot gain approvals afterwards.
+A coin of one domain has nobody to witness. What stops its sale from being delivered after the hold is freed is the authority's own ledger, and the authority could
+be the one lying, so this is accepted only by an issuer that chose to trust that domain for it, and is off by default.
 
-## 4. Integration notes (intent format and keys)
+* **Closing is one step at the authority.** `purchase_closure` takes the write lock (`BEGIN IMMEDIATE`), checks that there is no entry for the request and no pending
+  transfer for it, records the sale as closed and signs, all in that lock. A delivery prepared earlier is refused when it commits (`ledger_commit`, `sale-closed`), a
+  request that is closed cannot be submitted again, and recovery of a journaled sale that was closed ends it without delivering. A closed sale never becomes
+  deliverable again.
+* **The record outlives the database.** Before the database row and before anything is signed, the closure is appended to `<coin>.closed` beside the checkpoint
+  records (`docs/chain-labs-rollback-protection.md`, section 8). A closed sale is read from the row and the file together, so an older database put back does not reopen it.
+  When the line cannot be written, nothing is signed and nothing is closed.
+* **The evidence** is version 2 of the closure: the same payload as version 1 plus the coin's `genesis`, and no witnesses. The issuer accepts it only when its configuration
+  lists the domain under `soleAuthorityClosures` (which must also be in `ledgerAuthorities`), the closure names the sale's coin, request, credential and price, the
+  domain is the authority the owner's signed intent names, the SHA-256 of the canonical genesis is the genesis digest the owner signed, that genesis is a `single` coin
+  of exactly one domain, the one that signed, and the roster key is the key configured for it. A version 2 closure for a coin of several domains is refused whoever is
+  listed, and a version 1 closure of a coin of several domains still needs its witnesses.
+* **A refusal of its own.** An issuer that does not list the domain answers `sole-authority-closure-disabled` (HTTP 409), apart from `closure-required` (a closure that is
+  wrong). The adapter reports `closure-not-accepted`: the sale is closed at the ledger and is never delivered, and the Gold stays held at the issuer until the issuer lists the
+  domain; the operator then repeats the cancel (a closure is signed again from the same record).
+* **Trust limit.** The issuer relies on that domain's word that it did not deliver. A domain that is the only authority of a coin and lies, or whose records are lost together with
+  the checkpoint folder, can deliver and then close. For demonstration coins that is accepted; for real value an independent witness (a second domain that is not an authority
+  of the coin) is required, and this section is then replaced by it.
 
-* A wallet key and a Gold owner key are the same thing: the raw uncompressed P-256 point (65 bytes, base64url). Signatures are raw
-  r||s over the canonical text of the payload. Nothing is converted. The ledger's `{payload, signature}` becomes the issuer's
-  `{payload, proof: {signerRole: 'raw-ecdsa', publicKey: <owner>, signature}}`. WebAuthn (SPKI) owners are refused for holds.
-* Both canonical forms are byte-identical for the intent payload (strings and integers only). They differ for numbers with
-  fractions, which the ledger refuses and a Gold credential contains, hence `pack`. The balance returned to the buyer after a sale is
-  `{id, gold: <canonical text of the credential>}`; a wallet reads it with `JSON.parse(balance.gold)`.
-* The genesis purchase policy names the issuer's raw public key in `issuerKey`.
 * The adapter checks the credential offline (issuer signature, class, owner, domain); the issuer re-checks everything on `reserve`.
 
 ## 5. Enabling (separately, not part of this change)
 
-Issuer: `lib/atlas-gold-hold-config.json` = `{"enabled": true, "tokenSha256": "<sha256 of the operator token>", "ledgerAuthorities": {"<ledger domain>": "<its public key PEM>"}}`. Apache must pass the
+Issuer: `lib/atlas-gold-hold-config.json` = `{"enabled": true, "tokenSha256": "<sha256 of the operator token>", "ledgerAuthorities": {"<ledger domain>": "<its public key PEM>"}, "soleAuthorityClosures": []}`; `soleAuthorityClosures` is optional, empty by default, and lists the ledger domains whose closure of a coin of one domain is accepted (section 3c). Apache must pass the
 `Authorization` header to PHP (`SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1` or a rewrite rule). Chain labs: a
 `gold-adapter.php` in the private folder returning `gold_issuer_adapter([...])`; the authority adapter holds the token, partners'
 adapters do not. Neither is done on evtec.co.za or domain-atlas.co.za.
@@ -139,7 +143,7 @@ adapters do not. Neither is done on evtec.co.za or domain-atlas.co.za.
 Real purchases stay off on every live domain: no `gold-adapter.php`, no hold config. What the two blockers look like now:
 
 1. **Partners see holds.** Closed by 3b, for multi authority coins. A single authority coin has no other domain to ask; its buyer trusts that
-   authority, as with any single authority coin. A partner whose adapter has no `holding` hook (the test stand-in) does not ask.
+   authority, as with any single authority coin, and a failed sale of such a coin frees its Gold only at an issuer that opted in (section 3c). A partner whose adapter has no `holding` hook (the test stand-in) does not ask.
 2. **Closing a sale needs the partners to be reachable and not to have approved it.** A cancel waits while a partner is down. A sale a partner approved
    cannot be cancelled even if the authority never committed it (the partner cannot tell); it is finalized when the entry commits, or resolved by hand with
    the issuer's operator. A compromised authority together with a majority of the partners (enough that the entry could be committed without the witnesses)

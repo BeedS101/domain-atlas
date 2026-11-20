@@ -56,7 +56,7 @@ function ledger_guard_dir(PDO $db): ?string
 function guard_file(PDO $db, string $coinId, string $kind): string
 {
     $dir = ledger_guard_dir($db);
-    if ($dir === null || !preg_match('/^[a-f0-9]{32}$/D', $coinId) || !in_array($kind, ['log', 'journal'], true)) throw new RuntimeException('no checkpoint location');
+    if ($dir === null || !preg_match('/^[a-f0-9]{32}$/D', $coinId) || !in_array($kind, ['log', 'journal', 'closed'], true)) throw new RuntimeException('no checkpoint location');
     return $dir . '/' . $coinId . '.' . $kind;
 }
 
@@ -512,6 +512,55 @@ function ledger_approval_note(PDO $db, string $coinId, int $index, string $hash,
     } catch (RuntimeException $e) {
         throw new LedgerError('checkpoint-unavailable', 'the approval cannot be written down, so it is not given: ' . $e->getMessage());
     }
+}
+
+// ---------- sales closed for good ----------
+// A sale that was closed is never delivered or approved by this domain again, whatever the database says later. The closure is written
+// to its own file in this folder, as a `close` line, before the database row is written and before anything that says the sale is closed
+// leaves this domain, so a database restored from a copy made before the closure still remembers it. The file is one chain of lines like
+// the others; it is never rewritten by a restore, an acceptance or a reseal, and every line stays for good.
+
+// The request ids the closed-sales file holds, as keys. A file that is damaged or cannot be read refuses.
+function guard_closed_ids(PDO $db, string $coinId): array
+{
+    if (ledger_guard_dir($db) === null) return [];
+    $ids = [];
+    $problem = guard_each(guard_file($db, $coinId, 'closed'), function (array $line) use (&$ids): bool {
+        if (($line['kind'] ?? '') === 'close' && is_string($line['requestId'] ?? null)) $ids[$line['requestId']] = true;
+        return true;
+    });
+    if ($problem !== null) throw new RuntimeException('the closed-sales file is damaged: ' . $problem);
+    return $ids;
+}
+
+// Whether this domain closed the sale: from the database or from the file. A file that cannot be read refuses, so nothing is delivered
+// or approved on the strength of the database alone.
+function ledger_sale_closed(PDO $db, string $coinId, string $requestId): bool
+{
+    $row = $db->prepare('SELECT 1 FROM ledger_closed_sales WHERE coin_id=? AND request_id=?');
+    $row->execute([$coinId, $requestId]);
+    if ($row->fetchColumn() !== false) return true;
+    try {
+        return isset(guard_closed_ids($db, $coinId)[$requestId]);
+    } catch (RuntimeException $e) {
+        throw new LedgerError('checkpoint-unavailable', 'the sales this domain closed cannot be read, so it delivers and approves nothing for a sale: ' . $e->getMessage());
+    }
+}
+
+// Closes a sale for good: the file first, then the database. Nothing is closed, and so nothing may be signed about it, when the line cannot
+// be written. Repeating it changes nothing.
+function ledger_close_sale(PDO $db, string $coinId, string $requestId, int $now): void
+{
+    if (ledger_guard_dir($db) !== null) {
+        try {
+            if (!isset(guard_closed_ids($db, $coinId)[$requestId])) {
+                guard_append(guard_file($db, $coinId, 'closed'), ['v' => 1, 'kind' => 'close', 'coinId' => $coinId, 'requestId' => $requestId, 'at' => $now]);
+            }
+        } catch (RuntimeException $e) {
+            throw new LedgerError('checkpoint-unavailable', 'the closure cannot be written down, so the sale is not closed: ' . $e->getMessage());
+        }
+    }
+    $db->prepare('INSERT OR IGNORE INTO ledger_closed_sales(coin_id,request_id,closed_at) VALUES(?,?,?)')->execute([$coinId, $requestId, $now]);
 }
 
 // ---------- recovery ----------

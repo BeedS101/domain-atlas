@@ -781,6 +781,10 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
         // A database that is behind what this domain already committed takes no new entry; history may still be replayed into it.
         ledger_guard_require($db, $coinId, $history);
         [$public, $private, $hash] = ledger_check_frame($db, $coin, $prepared);
+        // A sale this domain closed is never delivered. Entries replayed from history are not new deliveries: they are already in the log of
+        // the domains that committed them, and a copy that refused them could not catch up.
+        $saleId = $public['purchase']['requestId'] ?? null;
+        if (!$history && $saleId !== null && ledger_sale_closed($db, $coinId, $saleId)) ledger_fail('sale-closed', 'this sale was closed; it is not delivered');
         $authorityKey = ledger_roster_key($genesis, $genesis['authority']);
         if ($authorityKey === null || !ledger_verify($authorityKey, $hash, $authoritySignature)) ledger_fail('bad-authority-signature', 'the authority signature does not verify');
         // Approvals: the authority counts once through its signature above; every other approver is a distinct roster domain.

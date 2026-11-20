@@ -14,8 +14,9 @@ declare(strict_types=1);
 //   finish   asks the issuer to spend the held credential: the price is burned and the rest goes back to the owner.
 //   release  asks the issuer to free the hold. A hold whose delivery was never begun is freed at once. After delivery was begun the issuer
 //            frees it only against the ledger's closure (lib/purchase.php purchase_closure): the authority's signed statement plus the
-//            witnesses of the other domains, all of which the issuer's own configuration must trust; the token alone cannot. The
-//            closure is made only when the issuer asks for it.
+//            witnesses of the other domains, all of which the issuer's own configuration must trust; the token alone cannot. A coin of one
+//            domain has no witnesses: its closure is accepted only when the issuer lists that domain in soleAuthorityClosures, and
+//            otherwise the issuer refuses with its own code. The closure is made only when the issuer asks for it.
 //   holding  every domain that approves a sale asks the issuer, not the authority, for its signed status of the hold (public, read-only,
 //            answered only to someone who knows the request id) and approves only if it says this credential is held for exactly this
 //            sale: same coin, price, receiving key, owner and signed intent, and delivering or already spent.
@@ -210,6 +211,9 @@ function gold_issuer_adapter(array $config): array
             $ask = static fn(?array $c): array => $hold(['action' => 'cancel', 'requestId' => $requestId, 'credentialId' => $credentialId, 'holdId' => $holdId($credentialId, $requestId), 'closure' => $c]);
             [$status, $body] = $ask(null);
             if ($status === 409 && $code($body) === 'closure-required' && $closure !== null) [$status, $body] = $ask($closure());
+            // An issuer that does not take one domain's word for a coin that has no other domain says so with its own code. That does not
+            // pass with time, so it is reported as what it is and the sale stays journaled with its Gold held.
+            if ($status === 409 && $code($body) === 'sole-authority-closure-disabled') ledger_fail('closure-not-accepted', 'the issuer does not accept the closure of a sale by a coin of one domain, so its Gold stays held');
             if ($status !== 200) ledger_fail('busy', 'the issuer could not free the hold yet');
         },
         'holding' => static function (string $requestId, array $held, array $intent, int $now) use ($http, $base, $timeout, $domain, $issuerKey): ?string {

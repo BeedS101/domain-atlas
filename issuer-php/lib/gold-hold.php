@@ -45,10 +45,14 @@ class AtlasHoldError extends Exception
 
 function atlas_hold_config_file() { return __DIR__ . '/atlas-gold-hold-config.json'; }
 
-// ['enabled' => bool, 'tokenSha256' => ?string, 'ledgerAuthorities' => [domain => public key PEM]]. Anything other than a clear opt-in is off.
+// ['enabled' => bool, 'tokenSha256' => ?string, 'ledgerAuthorities' => [domain => public key PEM], 'soleAuthorityClosures' => [domain]].
+// Anything other than a clear opt-in is off.
 // ledgerAuthorities are the ledger domains whose signed closures (see atlas_hold_closure_problem) may end a delivering hold.
+// soleAuthorityClosures lists the ledger domains, each also in ledgerAuthorities, whose closure of a coin that has no other domain (and so
+// no witness) is accepted. It is empty unless the issuer lists them: a domain that is the only authority of a coin could sign a closure
+// for a sale it delivered, and nothing but this issuer's trust in that domain stands behind it.
 function atlas_hold_config() {
-    $cfg = ['enabled' => false, 'tokenSha256' => null, 'ledgerAuthorities' => []];
+    $cfg = ['enabled' => false, 'tokenSha256' => null, 'ledgerAuthorities' => [], 'soleAuthorityClosures' => []];
     $file = atlas_hold_config_file();
     if (!is_file($file)) return $cfg;
     $f = json_decode((string) @file_get_contents($file), true);
@@ -58,7 +62,11 @@ function atlas_hold_config() {
     foreach (is_array($f['ledgerAuthorities'] ?? null) ? $f['ledgerAuthorities'] : [] as $domain => $pem) {
         if (is_string($domain) && preg_match('/^[a-z0-9.-]{3,253}$/D', $domain) && is_string($pem) && openssl_pkey_get_public($pem) !== false) $authorities[$domain] = $pem;
     }
-    return ['enabled' => true, 'tokenSha256' => $f['tokenSha256'], 'ledgerAuthorities' => $authorities];
+    $sole = [];
+    foreach (is_array($f['soleAuthorityClosures'] ?? null) && array_is_list($f['soleAuthorityClosures']) ? $f['soleAuthorityClosures'] : [] as $domain) {
+        if (is_string($domain) && isset($authorities[$domain]) && !in_array($domain, $sole, true)) $sole[] = $domain;
+    }
+    return ['enabled' => true, 'tokenSha256' => $f['tokenSha256'], 'ledgerAuthorities' => $authorities, 'soleAuthorityClosures' => $sole];
 }
 
 // ---------- the store ----------
@@ -343,28 +351,63 @@ function atlas_hold_finalize($kp, $credId, $requestId, $holdId, $now) {
     }
 }
 
+// The same ledger public key, whatever its PEM spelling.
+function atlas_hold_same_key($a, $b) {
+    if (!is_string($a) || !is_string($b)) return false;
+    $ka = openssl_pkey_get_public($a);
+    $kb = openssl_pkey_get_public($b);
+    if ($ka === false || $kb === false) return false;
+    $da = openssl_pkey_get_details($ka);
+    $db = openssl_pkey_get_details($kb);
+    return is_array($da) && is_array($db) && ($da['key'] ?? null) === ($db['key'] ?? null);
+}
+
 // What the ledger gives to end a hold whose delivery was begun. The authority's own statement is not enough: the authority could be the
 // one that is lying. So the closure also carries a witness from the other domains of the coin, enough of them that the entry can no
 // longer be committed: a partner witnesses only if it never approved an entry for the request, and it approves nothing for it afterwards.
 //   closure = {payload: {type: 'atlas.ledger.purchase.closure', v: 1, domain, coinId, requestId, credentialId, price, headIndex, headHash, closedAt},
 //              signature, witnesses: [{payload: {type: 'atlas.ledger.purchase.witness', v: 1, domain, authority, coinId, requestId, credentialId,
 //              price, genesisDigest, roster: [domains], threshold, closedAt}, signature}]}
-// Signatures are the domains' DER ECDSA over the canonical payload, checked against the keys in ledgerAuthorities. A coin of one domain has
-// no one to witness, so a begun sale of such a coin is never cancelled this way. Returns a reason, or null.
-function atlas_hold_closure_problem($closure, $rec, $now) {
+// Signatures are the domains' DER ECDSA over the canonical payload, checked against the keys in ledgerAuthorities. Everything is bound to the
+// sale: the closure and its witnesses must name the ledger domain and the genesis digest the owner signed in the purchase intent.
+// A coin of one domain has no one to witness. Its closure (v: 2, with the coin's genesis in the payload and no witnesses) is accepted only
+// from a domain listed in soleAuthorityClosures, only for exactly the genesis the owner signed, and only when that genesis really has one
+// domain, the one that signed. That rests on this issuer's trust in that domain alone. $code receives the refusal code. Returns a reason, or null.
+function atlas_hold_closure_problem($closure, $rec, $now, &$code = null) {
+    $code = 'closure-required';
     if (!is_array($closure) || !is_array($closure['payload'] ?? null) || !is_string($closure['signature'] ?? null) || !is_array($closure['witnesses'] ?? null)) return 'no closure was given';
     $p = $closure['payload'];
     $keys = array_keys($p);
     sort($keys);
-    if ($keys !== ['closedAt', 'coinId', 'credentialId', 'domain', 'headHash', 'headIndex', 'price', 'requestId', 'type', 'v']) return 'the closure has the wrong fields';
-    if ($p['type'] !== 'atlas.ledger.purchase.closure' || $p['v'] !== 1) return 'the closure is not a ledger closure';
-    $authorities = atlas_hold_config()['ledgerAuthorities'];
+    $v = $p['v'] ?? null;
+    $fields = ['closedAt', 'coinId', 'credentialId', 'domain', 'headHash', 'headIndex', 'price', 'requestId', 'type', 'v'];
+    if ($v === 2) { $fields[] = 'genesis'; sort($fields); }
+    if (($v !== 1 && $v !== 2) || $keys !== $fields) return 'the closure has the wrong fields';
+    if ($p['type'] !== 'atlas.ledger.purchase.closure') return 'the closure is not a ledger closure';
+    $cfg = atlas_hold_config();
+    $authorities = $cfg['ledgerAuthorities'];
     if (!is_string($p['domain']) || !isset($authorities[$p['domain']])) return 'the ledger domain is not one this issuer trusts to close sales';
     if ($p['coinId'] !== $rec['coinId'] || $p['requestId'] !== $rec['requestId'] || $p['credentialId'] !== $rec['credentialId'] || $p['price'] !== $rec['price']) return 'the closure is for another sale';
+    $intent = $rec['intent']['payload'] ?? null;
+    if (!is_array($intent) || ($intent['authority'] ?? null) !== $p['domain'] || !is_string($intent['genesis'] ?? null)) return 'the closure is not from the ledger domain the owner named';
     $at = is_string($p['closedAt']) && preg_match('/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/D', $p['closedAt']) ? strtotime($p['closedAt']) : false;
     if ($at === false || $at < $now - 900 || $at > $now + 60) return 'the closure is not recent';
     $sig = b64url_decode($closure['signature']);
     if (!is_string($sig) || !ecdsa_verify_der($authorities[$p['domain']], $sig, canonicalize($p))) return 'the closure is not signed by that ledger domain';
+    if ($v === 2) {
+        if (!in_array($p['domain'], $cfg['soleAuthorityClosures'], true)) {
+            $code = 'sole-authority-closure-disabled';
+            return 'this issuer does not accept the closure of a sale by a coin\'s only domain from ' . $p['domain'];
+        }
+        if ($closure['witnesses'] !== []) return 'a closure by a coin\'s only domain carries no witnesses';
+        $g = $p['genesis'];
+        if (!is_array($g) || hash('sha256', canonicalize($g)) !== $intent['genesis']) return 'the closure\'s genesis is not the one the owner signed';
+        $roster = $g['roster'] ?? null;
+        if (($g['coinId'] ?? null) !== $rec['coinId'] || ($g['mode'] ?? null) !== 'single' || ($g['authority'] ?? null) !== $p['domain']) return 'the genesis is not a coin issued by that domain alone';
+        if (!is_array($roster) || !array_is_list($roster) || count($roster) !== 1 || !is_array($roster[0]) || ($roster[0]['domain'] ?? null) !== $p['domain']) return 'the genesis has more than the one domain';
+        if (!atlas_hold_same_key($roster[0]['key'] ?? null, $authorities[$p['domain']])) return 'the genesis names another key for that domain';
+        return null;
+    }
     $witnesses = $closure['witnesses'];
     if (count($witnesses) < 1 || count($witnesses) > 8) return 'no other domain witnessed the closure';
     $seen = [];
@@ -379,10 +422,10 @@ function atlas_hold_closure_problem($closure, $rec, $now) {
         if (!is_string($wp['domain']) || !isset($authorities[$wp['domain']])) return 'a witness is from a domain this issuer does not trust';
         if ($wp['domain'] === $p['domain'] || isset($seen[$wp['domain']])) return 'a domain witnessed twice, or the authority witnessed for itself';
         if ($wp['authority'] !== $p['domain']) return 'a witness names another authority';
+        if (!is_string($wp['genesisDigest']) || !preg_match('/^[a-f0-9]{64}$/D', $wp['genesisDigest']) || $wp['genesisDigest'] !== $intent['genesis']) return 'a witness is for another coin than the owner signed';
         if ($wp['coinId'] !== $rec['coinId'] || $wp['requestId'] !== $rec['requestId'] || $wp['credentialId'] !== $rec['credentialId'] || $wp['price'] !== $rec['price']) return 'a witness is for another sale';
         if (!is_array($wp['roster']) || !array_is_list($wp['roster']) || count($wp['roster']) > 5 || count(array_unique(array_filter($wp['roster'], 'is_string'))) !== count($wp['roster']) || !in_array($p['domain'], $wp['roster'], true) || !in_array($wp['domain'], $wp['roster'], true)) return 'a witness names a roster without both domains';
         if (!is_int($wp['threshold']) || $wp['threshold'] < 2 || $wp['threshold'] > count($wp['roster'])) return 'a witness names an impossible threshold';
-        if (!is_string($wp['genesisDigest']) || !preg_match('/^[a-f0-9]{64}$/D', $wp['genesisDigest'])) return 'a witness names no genesis';
         $wat = is_string($wp['closedAt']) && preg_match('/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/D', $wp['closedAt']) ? strtotime($wp['closedAt']) : false;
         if ($wat === false || $wat > $now + 60) return 'a witness is dated in the future';
         $wsig = b64url_decode($w['signature']);
@@ -420,8 +463,8 @@ function atlas_hold_cancel($credId, $requestId, $holdId, $now, $closure = null) 
         if (is_revoked($credId)) throw new AtlasHoldError('finalized', 'the credential is spent; finalize the hold to record it', 409);
         $changes = ['state' => 'cancelled', 'cancelledAt' => $now];
         if ($state === 'delivering') {
-            $problem = atlas_hold_closure_problem($closure, $rec, $now);
-            if ($problem !== null) throw new AtlasHoldError('closure-required', 'delivery was begun for this hold; it can be cancelled only with a closure from the ledger: ' . $problem, 409);
+            $problem = atlas_hold_closure_problem($closure, $rec, $now, $code);
+            if ($problem !== null) throw new AtlasHoldError($code, 'delivery was begun for this hold; it can be cancelled only with a closure from the ledger: ' . $problem, 409);
             $changes['closure'] = $closure;
         }
         $view = atlas_holds_modify(function (&$doc) use ($credId, $holdId, $changes) {

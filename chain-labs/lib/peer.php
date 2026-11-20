@@ -265,9 +265,7 @@ function peer_on_approve(PDO $db, array $node, string $from, array $body, int $n
     }
     $saleId = $checked['public']['purchase']['requestId'] ?? null;
     if ($saleId !== null) {
-        $closedSale = $db->prepare('SELECT 1 FROM ledger_closed_sales WHERE coin_id=? AND request_id=?');
-        $closedSale->execute([$coinId, $saleId]);
-        if ($closedSale->fetchColumn() !== false) ledger_fail('sale-closed', 'this sale was closed; this domain approves nothing for it');
+        if (ledger_sale_closed($db, $coinId, $saleId)) ledger_fail('sale-closed', 'this sale was closed; this domain approves nothing for it');
     }
     purchase_check_entry($node['gold'] ?? null, $coin, $checked['public'], $checked['private'], $now);
     $index = $checked['public']['index'];
@@ -277,9 +275,7 @@ function peer_on_approve(PDO $db, array $node, string $from, array $body, int $n
     $db->exec('BEGIN IMMEDIATE');
     try {
         if ($requestId !== null) {
-            $closed = $db->prepare('SELECT 1 FROM ledger_closed_sales WHERE coin_id=? AND request_id=?');
-            $closed->execute([$coinId, $requestId]);
-            if ($closed->fetchColumn() !== false) ledger_fail('sale-closed', 'this sale was closed; this domain approves nothing for it');
+            if (ledger_sale_closed($db, $coinId, $requestId)) ledger_fail('sale-closed', 'this sale was closed; this domain approves nothing for it');
         }
         // Looked up again under the write lock: another request may have approved an entry for this index since.
         $given = ledger_approval_memory($db, $coinId, $index);
@@ -349,7 +345,7 @@ function peer_on_close_sale(PDO $db, array $node, string $from, array $body, int
         $approved = $db->prepare('SELECT COUNT(*) FROM ledger_purchase_approvals WHERE coin_id=? AND request_id=?');
         $approved->execute([$coinId, $requestId]);
         if ((int) $approved->fetchColumn() > 0) ledger_fail('cannot-close', 'this domain approved an entry for this request, which may have been committed');
-        $db->prepare('INSERT OR IGNORE INTO ledger_closed_sales(coin_id,request_id,closed_at) VALUES(?,?,?)')->execute([$coinId, $requestId, $now]);
+        ledger_close_sale($db, $coinId, $requestId, $now);
         $db->exec('COMMIT');
     } catch (Throwable $e) {
         ledger_rollback($db);

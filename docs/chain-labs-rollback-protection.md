@@ -22,13 +22,14 @@ second time), then repeats the same steps with the guard on.
 
 ## 2. What the domain keeps
 
-Per coin, two append-only files of JSON lines in `<database path>.checkpoints/` (for the default layout,
+Per coin, three append-only files of JSON lines in `<database path>.checkpoints/` (for the default layout,
 `chainblock-labs-private/chain34.sqlite.checkpoints/`):
 
 | File | Holds |
 | --- | --- |
 | `<coin>.log` | The checkpoint lines: what was about to be written, what was written, and the decisions made after a problem. |
 | `<coin>.journal` | Every committed entry in full (public and private forms), so lost entries can be replayed with every check. |
+| `<coin>.closed` | One `close` line for every sale this domain closed (`requestId`, time), written before the database row and before anything is signed. A closed sale is read from the database and from this file together, so an older database put back does not open it again (section 8). |
 
 Each line carries the sum of the line before it (`prevSum`) and its own (`sum`, the SHA-256 of its canonical form), so a changed,
 removed or reordered line is a break in the chain, and a line cut short by a crash is told apart from damage.
@@ -201,8 +202,8 @@ seen the coin takes the first head it is shown (trust on first use).
 ## 8. Sales under way
 
 The entry log is rebuilt by `restore`. Three kinds of state are kept beside it and are not in the log, so the journal does not bring them
-back: the sale journal (`ledger_purchases`), what a domain approved for a sale (`ledger_purchase_approvals`, `ledger_approved`) and the
-sales a domain witnessed as closed (`ledger_closed_sales`). What the checkpoint guard does about each, and what it leaves to the operator:
+back (the closed sales are kept in their own file, below): the sale journal (`ledger_purchases`), what a domain approved for a sale (`ledger_purchase_approvals`, `ledger_approved`) and the
+sales a domain closed (`ledger_closed_sales`, which is also kept in `<coin>.closed`). What the checkpoint guard does about each, and what it leaves to the operator:
 
 | Situation | Result |
 | --- | --- |
@@ -211,6 +212,8 @@ sales a domain witnessed as closed (`ledger_closed_sales`). What the checkpoint 
 | The sale journal row itself was lost with the rollback | The request cannot be delivered again (`duplicate-purchase`: the log holds it). The credential stays held, not released and not spent, and recovery has no row to finish. The operator finishes or releases it at the code that holds the credential, after reading the delivery in the ledger. This is the one case that needs a separate change (rebuilding the row from the entry) and it fails safe. |
 | A partner restored from an older copy | It is stopped and will not witness that a sale is closed, since it may have lost the entry. |
 | A partner or authority whose database lost only the approval or closed-sale rows, with no entry lost | Not detected by the guard, because the log is intact. The credential holder's own record (`begin`, `lock`, once-only `finish`) is what stops a second use. Treat any restore of a ledger database with sales in flight as needing a check of those sales at the credential holder before the coin sells again. |
+| A sale that was closed, and a database copy from before it was closed | The closure is in `<coin>.closed`, so the sale is still closed: the same request is refused (`sale-closed`), an entry prepared for it before is refused when it commits, the restored journal row is ended by recovery without delivering, and the credential is not delivered against. Restoring only the database leaves the checkpoint folder intact and is the case this covers. Restoring the database and the checkpoint folder together is not detected (section 9). |
+| A closure that cannot be written down, or a `<coin>.closed` file that is damaged | Nothing is signed and the sale is not closed: the credential stays held and the sale can still be delivered by recovery. A damaged file is a `checkpoint-unavailable` for every sale of that coin, and a sale is not delivered or started until it is looked at. A line cut short by a crash is ignored; a line that was changed or removed breaks the chain. |
 | A coin whose loss was accepted | Sales on it stay held; nothing is delivered or released. |
 
 ## 9. What a same-account checkpoint does not do
@@ -263,6 +266,7 @@ step that closes this, and is a design decision for the operator rather than a c
 php test/chain-labs-rollback.php          # the guard in the library: rollback, crash, conflict, corruption, recovery, multi authority
 node test/chain-labs-rollback-http.js     # the same against the real endpoint and a killed server
 php test/chain-labs-rollback-purchase.php # sales under way when a database is put back
+php test/chain-labs-purchase-closure.php  # closing a sale: both orders of a race, a restored database, interrupted and damaged closure files, one and several domains
 php test/chain-labs-approvals.php         # approvals kept across a restored database (docs/chain-labs-approvals.md)
 php test/chain-labs-evidence.php          # what freezes a multi authority coin, forged evidence, slow commits and the way back
 node test/chain-labs-wallet.js            # includes the wallet's kept heads and its refusal to trust a fork

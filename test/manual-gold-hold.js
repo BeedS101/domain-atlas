@@ -38,7 +38,7 @@ const signed = (payload, key) => ({ payload, signature: crypto.sign('sha256', Bu
 const stamp = (t) => new Date((t === undefined ? Date.now() : t) * (t === undefined ? 1 : 1000)).toISOString().replace(/\.\d+Z$/, 'Z');
 // What a partner domain signs when it witnesses that it never approved an entry for the request and now never will.
 const witnessFor = (cred, intent, over, key) => signed({ type: 'atlas.ledger.purchase.witness', v: 1, domain: PARTNER_DOMAIN, authority: LEDGER_DOMAIN, coinId: intent.payload.coinId, requestId: intent.payload.requestId,
-  credentialId: cred.id, price: intent.payload.price, genesisDigest: 'a'.repeat(64), roster: [LEDGER_DOMAIN, PARTNER_DOMAIN], threshold: 2, closedAt: stamp(), ...(over || {}) }, key || PARTNER);
+  credentialId: cred.id, price: intent.payload.price, genesisDigest: intent.payload.genesis, roster: [LEDGER_DOMAIN, PARTNER_DOMAIN], threshold: 2, closedAt: stamp(), ...(over || {}) }, key || PARTNER);
 const closureFor = (cred, intent, over, key, witnesses) => {
   const c = signed({ type: 'atlas.ledger.purchase.closure', v: 1, domain: LEDGER_DOMAIN, coinId: intent.payload.coinId, requestId: intent.payload.requestId, credentialId: cred.id, price: intent.payload.price,
     headIndex: 3, headHash: 'f'.repeat(64), closedAt: stamp(), ...(over || {}) }, key || LEDGER);
@@ -300,6 +300,8 @@ async function setup(be) {
       ['whose witness is for another request', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { requestId: hex(16) })])],
       ['whose witness is for another credential', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { credentialId: 'x' + g6.id })])],
       ['whose witness is for another price', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { price: 19 })])],
+      ['whose witness is for another coin genesis than the owner signed', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { genesisDigest: 'e'.repeat(64) })])],
+      ['from another trusted domain than the one the owner named', closureFor(g6, i6, { domain: PARTNER_DOMAIN }, PARTNER, [witnessFor(g6, i6, { domain: LEDGER_DOMAIN, authority: PARTNER_DOMAIN }, LEDGER)])],
       ['whose witness names another authority', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { authority: PARTNER_DOMAIN })])],
       ['whose witness names a roster without the authority', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { roster: [PARTNER_DOMAIN, 'c.example'] })])],
       ['whose witness names a threshold of one', closureFor(g6, i6, {}, null, [witnessFor(g6, i6, { threshold: 1 })])],

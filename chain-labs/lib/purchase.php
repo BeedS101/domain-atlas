@@ -72,6 +72,9 @@ function purchase_submit(PDO $db, array $node, array $gold, array $treasury, str
     // sale looks like) or its intent has run out; only a new sale needs a live credential and a live intent.
     $v = purchase_verify($gold, $coin, $intent, $credential, $now, false, false);
     $policy = $coin['genesis']['purchase'];
+    // A sale this domain closed is never made again, under the same request id, whatever its journal says: a delivered one is answered
+    // from its entry below, so only one without an entry is refused.
+    if (ledger_request_entry($db, $coinId, $v['requestId']) === null && ledger_sale_closed($db, $coinId, $v['requestId'])) ledger_fail('sale-closed', 'this sale was closed; make a new purchase');
     $row = purchase_row($db, $coinId, $v['requestId']);
     if ($row !== null) {
         if ($row['credential_id'] !== $v['credentialId'] || (int) $row['price'] !== $v['price'] || $row['recipient'] !== $v['recipient']) ledger_fail('request-reused', 'this request id was used for another purchase');
@@ -101,6 +104,14 @@ function purchase_run(PDO $db, array $node, array $gold, array $treasury, array 
     if ($row['status'] === 'done') return json_decode($row['result_json'], true);
     // A coin that is stopped for a rollback may have lost the delivery of this sale; nothing about the sale is decided until it runs again.
     ledger_guard_require($db, $coinId);
+    // A closed sale is never delivered. When the credential is still held for it (the closure was made and the release was interrupted), it is
+    // freed now against the same closure.
+    if (in_array($row['status'], ['decided', 'credited'], true) && ledger_request_entry($db, $coinId, $rid) === null && ledger_sale_closed($db, $coinId, $rid)) {
+        $latest = purchase_row($db, $coinId, $rid) ?? $row;
+        if ($latest['proposal_digest'] !== null) spend_reject($db, $coinId, $latest['proposal_digest'], 'rejected', 'abandoned: sale-closed');
+        purchase_abandon($db, $gold, $latest, 'sale-closed', $node, $send);
+        ledger_fail('sale-closed', 'this sale was closed; make a new purchase');
+    }
     // The credential is told that delivery is about to be tried, before anything that could deliver. From here its hold stays until
     // the sale is done or the ledger has ruled the delivery out. Skipped once an entry exists: it was begun before that.
     if ($row['status'] === 'decided' && isset($gold['begin']) && ledger_request_entry($db, $coinId, $rid) === null) {
@@ -181,21 +192,45 @@ function purchase_credit(PDO $db, array $node, array $treasury, array $row, ?cal
 function purchase_closure(PDO $db, array $node, array $row, ?callable $send = null): array
 {
     ledger_guard_require($db, $row['coin_id']);
-    if (ledger_request_entry($db, $row['coin_id'], $row['request_id']) !== null) ledger_fail('cannot-cancel', 'the units were delivered');
+    $coinId = $row['coin_id'];
+    $coin = ledger_coin($db, $coinId);
+    $partners = count($coin['genesis']['roster']) - 1;
+    $statement = static function (int $version, array $head, array $extra) use ($node, $row): array {
+        $payload = ['type' => 'atlas.ledger.purchase.closure', 'v' => $version, 'domain' => $node['domain'], 'coinId' => $row['coin_id'], 'requestId' => $row['request_id'],
+            'credentialId' => $row['credential_id'], 'price' => (int) $row['price'], 'headIndex' => (int) $head['index'], 'headHash' => (string) $head['hash'], 'closedAt' => gmdate('Y-m-d\TH:i:s\Z', time())] + $extra;
+        return ['payload' => $payload, 'signature' => ledger_sign($node['private'], ledger_canonical($payload))];
+    };
+    if ($partners < 1) {
+        // A coin of one domain has nobody to witness. What makes the closure true is the authority's own database: the sale is closed for good in
+        // the same write lock that decides there is no entry and no transfer waiting for it, so a delivery that was prepared earlier is refused when
+        // it tries to commit. The closure carries the coin's genesis, so whoever relies on it can see that the coin has no other domain.
+        $db->exec('BEGIN IMMEDIATE');
+        try {
+            if (ledger_request_entry($db, $coinId, $row['request_id']) !== null) ledger_fail('cannot-cancel', 'the units were delivered');
+            // The journal is read again under the lock: a transfer submitted since the caller looked is seen here.
+            $fresh = purchase_row($db, $coinId, $row['request_id']) ?? $row;
+            if ($fresh['proposal_digest'] !== null) {
+                $proposal = spend_proposal($db, $coinId, $fresh['proposal_digest']);
+                if ($proposal && $proposal['status'] === 'pending') ledger_fail('cannot-cancel', 'the transfer of this sale is still pending');
+            }
+            ledger_close_sale($db, $coinId, $row['request_id'], time());
+            $head = ledger_head($db, $coinId);
+            $db->exec('COMMIT');
+        } catch (Throwable $e) {
+            ledger_rollback($db);
+            throw $e;
+        }
+        return $statement(2, $head, ['genesis' => $coin['genesis']]) + ['witnesses' => []];
+    }
+    if (ledger_request_entry($db, $coinId, $row['request_id']) !== null) ledger_fail('cannot-cancel', 'the units were delivered');
     if ($row['proposal_digest'] !== null) {
-        $proposal = spend_proposal($db, $row['coin_id'], $row['proposal_digest']);
+        $proposal = spend_proposal($db, $coinId, $row['proposal_digest']);
         if ($proposal && $proposal['status'] === 'pending') ledger_fail('cannot-cancel', 'the transfer of this sale is still pending');
     }
-    $head = ledger_head($db, $row['coin_id']);
-    $payload = ['type' => 'atlas.ledger.purchase.closure', 'v' => 1, 'domain' => $node['domain'], 'coinId' => $row['coin_id'], 'requestId' => $row['request_id'],
-        'credentialId' => $row['credential_id'], 'price' => (int) $row['price'], 'headIndex' => (int) $head['index'], 'headHash' => (string) $head['hash'], 'closedAt' => gmdate('Y-m-d\TH:i:s\Z', time())];
-    $closure = ['payload' => $payload, 'signature' => ledger_sign($node['private'], ledger_canonical($payload))];
+    $closure = $statement(1, ledger_head($db, $coinId), []);
     // The authority's word is not enough for a coin of several domains: enough of the others must witness that they never approved an
     // entry for this request and now never will, so that the entry cannot be committed any more. A refusal because a domain approved
     // it ends the cancel (the units may have been delivered); a domain that cannot be reached only delays it.
-    $coin = ledger_coin($db, $row['coin_id']);
-    $partners = count($coin['genesis']['roster']) - 1;
-    if ($partners < 1) return $closure + ['witnesses' => []];
     if ($send === null) ledger_fail('bad-node', 'a multi authority sale is closed through its partners');
     $needed = $partners - (int) $coin['threshold'] + 2;
     $witnesses = [];
