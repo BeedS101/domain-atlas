@@ -136,7 +136,9 @@ async function labs() {
       const a = await refused(f, 'a.example'), b = await refused(f, 'b.example'), c = await refused(f, 'evtec.co.za');
       line(!a && !b && c, f + ': after a configuration file, its hosts pass and the original domains are refused', { a, b, c });
     }
-    // An invalid configuration refuses everything.
+    // An invalid configuration refuses everything. The databases that answered requests until now are removed first, so that what is found
+    // afterwards was created by the refused requests alone.
+    for (const dir of [root, path.join(work, 'chainblock-labs-private')]) for (const n of fs.readdirSync(dir)) if (/sqlite|\.db$/.test(n)) fs.rmSync(path.join(dir, n));
     fs.writeFileSync(configFile, '{broken');
     for (const f of users) {
       const a = await refused(f, 'evtec.co.za'), b = await refused(f, 'a.example');
@@ -145,7 +147,7 @@ async function labs() {
     const direct = await request('lib/hosts', 'evtec.co.za');
     line(direct.status === 404 && direct.body === '', 'the library answers a direct request with a 404 and nothing else', direct);
     const created = fs.readdirSync(root).concat(fs.readdirSync(path.join(work, 'chainblock-labs-private'))).filter((n) => /sqlite|\.db$/.test(n));
-    line(created.length === 0, 'none of those requests created a database', created);
+    line(created.length === 0, 'none of the refused requests created a database', created);
   } finally {
     server.kill();
     fs.rmSync(work, { recursive: true, force: true });

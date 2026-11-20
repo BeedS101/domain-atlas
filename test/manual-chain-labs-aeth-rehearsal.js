@@ -47,10 +47,10 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
   try {
     console.log('== AETH\'s coin, created and opened the way the Studio does it');
     fs.writeFileSync(path.join(a.priv, 'chainlabs-gold-issuers.json'), JSON.stringify({ issuers: [{ name: 'Test issuer', domain: issuer.domain, key: issuerKey, classes: [GOLD] }] }));
-    const body = { name: 'Aether', symbol: 'AETH', decimals: 6, maxSupply: '1000000', initialSupply: '500000', description: 'rehearsal', mode: 'multi', partners: [B], threshold: 2, adminToken: a.token };
+    const body = { name: 'Aether', symbol: 'AETH', decimals: 6, maxSupply: '1000000', initialSupply: '500000', description: 'rehearsal', mode: 'multi', partners: [B], threshold: 2 };
     const policy = { coinsPerAu: '10', minPrice: 1, perKey: '3000', perDay: '30000', priceClass: GOLD, issuerKey };
-    const prev = await call(a, 'coin26', 'POST', 'action=preview', { ...body, purchase: policy });
-    const made = await call(a, 'coin26', 'POST', 'action=create', { ...body, purchase: policy, purchaseDigest: prev.json.digest });
+    const prev = await S.signedOp(a, 'coin26/preview', { ...body, purchase: policy });
+    const made = await S.signedOp(a, 'coin26/create', { ...body, purchase: policy, purchaseDigest: prev.json.digest });
     const coinId = made.json.id;
     const opened = await op(a, 'open', { coinId });
     const gp = opened.json.coin.genesis.purchase;

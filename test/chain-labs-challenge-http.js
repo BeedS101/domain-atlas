@@ -20,7 +20,7 @@ let failures = 0, total = 0;
 const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((ok ? 'PASS ' : 'FAIL ') + text + (!ok && detail !== undefined ? ' :: ' + JSON.stringify(detail).slice(0, 300) : '')); };
 
 const A = 'a.example', B = 'b.example';
-const TOKEN = crypto.randomBytes(32).toString('hex');
+const CL = require('./support/chain-labs-operator-client');
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
 const canon = (v) => Array.isArray(v) ? '[' + v.map(canon).join(',') + ']' : (v && typeof v === 'object') ? '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}' : JSON.stringify(v);
 
@@ -42,8 +42,9 @@ fs.mkdirSync(root);
 fs.mkdirSync(priv);
 for (const f of ['coin26.php', 'spend34.php']) fs.copyFileSync(path.join(DIR, f), path.join(root, f));
 fs.cpSync(path.join(DIR, 'lib'), path.join(root, 'lib'), { recursive: true });
-fs.writeFileSync(path.join(priv, 'federation20-config.php'), '<?php return [' + "'private_pem_b64' => '" + Buffer.from(domainPem).toString('base64') + "', 'peer_public_pem_b64' => '" + Buffer.from(peer.publicKey.export({ type: 'spki', format: 'pem' })).toString('base64') + "', 'admin_token_hex' => '" + TOKEN + "'];\n");
+fs.writeFileSync(path.join(priv, 'federation20-config.php'), '<?php return [' + "'private_pem_b64' => '" + Buffer.from(domainPem).toString('base64') + "', 'peer_public_pem_b64' => '" + Buffer.from(peer.publicKey.export({ type: 'spki', format: 'pem' })).toString('base64') + "'];\n");
 fs.writeFileSync(path.join(priv, 'chainlabs-config.json'), JSON.stringify({ hosts: [A, B], peers: { [A]: B, [B]: A } }));
+const operator = CL.install(priv, A);
 fs.writeFileSync(path.join(work, 'prepend.php'), "<?php $_SERVER['HTTPS'] = 'on';\n");
 const port = 21000 + Math.floor(Math.random() * 15000);
 const server = spawn('php', ['-S', '127.0.0.1:' + port, '-t', root, '-d', 'auto_prepend_file=' + path.join(work, 'prepend.php')], { stdio: 'ignore', env: Object.assign({}, process.env, { PHP_CLI_SERVER_WORKERS: '6' }) });
@@ -66,8 +67,8 @@ function call(file, method, query, body, opts = {}) {
 const get = (q, opts) => call('spend34', 'GET', q, undefined, opts);
 const { withNonce } = require('./support/holdings-nonce');
 const post = (q, body, opts) => call('spend34', 'POST', q, withNonce(q, body), opts);
-const op = (action, body) => post('action=' + action, { adminToken: TOKEN, ...body });
-const createCoin = (symbol, extra = {}) => call('coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: TOKEN, ...extra });
+const op = (action, body) => call('spend34', 'POST', 'action=' + action, CL.sign(operator, A, 'spend34/' + action, body));
+const createCoin = (symbol, extra = {}) => call('coin26', 'POST', 'action=create', CL.sign(operator, A, 'coin26/create', CL.coinRequest(symbol, extra)));
 const NOW = () => Math.floor(Date.now() / 1000);
 const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
 const hex32 = /^[a-f0-9]{32}$/;

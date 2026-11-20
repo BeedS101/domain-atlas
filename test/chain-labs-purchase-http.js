@@ -18,6 +18,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const DIR = path.join(__dirname, '..', 'chain-labs');
+const CL = require('./support/chain-labs-operator-client');
 let failures = 0, total = 0;
 const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((ok ? 'PASS ' : 'FAIL ') + text + (!ok && detail !== undefined ? ' :: ' + JSON.stringify(detail).slice(0, 400) : '')); };
 
@@ -38,7 +39,7 @@ const base = 22000 + Math.floor(Math.random() * 12000);
 const nodes = {};
 [A, B, C].forEach((domain, i) => {
   const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-  nodes[domain] = { domain, port: base + i * 3, pair, token: crypto.randomBytes(32).toString('hex'), proc: null, dir: path.join(work, domain) };
+  nodes[domain] = { domain, port: base + i * 3, pair, proc: null, dir: path.join(work, domain) };
 });
 const pem = (k) => Buffer.from(k.export({ type: 'spki', format: 'pem' })).toString('base64');
 
@@ -48,9 +49,10 @@ for (const n of Object.values(nodes)) {
   fs.mkdirSync(root, { recursive: true });
   fs.mkdirSync(priv);
   n.root = root; n.priv = priv;
+  n.operator = CL.install(priv, n.domain);
   for (const f of ['coin26.php', 'spend34.php']) fs.copyFileSync(path.join(DIR, f), path.join(root, f));
   fs.cpSync(path.join(DIR, 'lib'), path.join(root, 'lib'), { recursive: true });
-  fs.writeFileSync(path.join(priv, 'federation20-config.php'), "<?php return ['private_pem_b64' => '" + Buffer.from(n.pair.privateKey.export({ type: 'pkcs8', format: 'pem' })).toString('base64') + "', 'admin_token_hex' => '" + n.token + "'];\n");
+  fs.writeFileSync(path.join(priv, 'federation20-config.php'), "<?php return ['private_pem_b64' => '" + Buffer.from(n.pair.privateKey.export({ type: 'pkcs8', format: 'pem' })).toString('base64') + "'];\n");
   const keys = {}, urls = {};
   for (const o of Object.values(nodes)) if (o.domain !== n.domain) { keys[o.domain] = pem(o.pair.publicKey); urls[o.domain] = 'http://127.0.0.1:' + o.port + '/spend34.php?action=peer'; }
   fs.writeFileSync(path.join(priv, 'chainlabs-peers.json'), JSON.stringify({ keys, urls }));
@@ -132,7 +134,7 @@ function registerPolicy(n, coinId, policy) {
 }
 const op = async (n, action, body) => {
   if (action === 'open' && body && body.purchase !== undefined && body.purchase !== null) { registerPolicy(n, body.coinId, body.purchase); const { purchase, ...rest } = body; body = rest; }
-  const res = await post(n, 'action=' + action, { adminToken: n.token, ...body });
+  const res = await call(n, 'spend34', 'POST', 'action=' + action, CL.sign(n.operator, n.domain, 'spend34/' + action, body));
   if (action === 'open' && res.json && res.json.ok) {
     const c = (await get(n, 'action=coin&coin=' + body.coinId)).json;
     if (c && c.ok) bound[body.coinId] = { authority: c.genesis.authority, genesis: c.genesisDigest };
@@ -142,7 +144,7 @@ const op = async (n, action, body) => {
 // A signed purchase intent names the domain and genesis it is for; the tests build intents without waiting, so each opened coin's binding is kept here.
 const bound = {};
 const bindingOf = (coinId) => bound[coinId] || { authority: 'unknown.invalid', genesis: '0'.repeat(64) };
-const createCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: n.token, ...extra });
+const createCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', CL.sign(n.operator, n.domain, 'coin26/create', CL.coinRequest(symbol, extra)));
 const NOW = () => Math.floor(Date.now() / 1000);
 const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
 async function transfer(w, n, coinId, to, amount, over = {}) {
@@ -300,7 +302,7 @@ const POLICY = { priceClass: 'atlas.element.gold', issuerKey, unitsPerPrice: 10,
     const cancelDone = await op(a, 'purchase-cancel', { coinId: twoOf.id, requestId: t1.requestId });
     line(cancelDone.status === 409 && cancelDone.json.code === 'cannot-cancel', 'a sale that was delivered cannot be cancelled', cancelDone.json);
     const needToken = await post(a, 'action=purchase-recover', { coinId: twoOf.id });
-    line(needToken.status === 401 || needToken.status === 403, 'recovery needs the operator token', needToken.status);
+    line(needToken.status === 401 || needToken.status === 403, 'recovery needs a signed operator request', needToken.status);
 
     console.log('\n== many buyers at once');
     const buyers = [wallet(), wallet(), wallet(), wallet(), wallet(), wallet()];

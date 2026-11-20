@@ -19,7 +19,7 @@ let failures = 0, total = 0;
 const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((ok ? 'PASS ' : 'FAIL ') + text + (!ok && detail !== undefined ? ' :: ' + JSON.stringify(detail).slice(0, 300) : '')); };
 
 const A = 'a.example', B = 'b.example';
-const TOKEN = crypto.randomBytes(32).toString('hex');
+const CL = require('./support/chain-labs-operator-client');
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
 const canon = (v) => Array.isArray(v) ? '[' + v.map(canon).join(',') + ']' : (v && typeof v === 'object') ? '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}' : JSON.stringify(v);
 
@@ -41,8 +41,9 @@ fs.mkdirSync(root);
 fs.mkdirSync(priv);
 for (const f of ['coin26.php', 'spend34.php']) fs.copyFileSync(path.join(DIR, f), path.join(root, f));
 fs.cpSync(path.join(DIR, 'lib'), path.join(root, 'lib'), { recursive: true });
-fs.writeFileSync(path.join(priv, 'federation20-config.php'), '<?php return [' + "'private_pem_b64' => '" + Buffer.from(domainPem).toString('base64') + "', 'peer_public_pem_b64' => '" + Buffer.from(peer.publicKey.export({ type: 'spki', format: 'pem' })).toString('base64') + "', 'admin_token_hex' => '" + TOKEN + "'];\n");
+fs.writeFileSync(path.join(priv, 'federation20-config.php'), '<?php return [' + "'private_pem_b64' => '" + Buffer.from(domainPem).toString('base64') + "', 'peer_public_pem_b64' => '" + Buffer.from(peer.publicKey.export({ type: 'spki', format: 'pem' })).toString('base64') + "'];\n");
 fs.writeFileSync(path.join(priv, 'chainlabs-config.json'), JSON.stringify({ hosts: [A, B], peers: { [A]: B, [B]: A } }));
+const operator = CL.install(priv, A);
 fs.writeFileSync(path.join(work, 'prepend.php'), "<?php $_SERVER['HTTPS'] = 'on';\n");
 const port = 21000 + Math.floor(Math.random() * 15000);
 const server = spawn('php', ['-S', '127.0.0.1:' + port, '-t', root, '-d', 'auto_prepend_file=' + path.join(work, 'prepend.php')], { stdio: 'ignore' });
@@ -64,8 +65,8 @@ function call(file, method, query, body, opts = {}) {
 const get = (q, opts) => call('spend34', 'GET', q, undefined, opts);
 const { withNonce } = require('./support/holdings-nonce');
 const post = (q, body, opts) => call('spend34', 'POST', q, withNonce(q, body), opts);
-const op = (action, body) => post('action=' + action, { adminToken: TOKEN, ...body });
-const createCoin = (symbol, extra = {}) => call('coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: TOKEN, ...extra });
+const op = (action, body) => call('spend34', 'POST', 'action=' + action, CL.sign(operator, A, 'spend34/' + action, body));
+const createCoin = (symbol, extra = {}) => call('coin26', 'POST', 'action=create', CL.sign(operator, A, 'coin26/create', CL.coinRequest(symbol, extra)));
 const NOW = () => Math.floor(Date.now() / 1000);
 const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
 // A transfer in the bound form: the coin's authority and genesis digest, and the head the log has now (which is a real head
@@ -95,7 +96,7 @@ const statementOk = (a, key) => a.statement.domain === A && a.statement.key === 
     const pub = (await createCoin('PUB')).json, sec = (await createCoin('SEC', { visibility: 'private' })).json, mul = (await createCoin('MUL', { mode: 'multi', partners: [B] })).json;
     line(pub.ok && sec.ok && mul.ok, 'three coins are registered through the coin form endpoint', [pub, sec, mul].map((x) => x.error));
     const tooMany = { faucet: { maxAmount: '30000', perKeyLimit: '60000', cooldownSeconds: 0 } };
-    line((await post('action=open', { coinId: pub.id })).status === 403 && (await post('action=open', { adminToken: '0'.repeat(64), coinId: pub.id })).status === 403, 'opening needs the operator token');
+    line((await post('action=open', { coinId: pub.id })).status === 403 && (await post('action=open', { adminToken: '0'.repeat(64), coinId: pub.id })).status === 403, 'opening needs a signed operator request');
     line((await op('open', { coinId: 'xyz' })).status === 400 && (await op('open', { coinId: '0'.repeat(32) })).status === 404, 'a bad or unknown coin id is refused');
     const o1 = await op('open', { coinId: pub.id });
     line(o1.status === 201 && o1.json.coin.state === 'active' && o1.json.coin.entries === 1 && o1.json.coin.supply === '100000' && o1.json.coin.genesis.visibility === 'public' && o1.json.coin.genesis.faucet === null, 'a registered coin is opened as a ledger with its supply in the treasury', o1.json);
@@ -123,7 +124,7 @@ const statementOk = (a, key) => a.statement.domain === A && a.statement.key === 
     console.log('\n== grants');
     const g0 = await op('grant', { coinId: pub.id, to: alice.key, amount: '50000' });
     line(g0.status === 201 && receiptOk(g0.json.receipt) && g0.json.receipt.entry.index === 1, 'an operator grant executes and returns a verifiable receipt', g0.json);
-    line((await post('action=grant', { coinId: pub.id, to: alice.key, amount: '1' })).status === 403, 'a grant needs the operator token');
+    line((await post('action=grant', { coinId: pub.id, to: alice.key, amount: '1' })).status === 403, 'a grant needs a signed operator request');
     line((await op('grant', { coinId: pub.id, to: 'nobody', amount: '1' })).status === 400 && (await op('grant', { coinId: pub.id, to: alice.key, amount: '0' })).status === 400, 'a bad recipient or amount is refused');
     line((await op('grant', { coinId: pub.id, to: alice.key, amount: '5000000' })).status === 409, 'a grant above the treasury balance is refused');
     const gs = await op('grant', { coinId: sec.id, to: alice.key, amount: '25000' });

@@ -11,6 +11,7 @@ const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const OP = require('../../tools/lib/chainlabs-operator');
 
 const DIR = path.join(__dirname, '..', '..', 'chain-labs');
 
@@ -31,8 +32,16 @@ const base = 24000 + Math.floor(Math.random() * 12000);
 const nodes = {};
 [A, B, C].forEach((domain, i) => {
   const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-  nodes[domain] = { domain, port: base + i * 3, pair, token: crypto.randomBytes(32).toString('hex'), proc: null, dir: path.join(work, domain) };
+  // `token` is the operator token of the compatibility period (only its hash is in the roster); `demoToken` is the one the older demo labs
+  // read from the private configuration, which no chain labs operator action accepts; `operator` is a key that may take every action.
+  nodes[domain] = { domain, port: base + i * 3, pair, token: crypto.randomBytes(32).toString('hex'), demoToken: crypto.randomBytes(32).toString('hex'), operator: OP.newIdentity(), proc: null, dir: path.join(work, domain) };
 });
+// The operator roster of a node, in the private folder. `over` changes the file's content: { keys, legacyTokenSha256, domain }.
+function writeRoster(n, over = {}) {
+  const doc = Object.assign({ domain: n.domain, legacyTokenSha256: OP.sha256(n.token), keys: [{ publicKey: n.operator.publicKey, label: 'harness' }] }, over);
+  for (const k of Object.keys(doc)) if (doc[k] === undefined) delete doc[k];
+  fs.writeFileSync(path.join(n.priv, 'chainlabs-operators.json'), JSON.stringify(doc));
+}
 const pem = (k) => Buffer.from(k.export({ type: 'spki', format: 'pem' })).toString('base64');
 
 // Each node pins the keys of the others and reaches them on loopback; D is a listed lab domain with no pinned key.
@@ -41,14 +50,15 @@ for (const n of Object.values(nodes)) {
   fs.mkdirSync(root, { recursive: true });
   fs.mkdirSync(priv);
   n.root = root; n.priv = priv;
-  for (const f of ['coin26.php', 'spend34.php', 'scan35.php', 'scan35.html', 'coin26.html']) fs.copyFileSync(path.join(DIR, f), path.join(root, f));
+  for (const f of ['coin26.php', 'spend34.php', 'scan35.php', 'scan35.html', 'coin26.html', 'federation20.php']) fs.copyFileSync(path.join(DIR, f), path.join(root, f));
   fs.cpSync(path.join(DIR, 'lib'), path.join(root, 'lib'), { recursive: true });
-  fs.writeFileSync(path.join(priv, 'federation20-config.php'), "<?php return ['private_pem_b64' => '" + Buffer.from(n.pair.privateKey.export({ type: 'pkcs8', format: 'pem' })).toString('base64') + "', 'admin_token_hex' => '" + n.token + "'];\n");
+  fs.writeFileSync(path.join(priv, 'federation20-config.php'), "<?php return ['private_pem_b64' => '" + Buffer.from(n.pair.privateKey.export({ type: 'pkcs8', format: 'pem' })).toString('base64') + "', 'peer_public_pem_b64' => '" + pem((n.domain === A ? nodes[B] : nodes[A]).pair.publicKey) + "', 'admin_token_hex' => '" + n.demoToken + "'];\n");
+  writeRoster(n);
   const keys = {}, urls = {};
   for (const o of Object.values(nodes)) if (o.domain !== n.domain) { keys[o.domain] = pem(o.pair.publicKey); urls[o.domain] = 'http://127.0.0.1:' + o.port + '/spend34.php?action=peer'; }
   fs.writeFileSync(path.join(priv, 'chainlabs-peers.json'), JSON.stringify({ keys, urls }));
   const others = [A, B, C, D].filter((d) => d !== n.domain);
-  fs.writeFileSync(path.join(priv, 'chainlabs-config.json'), JSON.stringify({ hosts: [A, B, C, D], partners: { [n.domain]: others } }));
+  fs.writeFileSync(path.join(priv, 'chainlabs-config.json'), JSON.stringify({ hosts: [A, B, C, D], peers: { [A]: B, [B]: A }, partners: { [n.domain]: others } }));
   fs.writeFileSync(path.join(n.dir, 'prepend.php'), "<?php $_SERVER['HTTPS'] = 'on';\n");
 }
 // The code that holds the credentials: one issuer; only the authority holds its private key, to sign remainders.
@@ -124,12 +134,20 @@ const { execFileSync: execPolicy } = require('child_process');
 function registerPolicy(n, coinId, policy) {
   execPolicy('php', ['-r', '$d=new PDO("sqlite:"."' + path.join(n.priv, 'coin26.sqlite') + '");$q=$d->prepare("UPDATE coins SET purchase=? WHERE id=?");$q->execute([$argv[1],$argv[2]]);', JSON.stringify(policy), coinId]);
 }
+const target = (n) => ({ base: 'http://127.0.0.1:' + n.port, host: n.domain });
+// An operator action, signed by the node's operator key. `as` is another identity, `repeat` signs the request to be carried out again.
+const signedOp = (n, action, body, opts = {}) => OP.callOperator(target(n), opts.as || n.operator, action.includes('/') ? action : 'spend34/' + action, body || {}, opts);
 const op = async (n, action, body) => {
   if (action === 'open' && body && body.purchase !== undefined && body.purchase !== null) { registerPolicy(n, body.coinId, body.purchase); const { purchase, ...rest } = body; body = rest; }
-  const res = await post(n, 'action=' + action, { adminToken: n.token, ...body });
+  const res = await signedOp(n, action, body, { repeat: true });
   if (action === 'open' && res.json && res.json.ok) await remember(n, body.coinId);
   return res;
 };
+const coinRequest = (symbol, extra = {}) => ({ name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', ...extra });
+const createCoin = (n, symbol, extra = {}) => signedOp(n, 'coin26/create', coinRequest(symbol, extra));
+// The same two as they were made before signed requests, with the operator token.
+const legacyOp = (n, action, body) => post(n, 'action=' + action, OP.legacyBody(n.token, body));
+const legacyCreateCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', OP.legacyBody(n.token, coinRequest(symbol, extra)));
 // A signed purchase intent names the domain and genesis it is for, which the buyer's wallet reads from the coin. The tests build intents
 // without waiting, so the binding of each opened coin is kept here when it is opened.
 const bound = {};
@@ -138,7 +156,6 @@ async function remember(n, coinId) {
   if (c && c.ok) bound[coinId] = { authority: c.genesis.authority, genesis: c.genesisDigest };
 }
 const bindingOf = (coinId) => bound[coinId] || { authority: 'unknown.invalid', genesis: '0'.repeat(64) };
-const createCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: n.token, ...extra });
 const NOW = () => Math.floor(Date.now() / 1000);
 const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
 async function transfer(w, n, coinId, to, amount, over = {}) {
@@ -167,4 +184,4 @@ function cleanup() {
   for (const n of Object.values(nodes)) killGroup(n);
   fs.rmSync(work, { recursive: true, force: true });
 }
-module.exports = { bindingOf, remember, A, B, C, D, nodes, issuer, issuerKey, POLICY, b64u, canon, sleep, wallet, start, stop, call, get, post, scan, op, createCoin, NOW, iso, transfer, units, headOf, level, levelOk, hex, credential, cleanup };
+module.exports = { OP, writeRoster, target, signedOp, legacyOp, legacyCreateCoin, coinRequest, bindingOf, remember, A, B, C, D, nodes, issuer, issuerKey, POLICY, b64u, canon, sleep, wallet, start, stop, call, get, post, scan, op, createCoin, NOW, iso, transfer, units, headOf, level, levelOk, hex, credential, cleanup };

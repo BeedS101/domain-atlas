@@ -20,9 +20,9 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
 
 const sql = (n, q, args = []) => JSON.parse(execFileSync('php', ['-r', '$d=new PDO("sqlite:"."' + path.join(n.priv, 'coin26.sqlite') + '");$s=$d->prepare($argv[1]);$s->execute(array_slice($argv,2));echo json_encode($s->columnCount()?$s->fetchAll(PDO::FETCH_ASSOC):[]);', q, ...args]).toString());
 const GOOD = { coinsPerAu: '100', minPrice: 1, perKey: '1000', perDay: '10000', priceClass: 'atlas.element.gold', issuerKey };
-const coinBody = (n, symbol, extra = {}) => ({ name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: n.token, ...extra });
-const preview = (n, symbol, purchase, extra) => call(n, 'coin26', 'POST', 'action=preview', coinBody(n, symbol, { purchase, ...extra }));
-const create = (n, symbol, purchase, digest, extra) => call(n, 'coin26', 'POST', 'action=create', coinBody(n, symbol, { purchase, ...(digest ? { purchaseDigest: digest } : {}), ...extra }));
+const coinBody = (n, symbol, extra = {}) => ({ name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', ...extra });
+const preview = (n, symbol, purchase, extra) => S.signedOp(n, 'coin26/preview', coinBody(n, symbol, { purchase, ...extra }), { repeat: true });
+const create = (n, symbol, purchase, digest, extra) => S.signedOp(n, 'coin26/create', coinBody(n, symbol, { purchase, ...(digest ? { purchaseDigest: digest } : {}), ...extra }), { repeat: true });
 const listed = async (n) => (await call(n, 'coin26', 'GET', 'action=list')).json.coins;
 const count = (n) => sql(n, 'SELECT COUNT(*) AS c FROM coins')[0].c;
 
@@ -50,7 +50,7 @@ const count = (n) => sql(n, 'SELECT COUNT(*) AS c FROM coins')[0].c;
     line(q.json.digest !== p.json.digest, 'so does a different symbol');
     const small = await preview(a, 'PRV', { ...GOOD, minPrice: 1, coinsPerAu: '1000' }, { initialSupply: '500' });
     line(small.json.ok && small.json.warnings.length === 1 && /treasury/.test(small.json.warnings[0]), 'a treasury below the smallest purchase is a warning', small.json);
-    const noPolicy = await call(a, 'coin26', 'POST', 'action=preview', coinBody(a, 'PRV'));
+    const noPolicy = await S.signedOp(a, 'coin26/preview', coinBody(a, 'PRV'), { repeat: true });
     line(noPolicy.status === 400, 'preview without a policy is refused', noPolicy.json);
     const noToken = await call(a, 'coin26', 'POST', 'action=preview', { ...coinBody(a, 'PRV', { purchase: GOOD }), adminToken: 'x'.repeat(64) });
     line(noToken.status === 401 || noToken.status === 403, 'and so is preview without the operator token', noToken.status);
@@ -60,7 +60,7 @@ const count = (n) => sql(n, 'SELECT COUNT(*) AS c FROM coins')[0].c;
       ['not an object', 'text'], ['a list', [1]], ['missing field', (({ perDay, ...r }) => r)(GOOD)], ['extra field', { ...GOOD, extra: 1 }],
       ['rate zero', { ...GOOD, coinsPerAu: '0' }], ['rate negative', { ...GOOD, coinsPerAu: '-1' }], ['rate a number', { ...GOOD, coinsPerAu: 100 }], ['rate with letters', { ...GOOD, coinsPerAu: '1e2' }],
       ['rate with 3 decimals on a 2 decimal coin', { ...GOOD, coinsPerAu: '1.005' }], ['rate above the maximum supply', { ...GOOD, coinsPerAu: '100001' }],
-      ['minimum zero', { ...GOOD, minPrice: 0 }], ['minimum fraction', { ...GOOD, minPrice: 1.5 }], ['minimum text', { ...GOOD, minPrice: '1' }], ['minimum too large', { ...GOOD, minPrice: 1000001 }],
+      ['minimum zero', { ...GOOD, minPrice: 0 }], ['minimum text', { ...GOOD, minPrice: '1' }], ['minimum too large', { ...GOOD, minPrice: 1000001 }],
       ['smallest purchase above the maximum supply', { ...GOOD, coinsPerAu: '60000', minPrice: 2 }],
       ['per key below the smallest purchase', { ...GOOD, perKey: '99' }], ['per day below the smallest purchase', { ...GOOD, perKey: '100', perDay: '99' }],
       ['per key above per day', { ...GOOD, perKey: '5000', perDay: '4000' }], ['per key zero', { ...GOOD, perKey: '0' }], ['per day above the maximum supply', { ...GOOD, perDay: '100001' }],
@@ -71,6 +71,7 @@ const count = (n) => sql(n, 'SELECT COUNT(*) AS c FROM coins')[0].c;
       const r = await preview(a, 'BAD', policy);
       const c = await create(a, 'BAD', policy, 'a'.repeat(64));
       line(r.status === 400 && !r.json.ok && c.status === 400, 'refused: ' + name, [r.status, r.json, c.status]);
+    line((() => { try { S.OP.signRequest(a.operator, { domain: A, action: 'coin26/preview', request: coinBody(a, 'FRC', { purchase: { ...GOOD, minPrice: 1.5 } }) }); return false; } catch (e) { return true; } })(), 'a fraction in a policy cannot be signed at all');
     }
     line(count(a) === 0, 'none of them stored a coin');
 
@@ -126,28 +127,28 @@ const count = (n) => sql(n, 'SELECT COUNT(*) AS c FROM coins')[0].c;
     line(mkt.ok && mc && JSON.stringify(mc).includes('0.01'), 'the market data shows the price of 0.01 Au per coin', mc || mkt);
 
     const noOpen = await createCoin(a, 'NOP');
-    const mismatch = await post(a, 'action=open', { adminToken: a.token, coinId: noOpen.json.id, purchase: { ...S.POLICY } });
+    const mismatch = await S.signedOp(a, 'spend34/open', { coinId: noOpen.json.id, purchase: { ...S.POLICY } }, { repeat: true });
     line(mismatch.status === 400 && mismatch.json.code === 'policy-mismatch', 'a policy sent at open time to a coin registered without one is refused', mismatch.json);
-    const mismatch2 = await post(a, 'action=open', { adminToken: a.token, coinId: (await create(a, 'MM2', GOOD, (await preview(a, 'MM2', GOOD)).json.digest)).json.id, purchase: { ...S.POLICY } });
+    const mismatch2 = await S.signedOp(a, 'spend34/open', { coinId: (await create(a, 'MM2', GOOD, (await preview(a, 'MM2', GOOD)).json.digest)).json.id, purchase: { ...S.POLICY } }, { repeat: true });
     line(mismatch2.status === 400 && mismatch2.json.code === 'policy-mismatch', 'and one that differs from the registered policy', mismatch2.json);
-    const still = await post(a, 'action=open', { adminToken: a.token, coinId: noOpen.json.id });
+    const still = await S.signedOp(a, 'spend34/open', { coinId: noOpen.json.id }, { repeat: true });
     line(still.status === 201 && still.json.coin.genesis.purchase === undefined, 'a coin registered without a policy opens without one, genesis unchanged', still.json.coin && still.json.coin.genesis);
 
     console.log('\n== a registry row that was changed by hand');
     const tam = (await create(a, 'TAM', GOOD, (await preview(a, 'TAM', GOOD)).json.digest)).json;
     sql(a, "UPDATE coins SET purchase=? WHERE id=?", [JSON.stringify({ ...JSON.parse(sql(a, 'SELECT purchase FROM coins WHERE id=?', [tam.id])[0].purchase), perDayUnits: '999999999999999' }), tam.id]);
-    const t1 = await post(a, 'action=open', { adminToken: a.token, coinId: tam.id });
+    const t1 = await S.signedOp(a, 'spend34/open', { coinId: tam.id }, { repeat: true });
     line(t1.status === 400 && (await listed(a)).find((c) => c.id === tam.id).ledger === 'none', 'a stored policy that the ledger would refuse stops the open', t1.json);
     sql(a, "UPDATE coins SET purchase=? WHERE id=?", ['not json', tam.id]);
-    line((await post(a, 'action=open', { adminToken: a.token, coinId: tam.id })).status === 400, 'so does one that cannot be read');
+    line((await S.signedOp(a, 'spend34/open', { coinId: tam.id }, { repeat: true })).status === 400, 'so does one that cannot be read');
     const tam2 = (await create(a, 'TM2', GOOD, (await preview(a, 'TM2', GOOD)).json.digest)).json;
     fs.writeFileSync(path.join(a.priv, 'chainlabs-gold-issuers.json'), JSON.stringify({ issuers: [{ key: other, classes: ['atlas.element.gold'] }] }));
-    const t3 = await post(a, 'action=open', { adminToken: a.token, coinId: tam2.id });
+    const t3 = await S.signedOp(a, 'spend34/open', { coinId: tam2.id }, { repeat: true });
     line(t3.status === 400 && /not authorised/.test(JSON.stringify(t3.json)), 'an issuer removed from the list after registering stops the open', t3.json);
     fs.unlinkSync(path.join(a.priv, 'chainlabs-gold-issuers.json'));
 
     console.log('\n== a coin of two domains');
-    const mp = await call(a, 'coin26', 'POST', 'action=create', coinBody(a, 'MUL', { purchase: GOOD, purchaseDigest: (await preview(a, 'MUL', GOOD, { mode: 'multi', partners: [B], threshold: 2 })).json.digest, mode: 'multi', partners: [B], threshold: 2 }));
+    const mp = await S.signedOp(a, 'coin26/create', coinBody(a, 'MUL', { purchase: GOOD, purchaseDigest: (await preview(a, 'MUL', GOOD, { mode: 'multi', partners: [B], threshold: 2 })).json.digest, mode: 'multi', partners: [B], threshold: 2 }), { repeat: true });
     line(mp.status === 201 && mp.json.state === 'pending', 'a multi authority coin with a policy is registered', mp.json);
     const mo = await op(a, 'open', { coinId: mp.json.id });
     line(mo.status === 201 && mo.json.ok, 'it opens with the partner', mo.json);

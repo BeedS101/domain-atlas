@@ -29,7 +29,8 @@ here is a demonstration with no monetary value.
   check the list; they accept any well-formed host and bind what they sign to it.
 - Databases are created in `chainblock-labs-private`, a directory beside the web root and never inside it. This folder
   holds no keys, tokens or databases.
-- The federation pages ask for an operator token and do not store it in the page.
+- The federation pages (labs 19 to 23) ask for the demonstration token of `federation20-config.php` and do not store it in the page. The actions of `spend34.php` and
+  `coin26.php` that change something are signed requests, not that token (`docs/chain-labs-operator-auth.md`).
 - The two domains keep independent ledgers. Nothing here replicates balances between them.
 
 ## Domains and peers
@@ -130,8 +131,8 @@ private folder) and the page checks every statement's signature itself. The scan
 authority; it shows this domain's copy, and the domains page shows how far each other domain is. Limits per address are left to
 the web server in front of it.
 
-Opening a registered coin: the operator calls `open` on the authority domain with the operator token (the studio page has the
-button). The coin is opened once; a second call is refused, and a multi coin that stopped because a partner did not answer is
+Opening a registered coin: the operator calls `open` on the authority domain with a signed operator request (the studio page has the
+button and signs with a key file chosen in the page). The coin is opened once; a second call is refused, and a multi coin that stopped because a partner did not answer is
 finished by the same call, which asks only the domains that have not signed. A multi coin is open only when every roster
 domain has signed its genesis. A partner needs the authority's key pinned (`chainlabs-peers.json` in its private folder, or
 `peer_public_pem_b64` of its federation configuration for the two-domain pair) and the authority needs the partner's; `open`
@@ -145,7 +146,7 @@ already validates (`priceClass`, `issuerKey`, `unitsPerPrice`, `minPrice`, `perK
 Au, and the limits per receiving key and per 24 hours are in coins. Everything the ledger would refuse is refused, and so are a smallest purchase
 the limits cannot cover and a per-key limit above the daily one.
 
-* `coin26.php?action=preview` (operator token) checks the policy and returns it in full, as lines to read, with warnings and a fingerprint. It stores nothing.
+* `coin26.php?action=preview` (signed operator request) checks the policy and returns it in full, as lines to read, with warnings and a fingerprint. It stores nothing.
 * `create` with a policy needs `purchaseDigest`, the fingerprint of the policy that was shown for the same name, symbol, decimals and supply, otherwise 409 `policy-not-confirmed`. The form shows the review first and creates on a second press; changing any field withdraws the review.
 * The registry keeps the policy in the `purchase` column. `spend34.php?action=open` uses only that policy, re-validates it, and writes it into the signed genesis; a policy sent with the request that differs from the registered one is refused (`policy-mismatch`). A coin registered without a policy opens with the genesis it always had, so existing registered coins do not change unless the operator registers a new one.
 * `chainlabs-gold-issuers.json` in the private folder (optional) lists the issuers whose keys and classes may be chosen: `{"issuers": [{"name": "...", "domain": "...", "key": "<raw public key>", "classes": ["atlas.element.gold"]}]}`. Without it only `atlas.element.gold` is accepted, with any well-formed key, and the review says the key is not checked. A list that cannot be read, or an empty one, authorises nobody. The list is checked again when the coin is opened.
@@ -187,6 +188,14 @@ endpoints, including the refusal and the unlimited claims.
   domain's own database (`ledger_catchup`). Requests that approve an entry, notices from the authority, and the operator's `recover` and
   `compare` always catch up and do not use it. The table is created when the database is opened.
 
+## Operator actions
+
+`lib/operator.php` authorizes every action of `spend34.php` and `coin26.php` that an operator takes: a request signed by a key on `chainlabs-operators.json` in
+the private folder, bound to the action, its arguments, the domain and a short time, with a single-use nonce, a record of each request and a
+hash-chained audit trail. The old shared token is accepted only until 1 March 2027 00:00 UTC, and not for changing actions once signed requests
+are activated. `tools/chainlabs-operator.js` signs from the command line and `lib/operator-cli.php` looks after the roster on the server. Upload the roster
+before the new endpoint files. Everything is in `docs/chain-labs-operator-auth.md`.
+
 ## Scheduled integrity check
 
 `lib/integrity-cli.php` checks every coin from the command line and is made for cron: the ledger invariants, the checkpoint, the journals and
@@ -224,6 +233,11 @@ its line in `SOURCE.sha256`.
     node test/chain-labs-holdings-binding.js
     node test/chain-labs-scan-http.js
     node test/chain-labs-policy-http.js
+    php test/chain-labs-operator.php
+    node test/chain-labs-operator-http.js
+    node test/chain-labs-operator-cli.js
+    node test/chain-labs-operator-sunset.js
+    node test/chain-labs-operator-separation.js
     node test/chain-labs-open-resume.js
     php test/chain-labs-integrity-cli.php
     node test/chain-labs-testgold.js
@@ -236,5 +250,6 @@ The wallet screen and the scanner page are checked in a real browser (needs Chro
     xvfb-run -a node test/manual-chain-labs-scanner.js
     xvfb-run -a node test/manual-chain-labs-studio.js
     xvfb-run -a node test/manual-chain-labs-studio-policy.js
+    xvfb-run -a node test/manual-chain-labs-studio-legacy.js
     xvfb-run -a node test/manual-chain-labs-gold-e2e.js
     xvfb-run -a node test/manual-chain-labs-aeth-rehearsal.js

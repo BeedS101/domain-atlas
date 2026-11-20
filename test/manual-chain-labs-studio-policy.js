@@ -29,11 +29,13 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     page.on('pageerror', (e) => errors.push(e.message));
     await page.goto('https://a.example/chain-labs/coin26.html');
     await page.waitForSelector('#goldOn');
+    await page.setInputFiles('#keyFile', { name: 'operator.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(a.operator)) });
+    await page.waitForFunction(() => /^Key loaded/.test(document.getElementById('keyState').innerText));
     const text = (sel) => page.locator(sel).innerText();
     const msg = () => text('#message');
     const settle = async (re) => { await page.waitForFunction((src) => new RegExp(src).test(document.getElementById('message').innerText), re.source, { timeout: 15000 }); return msg(); };
     const fill = async (name, value) => page.fill('[name=' + name + ']', value);
-    const base = async (symbol) => { await fill('name', 'Experiment ' + symbol); await fill('symbol', symbol); await page.selectOption('[name=decimals]', '2'); await fill('maxSupply', '100000'); await fill('initialSupply', '1000'); await fill('adminToken', a.token); };
+    const base = async (symbol) => { await fill('name', 'Experiment ' + symbol); await fill('symbol', symbol); await page.selectOption('[name=decimals]', '2'); await fill('maxSupply', '100000'); await fill('initialSupply', '1000'); };
 
     console.log('== the fields are optional');
     line(await page.locator('#goldFields').isHidden(), 'the policy fields are hidden until the box is ticked');
@@ -63,7 +65,6 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     console.log('\n== changing a field starts the review again');
     await fill('perDay', '9000');
     line(await page.locator('#review').isHidden() && /Review the purchase policy/.test(await text('#create')), 'the review is withdrawn and the button asks for a review again');
-    await page.fill('[name=adminToken]', a.token);
     await page.click('#create');
     await settle(/Nothing is created yet/);
     const lines2 = await page.locator('#reviewLines li').allInnerTexts();

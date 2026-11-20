@@ -147,12 +147,15 @@ does not stop the others.
 
 ## 6. Recovery: what the operator does
 
-Every recovery step is an operator action on `spend34.php`, a POST that carries the operator token in its body (`adminToken`, 64 hex
-characters, compared in constant time). A missing, wrong or short token, a token only in the address, and a GET are all refused and change
-nothing; the public routes ignore a token. Recovery cannot erase the record that something went wrong: the checkpoint log keeps the stop
+Every recovery step is an operator action on `spend34.php`: a POST whose body is a request signed by an operator key
+(`docs/chain-labs-operator-auth.md`), bound to the action, its arguments, the domain and a short time. `node tools/chainlabs-operator.js call
+<action> --identity <file> --url https://<domain> --json '{...}'` signs and sends it; the arguments below go in the `--json` object. A key
+limited to the Studio actions cannot take any of these steps. A request that is unsigned, signed for another action or domain, expired or
+sent twice, and a GET, are all refused and change nothing; until 1 March 2027 an old operator token is still accepted for them unless signed
+requests have been activated, and not afterwards; the public routes ignore both. Recovery cannot erase the record that something went wrong: the checkpoint log keeps the stop
 (`halt`) and the way out (`restored`, `accept` or `reseal`) as lines, and the checks of each action refuse to be used as a way round another
 (a reseal needs a damaged file, a resume needs a frozen coin whose only evidence is a rollback, a restore needs entries to replay, and an
-accepted loss cannot be undone by any of them). None of them brings back spent funds.
+accepted loss cannot be undone by any of them). None of them brings back spent funds. Each is written to the operator audit trail (the action, the key's fingerprint and the coin), which holds no secret.
 
 1. `integrity` (`coinId`): reads the verdict without changing anything, with both heads (the floor and the database's).
 2. `restore` (`coinId`): replays the journal through the normal entry checks, in order, from the database's head up to the floor, and,
@@ -269,6 +272,7 @@ step that closes this, and is a design decision for the operator rather than a c
 ```
 php test/chain-labs-rollback.php          # the guard in the library: rollback, crash, conflict, corruption, recovery, multi authority
 node test/chain-labs-rollback-http.js     # the same against the real endpoint and a killed server
+node test/chain-labs-operator-http.js     # the signed requests every step above is sent with (docs/chain-labs-operator-auth.md)
 php test/chain-labs-rollback-purchase.php # sales under way when a database is put back
 php test/chain-labs-integrity-cli.php     # the scheduled read-only checker over every coin (docs/chain-labs-integrity-check.md)
 php test/chain-labs-purchase-closure.php  # closing a sale: both orders of a race, a restored database, interrupted and damaged closure files, one and several domains

@@ -10,7 +10,7 @@ declare(strict_types=1);
  *         purchase (an owner-signed intent and a price credential: the authority of a coin that has a purchase policy delivers
  *         the units and spends the credential, see lib/purchase.php; 202 while a multi authority sale waits for approvals).
  *         GET head: this domain's signed statement of the newest entry it holds, for anyone comparing domains.
- * Operator (private operator token): POST open (opens a coin of the coin registry as a ledger, a multi authority coin with
+ * Operator (a request signed by a key in chainlabs-operators.json, see lib/operator.php): POST open (opens a coin of the coin registry as a ledger, a multi authority coin with
  *         its partner domains and an optional faucet or purchase policy; an open that stopped part way is finished by repeating it), grant (a treasury spend), recover (finishes pending
  *         multi authority proposals), compare (compares heads with the other domains and freezes the coin on a disagreement),
  *         evidence (why a coin is frozen), purchase-recover (finishes journaled sales), purchase-cancel (ends one that has no entry).
@@ -23,7 +23,16 @@ ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 header('X-Content-Type-Options: nosniff');
-function reply34(int $status, array $body): never { http_response_code($status); echo json_encode($body, JSON_UNESCAPED_SLASHES); exit; }
+// While an operator request is being carried out, its outcome is recorded (lib/operator.php) before the answer leaves, whichever way the request ends.
+$operatorOutcome = null;
+function reply34(int $status, array $body): never
+{
+    global $operatorOutcome;
+    if ($operatorOutcome !== null) { $record = $operatorOutcome; $operatorOutcome = null; $record($status, $body); }
+    http_response_code($status);
+    echo json_encode($body, JSON_UNESCAPED_SLASHES);
+    exit;
+}
 if (!extension_loaded('pdo_sqlite') || !extension_loaded('openssl')) reply34(503, ['ok' => false, 'error' => 'OpenSSL and PDO SQLite are required']);
 if (empty($_SERVER['HTTPS']) || $_SERVER['HTTPS'] === 'off') reply34(403, ['ok' => false, 'error' => 'HTTPS required']);
 $host = strtolower($_SERVER['HTTP_HOST'] ?? '');
@@ -31,6 +40,7 @@ require __DIR__.'/lib/hosts.php';
 if (!chainlabs_is_host($host)) reply34(400, ['ok' => false, 'error' => 'Unrecognized host']);
 require __DIR__ . '/lib/purchase.php';
 require __DIR__ . '/lib/policy.php';
+require __DIR__ . '/lib/operator.php';
 $root = realpath($_SERVER['DOCUMENT_ROOT'] ?? '');
 $private = $root ? realpath(dirname($root) . '/chainblock-labs-private') : false;
 if (!$private || str_starts_with($private . '/', $root . '/')) reply34(503, ['ok' => false, 'error' => 'Private storage unavailable']);
@@ -38,9 +48,8 @@ $config = $private . '/federation20-config.php';
 if (!is_file($config)) reply34(503, ['ok' => false, 'error' => 'Operator configuration missing']);
 $c = require $config;
 $domainPrivate = is_array($c) ? base64_decode((string) ($c['private_pem_b64'] ?? ''), true) : false;
-$admin = is_array($c) ? ($c['admin_token_hex'] ?? null) : null;
 $domainKey = $domainPrivate ? openssl_pkey_get_private($domainPrivate) : false;
-if (!$domainKey || !is_string($admin) || !preg_match('/^[a-f0-9]{64}$/D', $admin)) reply34(503, ['ok' => false, 'error' => 'Invalid operator configuration']);
+if (!$domainKey) reply34(503, ['ok' => false, 'error' => 'Invalid domain configuration']);
 $domainPublic = openssl_pkey_get_details($domainKey)['key'];
 $peerConfig = peer_load_config($host, $private, $c, chainlabs_peer_map());
 $gold = null;
@@ -87,10 +96,25 @@ function arg34(string $name, string $pattern): string
     if (!is_string($v) || !preg_match($pattern, $v)) reply34(400, ['ok' => false, 'error' => 'Invalid ' . $name]);
     return $v;
 }
-function operator34(array $m, string $admin): void
+// An operator action. The request is a signed operator request (or, until its date, one that carries the old token); the arguments the action
+// uses are the ones in the signed text. The answer to a request that was carried out before is the recorded one.
+function operator34(string $action, array $m): array
 {
-    $t = $m['adminToken'] ?? null;
-    if (!is_string($t) || !preg_match('/^[a-f0-9]{64}$/D', $t) || !hash_equals($admin, $t)) reply34(403, ['ok' => false, 'error' => 'Incorrect operator token']);
+    global $private, $host, $operatorOutcome;
+    $name = str_starts_with($action, 'operator-') ? 'operator/' . substr($action, 9) : 'spend34/' . $action;
+    try {
+        $auth = operator_authorize($private, $host, $name, (string) ($_SERVER['REQUEST_METHOD'] ?? ''), $m, time());
+    } catch (OperatorError $e) {
+        if ($e->reason === 'rate-limited') header('Retry-After: ' . (int) ($e->extra['retryAfter'] ?? 60));
+        reply34($e->status, ['ok' => false, 'code' => $e->reason, 'error' => $e->getMessage()] + $e->extra);
+    }
+    if (isset($auth['replay'])) {
+        header('X-Chainlabs-Operator-Replay: 1');
+        reply34($auth['replay']['status'], $auth['replay']['body']);
+    }
+    if ($auth['via'] === 'legacy') header('X-Chainlabs-Operator-Legacy: token accepted until ' . $auth['legacyUntil']);
+    $operatorOutcome = static function (int $status, array $body) use ($private, $auth): void { operator_finish($private, $auth, $status, $body, time()); };
+    return $auth;
 }
 
 // The seconds in which a public read, made by anyone, does not ask the authority again for the same coin. Only these reads wait: a request
@@ -229,10 +253,20 @@ try {
         reply34(200, ['ok' => true, 'answer' => peer_handle($db, $node, $envelope, $now, peer_http_sender($peerConfig, 3))]);
     }
 
+    // The operator's own layer: proving a key, switching to signed requests only, reading the audit table.
+    if (in_array($action, ['operator-check', 'operator-activate', 'operator-audit'], true)) {
+        $auth = operator34($action, body34(8192));
+        if ($action === 'operator-check') reply34(200, operator_check($private, $host, $auth, time()));
+        if ($action === 'operator-audit') reply34(200, operator_audit_answer($private, (int) ($auth['args']['limit'] ?? 50)));
+        try {
+            reply34(200, operator_activate($private, $host, $auth, $auth['args'], time()));
+        } catch (OperatorError $e) {
+            reply34($e->status, ['ok' => false, 'code' => $e->reason, 'error' => $e->getMessage()] + $e->extra);
+        }
+    }
     // Operator actions.
     if (in_array($action, ['open', 'grant', 'recover', 'compare', 'evidence', 'purchase-recover', 'purchase-cancel', 'integrity', 'restore', 'accept-rollback', 'reseal', 'resume'], true)) {
-        $m = body34();
-        operator34($m, $admin);
+        $m = operator34($action, body34(65536))['args'];
         $coinId = $m['coinId'] ?? null;
         if (!is_string($coinId) || !preg_match('/^[a-f0-9]{32}$/D', $coinId)) reply34(400, ['ok' => false, 'error' => 'Invalid coinId']);
     }

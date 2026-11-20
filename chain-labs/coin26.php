@@ -5,18 +5,16 @@ ini_set('display_errors','0');
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 header('X-Content-Type-Options: nosniff');
-function done26(int $s,array $v): never{http_response_code($s);echo json_encode($v,JSON_UNESCAPED_SLASHES);exit;}
+// While an operator request is being carried out, its outcome is recorded (lib/operator.php) before the answer leaves, whichever way the request ends.
+$operatorOutcome=null;
+function done26(int $s,array $v): never{global $operatorOutcome;if($operatorOutcome!==null){$record=$operatorOutcome;$operatorOutcome=null;$record($s,$v);}http_response_code($s);echo json_encode($v,JSON_UNESCAPED_SLASHES);exit;}
 if(!extension_loaded('pdo_sqlite'))done26(503,['ok'=>false,'error'=>'PDO SQLite required']);
 if(empty($_SERVER['HTTPS'])||$_SERVER['HTTPS']==='off')done26(403,['ok'=>false,'error'=>'HTTPS required']);
 $host=strtolower($_SERVER['HTTP_HOST']??'');
-require __DIR__.'/lib/hosts.php';require __DIR__.'/lib/policy.php';if(!chainlabs_is_host($host))done26(400,['ok'=>false,'error'=>'Unrecognized host']);
+require __DIR__.'/lib/hosts.php';require __DIR__.'/lib/policy.php';require __DIR__.'/lib/operator.php';if(!chainlabs_is_host($host))done26(400,['ok'=>false,'error'=>'Unrecognized host']);
 $origin='https://'.$host;
 $root=realpath($_SERVER['DOCUMENT_ROOT']??'');$private=$root?realpath(dirname($root).'/chainblock-labs-private'):false;
 if(!$private||str_starts_with($private.'/',$root.'/'))done26(503,['ok'=>false,'error'=>'Missing private storage']);
-$config=$private.'/federation20-config.php';
-if(!is_file($config))done26(503,['ok'=>false,'error'=>'Labs 20 private operator config missing']);
-$c=require $config;$admin=is_array($c)?($c['admin_token_hex']??null):null;
-if(!is_string($admin)||!preg_match('/^[0-9a-f]{64}$/D',$admin))done26(503,['ok'=>false,'error'=>'Invalid operator configuration']);
 try{
  $db=new PDO('sqlite:'.$private.'/coin26.sqlite',null,null,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_TIMEOUT=>5]);
  $db->exec('PRAGMA busy_timeout=5000');
@@ -60,11 +58,16 @@ if($_SERVER['REQUEST_METHOD']==='GET'&&$action==='list'){
 }
 if($_SERVER['REQUEST_METHOD']!=='POST'||!in_array($action,['create','preview'],true))done26(404,['ok'=>false,'error'=>'Unknown action']);
 if(($_SERVER['HTTP_ORIGIN']??'')!==$origin)done26(403,['ok'=>false,'error'=>'Origin mismatch']);
-if((int)($_SERVER['CONTENT_LENGTH']??0)>8192)done26(413,['ok'=>false,'error'=>'Request too large']);
-$m=json_decode(file_get_contents('php://input',false,null,0,8193),true);
-if(!is_array($m))done26(400,['ok'=>false,'error'=>'Invalid JSON']);
-$t=$m['adminToken']??null;
-if(!is_string($t)||!preg_match('/^[0-9a-f]{64}$/D',$t)||!hash_equals($admin,$t))done26(403,['ok'=>false,'error'=>'Incorrect operator token']);
+if((int)($_SERVER['CONTENT_LENGTH']??0)>32768)done26(413,['ok'=>false,'error'=>'Request too large']);
+$m=json_decode(file_get_contents('php://input',false,null,0,32769),true);
+if(!is_array($m)||array_is_list($m)&&$m!==[])done26(400,['ok'=>false,'error'=>'Invalid JSON']);
+// The arguments are the ones in the signed operator request (or, until its date, in a body that carries the old token).
+try{$auth=operator_authorize($private,$host,'coin26/'.$action,(string)($_SERVER['REQUEST_METHOD']??''),$m,time());}
+catch(OperatorError $e){if($e->reason==='rate-limited')header('Retry-After: '.(int)($e->extra['retryAfter']??60));done26($e->status,['ok'=>false,'code'=>$e->reason,'error'=>$e->getMessage()]+$e->extra);}
+if(isset($auth['replay'])){header('X-Chainlabs-Operator-Replay: 1');done26($auth['replay']['status'],$auth['replay']['body']);}
+if($auth['via']==='legacy')header('X-Chainlabs-Operator-Legacy: token accepted until '.$auth['legacyUntil']);
+$operatorOutcome=static function(int $status,array $body)use($private,$auth):void{operator_finish($private,$auth,$status,$body,time());};
+$m=$auth['args'];
 $name=trim((string)($m['name']??''));$symbol=strtoupper(trim((string)($m['symbol']??'')));$description=trim((string)($m['description']??''));
 $d=$m['decimals']??null;
 if(!preg_match('/^[A-Za-z0-9][A-Za-z0-9 ._-]{1,39}$/D',$name)||!preg_match('/^[A-Z][A-Z0-9]{1,9}$/D',$symbol)||!is_int($d)||$d<0||$d>6||strlen($description)>280||preg_match('/[\x00-\x1F\x7F]/',$description))done26(400,['ok'=>false,'error'=>'Invalid name, symbol, decimals or description']);

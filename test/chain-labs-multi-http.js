@@ -18,6 +18,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const DIR = path.join(__dirname, '..', 'chain-labs');
+const CL = require('./support/chain-labs-operator-client');
 let failures = 0, total = 0;
 const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((ok ? 'PASS ' : 'FAIL ') + text + (!ok && detail !== undefined ? ' :: ' + JSON.stringify(detail).slice(0, 400) : '')); };
 
@@ -38,7 +39,7 @@ const base = 21000 + Math.floor(Math.random() * 12000);
 const nodes = {};
 [A, B, C].forEach((domain, i) => {
   const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-  nodes[domain] = { domain, port: base + i * 3, pair, token: crypto.randomBytes(32).toString('hex'), proc: null, dir: path.join(work, domain) };
+  nodes[domain] = { domain, port: base + i * 3, pair, proc: null, dir: path.join(work, domain) };
 });
 const pem = (k) => Buffer.from(k.export({ type: 'spki', format: 'pem' })).toString('base64');
 
@@ -48,9 +49,10 @@ for (const n of Object.values(nodes)) {
   fs.mkdirSync(root, { recursive: true });
   fs.mkdirSync(priv);
   n.root = root; n.priv = priv;
+  n.operator = CL.install(priv, n.domain);
   for (const f of ['coin26.php', 'spend34.php']) fs.copyFileSync(path.join(DIR, f), path.join(root, f));
   fs.cpSync(path.join(DIR, 'lib'), path.join(root, 'lib'), { recursive: true });
-  fs.writeFileSync(path.join(priv, 'federation20-config.php'), "<?php return ['private_pem_b64' => '" + Buffer.from(n.pair.privateKey.export({ type: 'pkcs8', format: 'pem' })).toString('base64') + "', 'admin_token_hex' => '" + n.token + "'];\n");
+  fs.writeFileSync(path.join(priv, 'federation20-config.php'), "<?php return ['private_pem_b64' => '" + Buffer.from(n.pair.privateKey.export({ type: 'pkcs8', format: 'pem' })).toString('base64') + "'];\n");
   const keys = {}, urls = {};
   for (const o of Object.values(nodes)) if (o.domain !== n.domain) { keys[o.domain] = pem(o.pair.publicKey); urls[o.domain] = 'http://127.0.0.1:' + o.port + '/spend34.php?action=peer'; }
   fs.writeFileSync(path.join(priv, 'chainlabs-peers.json'), JSON.stringify({ keys, urls }));
@@ -113,8 +115,8 @@ function call(n, file, method, query, body) {
 const get = (n, q) => call(n, 'spend34', 'GET', q);
 const { withNonce } = require('./support/holdings-nonce');
 const post = (n, q, body) => call(n, 'spend34', 'POST', q, withNonce(q, body));
-const op = (n, action, body) => post(n, 'action=' + action, { adminToken: n.token, ...body });
-const createCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: n.token, ...extra });
+const op = (n, action, body) => call(n, 'spend34', 'POST', 'action=' + action, CL.sign(n.operator, n.domain, 'spend34/' + action, body));
+const createCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', CL.sign(n.operator, n.domain, 'coin26/create', CL.coinRequest(symbol, extra)));
 const NOW = () => Math.floor(Date.now() / 1000);
 const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
 async function transfer(w, n, coinId, to, amount, over = {}) {
@@ -295,7 +297,7 @@ const levelOk = (v) => typeof v === 'string' && v !== 'none';
     line((await get(a, 'action=head&coin=' + '0'.repeat(32))).status === 404, 'a head for an unknown coin is a 404');
     const cmp = await op(b, 'compare', { coinId: mir.id });
     line(cmp.status === 200 && cmp.json.results[A] === 'equal' && cmp.json.results[C] === 'equal' && cmp.json.state === 'active', 'comparing heads with the other domains finds them level', cmp.json);
-    line((await post(b, 'action=compare', { coinId: mir.id })).status === 403 && (await op(a, 'compare', { coinId: allOf.id })).status === 200, 'comparing needs the operator token');
+    line((await post(b, 'action=compare', { coinId: mir.id })).status === 403 && (await op(a, 'compare', { coinId: allOf.id })).status === 200, 'comparing needs a signed operator request');
     // The authority is restored from a backup made at entry 2 after the partners have seen entries 3 and 4.
     await stop(a);
     const copyDb = (from, to) => { for (const ext of ['', '-wal', '-shm']) { try { fs.rmSync(to + ext, { force: true }); fs.copyFileSync(from + ext, to + ext); } catch (e) {} } };

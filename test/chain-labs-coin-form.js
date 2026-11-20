@@ -17,7 +17,7 @@ const DIR = path.join(__dirname, '..', 'chain-labs');
 let failures = 0, total = 0;
 const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((ok ? 'PASS ' : 'FAIL ') + text + (!ok && detail !== undefined ? ' :: ' + JSON.stringify(detail).slice(0, 300) : '')); };
 
-const TOKEN = crypto.randomBytes(32).toString('hex');
+const CL = require('./support/chain-labs-operator-client');
 const A = 'a.example', B = 'b.example', C = 'c.example';
 
 function site(config, legacy) {
@@ -28,7 +28,7 @@ function site(config, legacy) {
   fs.mkdirSync(priv);
   fs.copyFileSync(path.join(DIR, 'coin26.php'), path.join(root, 'coin26.php'));
   fs.cpSync(path.join(DIR, 'lib'), path.join(root, 'lib'), { recursive: true });
-  fs.writeFileSync(path.join(priv, 'federation20-config.php'), "<?php return ['admin_token_hex' => '" + TOKEN + "'];\n");
+  const operator = CL.install(priv, A);
   fs.writeFileSync(path.join(priv, 'chainlabs-config.json'), JSON.stringify(config));
   fs.writeFileSync(path.join(work, 'prepend.php'), "<?php $_SERVER['HTTPS'] = 'on';\n");
   if (legacy) {
@@ -37,7 +37,7 @@ function site(config, legacy) {
   }
   const port = 21000 + Math.floor(Math.random() * 15000);
   const server = spawn('php', ['-S', '127.0.0.1:' + port, '-t', root, '-d', 'auto_prepend_file=' + path.join(work, 'prepend.php')], { stdio: 'ignore' });
-  return { port, server, work, ready: new Promise((r) => setTimeout(r, 800)) };
+  return { port, server, work, priv, operator, ready: new Promise((r) => setTimeout(r, 800)) };
 }
 function call(s, method, query, body, opts = {}) {
   return new Promise((resolve) => {
@@ -53,8 +53,13 @@ function call(s, method, query, body, opts = {}) {
     req.end();
   });
 }
-const base = (symbol, extra = {}) => ({ name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '1000', initialSupply: '100', description: '', adminToken: TOKEN, ...extra });
-const create = (s, symbol, extra, opts) => call(s, 'POST', 'create', base(symbol, extra), opts);
+// A coin created by a request the operator key signed for the domain the request is sent to.
+const create = (s, symbol, extra, opts = {}) => {
+  const host = opts.host || A;
+  if (host !== A) fs.writeFileSync(path.join(s.priv, 'chainlabs-operators.json'), JSON.stringify({ domain: host, keys: [{ publicKey: s.operator.publicKey }] }));
+  return call(s, 'POST', 'create', CL.sign(s.operator, host, 'coin26/create', CL.coinRequest(symbol, { maxSupply: '1000', initialSupply: '100', ...extra })), opts)
+    .then((r) => { if (host !== A) fs.writeFileSync(path.join(s.priv, 'chainlabs-operators.json'), JSON.stringify({ domain: A, keys: [{ publicKey: s.operator.publicKey }] })); return r; });
+};
 const list = async (s) => (await call(s, 'GET', 'list')).json.coins;
 const hashOf = (g) => crypto.createHash('sha256').update(JSON.stringify(g)).digest('hex');
 
@@ -124,9 +129,9 @@ const hashOf = (g) => crypto.createHash('sha256').update(JSON.stringify(g)).dige
       const r = await create(s, 'BAD' + String.fromCharCode(65 + n++), extra);
       line(r.status === 400 && r.json && r.json.ok === false, 'refused: ' + name, r.json);
     }
-    const wrongToken = await create(s, 'TKN', { adminToken: '0'.repeat(64) });
+    const wrongToken = await call(s, 'POST', 'create', { ...CL.coinRequest('TKN'), adminToken: '0'.repeat(64) });
     const wrongOrigin = await create(s, 'ORG', {}, { origin: 'https://evil.example' });
-    line(wrongToken.status === 403 && wrongOrigin.status === 403, 'a wrong operator token or origin is still refused', [wrongToken.status, wrongOrigin.status]);
+    line(wrongToken.status === 403 && wrongOrigin.status === 403, 'a request carrying a token, or one from a wrong origin, is still refused', [wrongToken.status, wrongOrigin.status]);
     const dup = await create(s, 'DEF', { mode: 'multi', partners: [B] });
     line(dup.status === 409, 'a symbol already registered on the domain is refused', dup.json);
     line((await list(s)).length === 5, 'none of the refused requests stored a coin');

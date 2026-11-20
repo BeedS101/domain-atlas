@@ -56,12 +56,12 @@ const GOOD = { decimals: 2, maxSupply: '100000', initialSupply: '10000' };
   try {
     console.log('== 1. the Studio: policy checked, shown, confirmed');
     const policy = { coinsPerAu: '50', minPrice: 2, perKey: '2000', perDay: '10000', priceClass: GOLD, issuerKey };
-    const body = { name: 'Experimental Gold Coin', symbol: 'EXPC', ...GOOD, description: 'end to end test', adminToken: a.token };
-    const prev = await call(a, 'coin26', 'POST', 'action=preview', { ...body, purchase: policy });
+    const body = { name: 'Experimental Gold Coin', symbol: 'EXPC', ...GOOD, description: 'end to end test' };
+    const prev = await S.signedOp(a, 'coin26/preview', { ...body, purchase: policy });
     line(prev.status === 200 && prev.json.lines.some((t) => /1 EXPC costs 0\.02 Au \(50\.00 EXPC for 1 Au\)/.test(t)) && prev.json.lines.some((t) => /Test issuer/.test(t)), 'the review reads: 1 EXPC costs 0.02 Au, and names the listed issuer', prev.json);
-    const refusedRate = await call(a, 'coin26', 'POST', 'action=create', { ...body, purchase: policy });
+    const refusedRate = await S.signedOp(a, 'coin26/create', { ...body, purchase: policy });
     line(refusedRate.status === 409 && refusedRate.json.code === 'policy-not-confirmed', 'creating without the fingerprint is refused', refusedRate.json);
-    const made = await call(a, 'coin26', 'POST', 'action=create', { ...body, purchase: policy, purchaseDigest: prev.json.digest });
+    const made = await S.signedOp(a, 'coin26/create', { ...body, purchase: policy, purchaseDigest: prev.json.digest });
     line(made.status === 201 && made.json.state === 'registered' && made.json.purchase.unitsPerPrice === 5000, 'the coin is created with the confirmed policy', made.json);
     const coinId = made.json.id;
     line((await scan(a, 'action=coins')).json.coins.length === 0, 'nothing is on a ledger yet');

@@ -2,7 +2,9 @@
 // PHP servers: a registered single authority coin and a multi authority coin that needs a second domain, the way an operator
 // takes them from "registered" to open, with no coin opened twice and no partner skipped.
 //   - the registry lists each coin with where it stands on the ledger, and the scanner has nothing until a coin is opened
-//   - opening needs the operator token; a wrong one opens nothing
+//   - opening needs an operator key chosen from a file in the page; a key that is not on the roster opens nothing, and the private key is
+//     never sent, stored or left in the page
+//   - until 1 March 2027 the legacy token still works
 //   - a single coin opens, once; a second open is refused and no second ledger appears
 //   - a multi coin whose partner is down stays pending, and the same button finishes it when the partner is back
 //   - a grant gives a wallet key a balance that the holdings lookup and the scanner then show
@@ -40,33 +42,49 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     });
     const page = await context.newPage();
     const errors = [];
+    const sent = [];
     page.on('pageerror', (e) => errors.push(e.message));
+    page.on('request', (r) => { if (r.method() === 'POST') sent.push(r.postData() || ''); });
+    const keyFile = (identity) => ({ name: 'operator.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(identity)) });
+    const loadKey = async (identity) => { await page.setInputFiles('#keyFile', keyFile(identity)); await page.waitForFunction(() => /^(Key loaded|Could not use)/.test(document.getElementById('keyState').innerText)); return page.locator('#keyState').innerText(); };
     await page.goto('https://a.example/chain-labs/coin26.html');
     const card = (symbol) => page.locator('.coin', { hasText: '(' + symbol + ')' });
     await card('GOPH').waitFor();
     const msg = () => page.locator('#opMessage').innerText();
+    const grant = async () => { await page.evaluate(() => { document.getElementById('opMessage').textContent = ''; }); await page.getByRole('button', { name: 'Grant from the treasury' }).click(); };
     const settle = async (re) => { await page.waitForFunction((src) => new RegExp(src).test(document.getElementById('opMessage').innerText), re.source, { timeout: 20000 }); return msg(); };
 
     console.log('== before anything is opened');
     line(/Ledger: not open yet/.test(await card('GOPH').innerText()) && /Ledger: not open yet/.test(await card('OSC').innerText()) && /pending partner signatures/.test(await card('OSC').innerText()), 'each coin says it is not open on the ledger', await card('GOPH').innerText());
     line((await card('GOPH').getByRole('button', { name: 'Open on the ledger' }).count()) === 1, 'and has a button to open it');
 
-    console.log('\n== the operator token');
+    console.log('\n== the operator key');
     await card('GOPH').getByRole('button', { name: 'Open on the ledger' }).click();
-    line(/Enter the operator token/.test(await settle(/Could not open/)), 'opening needs the token');
-    await page.locator('#opToken').fill('0'.repeat(64));
+    line(/Load an operator key first/.test(await settle(/Could not open/)), 'opening needs a key');
+    const stranger = S.OP.newIdentity();
+    line(/^Key loaded: [a-f0-9]{16}/.test(await loadKey(stranger)), 'a key file is read in the page and its fingerprint shown');
     await card('GOPH').getByRole('button', { name: 'Open on the ledger' }).click();
-    line(/Incorrect operator token/.test(await settle(/Incorrect/)), 'a wrong token is refused');
-    line((await get(a, 'action=coins')).json.coins.length === 0 && (await page.locator('#opToken').inputValue()) === '', 'and nothing was opened, and the token field is emptied');
+    line(/not an operator key of this domain/.test(await settle(/not an operator key/)), 'a key that is not on the roster is refused');
+    line((await get(a, 'action=coins')).json.coins.length === 0 && (await page.locator('#keyFile').inputValue()) === '', 'nothing was opened, and the file chooser is emptied');
+    await page.getByRole('button', { name: 'Forget the key' }).click();
+    line(/No key loaded/.test(await page.locator('#keyState').innerText()), 'the key can be forgotten');
+    await page.setInputFiles('#keyFile', { name: 'x.json', mimeType: 'application/json', buffer: Buffer.from('{"publicKey":"x"}') });
+    await page.waitForFunction(() => /Could not use/.test(document.getElementById('keyState').innerText));
+    line(true, 'a file that is not a key is refused');
+    const limited = S.OP.newIdentity();
+    S.writeRoster(a, { keys: [{ publicKey: a.operator.publicKey, label: 'root' }, { publicKey: limited.publicKey, label: 'studio only', actions: ['spend34/open', 'spend34/grant', 'coin26/create', 'coin26/preview'] }] });
+    await loadKey(a.operator);
+    await page.getByRole('button', { name: 'Check this key' }).click();
+    await page.waitForFunction(() => /has proved itself/.test(document.getElementById('keyState').innerText));
+    line(/on the roster as root.*Actions: all.*not activated yet/.test(await page.locator('#keyState').innerText()), 'a key can prove itself, and the page says what it may do and whether signed requests are required');
 
     console.log('\n== a single authority coin');
-    await page.locator('#opToken').fill(a.token);
     await card('GOPH').getByRole('button', { name: 'Open on the ledger' }).click();
     const opened = await settle(/GOPH is open on the ledger/);
     line(/Head: entry 0, 1 entry/.test(opened) && /Treasury holds 10000000000 base units/.test(opened), 'it opens, and entry 0 credits the treasury', opened);
     await card('GOPH').getByRole('link', { name: 'View in the scanner' }).waitFor();
     line((await card('GOPH').getByRole('button', { name: /Open on the ledger/ }).count()) === 0 && (await card('GOPH').getByRole('link', { name: 'View in the scanner' }).count()) === 1, 'the button is replaced by a link to the scanner');
-    const again = await post(a, 'action=open', { adminToken: a.token, coinId: goph.id });
+    const again = await S.signedOp(a, 'open', { coinId: goph.id }, { repeat: true });
     line(again.status === 409 && again.json.code === 'already-open', 'opening it again is refused', again.json);
     const sc = (await scan(a, 'action=coins')).json.coins;
     line(sc.length === 1 && sc[0].symbol === 'GOPH' && sc[0].entries === 1 && sc[0].state === 'active', 'the scanner now lists it once, with its genesis entry', sc);
@@ -75,7 +93,6 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
 
     console.log('\n== a multi authority coin whose partner is down');
     await stop(b);
-    await page.locator('#opToken').fill(a.token);
     await card('OSC').getByRole('button', { name: 'Open on the ledger' }).click();
     const down = await settle(/Could not open OSC/);
     line(/did not answer/.test(down), 'the authority cannot open it without the partner, and says why', down);
@@ -84,7 +101,6 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     line((await scan(a, 'action=coins')).json.coins.length === 1, 'and the scanner does not list it');
     await start(b);
     await sleep(500);
-    await page.locator('#opToken').fill(a.token);
     await card('OSC').getByRole('button', { name: 'Finish opening on the ledger' }).click();
     const done = await settle(/OSC is open on the ledger/);
     line(/Every partner domain signed the genesis/.test(done), 'when the partner is back the same button opens it', done);
@@ -96,7 +112,7 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     line(ga.genesisDigest === gb.genesisDigest && ga.head.hash === gb.head.hash && ga.genesis.roster.length === 2 && ga.genesis.threshold === 2, 'both domains hold the same genesis, signed by both');
     const dom = (await scan(a, 'action=domains&coin=' + osc.id)).json;
     line(dom.summary === 'agree', 'and the domains agree', dom.summary);
-    const dup = await post(a, 'action=open', { adminToken: a.token, coinId: osc.id });
+    const dup = await S.signedOp(a, 'open', { coinId: osc.id }, { repeat: true });
     line(dup.status === 409 && dup.json.code === 'already-open', 'it cannot be opened a second time', dup.json);
 
     console.log('\n== a balance a wallet can find');
@@ -104,7 +120,6 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     await page.locator('#grantCoin').selectOption(goph.id);
     await page.locator('#grantTo').fill(w.key);
     await page.locator('#grantAmount').fill('12.5');
-    await page.locator('#opToken').fill(a.token);
     await page.getByRole('button', { name: 'Grant from the treasury' }).click();
     line(/Granted 12\.5 GOPH/.test(await settle(/Granted|Could not grant/)), 'a grant from the treasury is made in the coin\'s own decimals');
     const h = (await post(a, 'action=holdings', { key: w.key })).json;
@@ -114,15 +129,56 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     line(acct.ok && acct.units === '12500000', 'and so does the scanner');
     await page.locator('#grantTo').fill(w.key);
     await page.locator('#grantAmount').fill('0.0000001');
-    await page.locator('#opToken').fill(a.token);
     await page.getByRole('button', { name: 'Grant from the treasury' }).click();
     line(/at most 6 decimals/.test(await settle(/at most 6/)), 'an amount with more decimals than the coin has is refused before it is sent');
     await page.locator('#grantAmount').fill('1');
     await page.locator('#grantTo').fill('not a key');
-    await page.locator('#opToken').fill(a.token);
     await page.getByRole('button', { name: 'Grant from the treasury' }).click();
     line(/Could not grant/.test(await settle(/Could not grant: (?!Enter)/)), 'and a recipient that is not a wallet key is refused by the ledger');
     line((await post(a, 'action=holdings', { key: w.key })).json.statement.coins.find((c) => c.coinId === goph.id).units === '12500000', 'with nothing granted by either');
+    console.log('\n== what the page did with the key');
+    const d = a.operator.privateKeyJwk.d;
+    line(sent.length > 5 && sent.every((b) => !b.includes(d) && !b.includes('privateKeyJwk')), 'no request carried the private key', sent.length);
+    const stored = await page.evaluate(() => JSON.stringify([Object.entries(localStorage), Object.entries(sessionStorage), document.cookie]));
+    line(!stored.includes(d) && stored.length < 40, 'it is in no browser storage and no cookie', stored.slice(0, 80));
+    line(!(await page.content()).includes(d), 'and not in the page');
+    const sigs = sent.map((b) => { try { return JSON.parse(b); } catch (e) { return null; } }).filter((b) => b && b.payload);
+    line(sigs.length > 5 && sigs.every((b) => b.payload.adminAuth.domain === 'a.example' && b.payload.adminAuth.method === 'POST' && [a.operator.publicKey, stranger.publicKey].includes(b.proof.publicKey)), 'every request was signed for this domain and method by a key the page was given', sigs.length);
+
+    console.log('\n== the key is used once when asked');
+    await page.locator('#grantTo').fill(w.key);
+    await page.locator('#grantAmount').fill('1');
+    await page.locator('#keyOnce').check();
+    await grant();
+    const once = await settle(/Granted|Could not grant/);
+    line(/Granted 1 GOPH/.test(once) && /No key loaded/.test(await page.locator('#keyState').innerText()), 'it is forgotten after the action', [once, await page.locator('#keyState').innerText()]);
+    await page.locator('#keyOnce').uncheck();
+    await grant();
+    line(/Load an operator key first/.test(await settle(/Could not grant/)), 'and the next action needs it again');
+    await loadKey(limited);
+    await grant();
+    const dupMsg = await settle(/Could not grant/);
+    line(/duplicate-request/.test(dupMsg), 'an identical grant a moment later is refused as a duplicate, not made twice', dupMsg);
+    await page.locator('#opRepeat').check();
+    await grant();
+    line(/Granted 1 GOPH/.test(await settle(/Granted 1 GOPH/)) && !(await page.locator('#opRepeat').isChecked()), 'it is made when signed to be repeated, and that choice is not kept');
+    await page.getByRole('button', { name: 'Check this key' }).click();
+    await page.waitForFunction(() => /studio only/.test(document.getElementById('keyState').innerText));
+    line(/Actions: spend34\/open, spend34\/grant, coin26\/create, coin26\/preview/.test(await page.locator('#keyState').innerText()), 'a limited key shows its actions');
+
+    console.log('\n== the legacy token, until its date');
+    if (Date.now() < Date.UTC(2027, 2, 1)) {
+      await page.getByRole('button', { name: 'Forget the key' }).click();
+      await page.locator('#legacyBox summary').click();
+      await page.locator('#opToken').fill('0'.repeat(64));
+      await grant();
+      line(/Incorrect operator token/.test(await settle(/Incorrect|Could not grant/)) && (await page.locator('#opToken').inputValue()) === '', 'a wrong token is refused, and the field is emptied');
+      await page.locator('#opToken').fill(a.token);
+      await page.locator('#opRepeat').check();
+      await grant();
+      const legacyMsg = await settle(/Granted 1 GOPH|Could not grant/);
+      line(/Granted 1 GOPH/.test(legacyMsg), 'the right one still works', legacyMsg);
+    }
     line(errors.length === 0, 'the page logged no errors', errors);
   } finally {
     await browser.close();
