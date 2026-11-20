@@ -29,12 +29,18 @@ const { A, B, nodes } = S;
 
     // While set, the receipts a domain gives for a transfer are made not to verify, the way a dishonest domain's would be.
     let breakReceipts = false;
+    // While set, a transfer request is carried out by the domain but its answer never arrives.
+    let dropAnswers = false;
     await w.context.route(/^https:\/\/[abc]\.example\/chain-labs\//, async (route) => {
       const u = new URL(route.request().url());
       const n = nodes[u.hostname];
       const headers = { ...route.request().headers(), host: u.hostname };
       try {
         const res = await route.fetch({ url: 'http://127.0.0.1:' + n.port + u.pathname.replace(/^\/chain-labs/, '') + u.search, headers });
+        if (dropAnswers && /action=propose/.test(u.search)) {
+          await route.abort('timedout');
+          return;
+        }
         if (breakReceipts && /action=(propose|proposal)/.test(u.search)) {
           const j = await res.json();
           const r = j.receipt || (j.proposal && j.proposal.receipt);
@@ -132,12 +138,27 @@ const { A, B, nodes } = S;
     check('a transfer whose receipt does not verify is shown as unconfirmed, with the reason, and is not called failed', /receipt could not be verified \(/.test(await section()) && /will not send it again/.test(await section()) && /unconfirmed/i.test(await text('#chainLabsStatus')));
     const listed = await page.locator('.chain-labs-pending').count();
     await page.getByRole('button', { name: 'Check now' }).click();
-    await waitFor(/Unconfirmed at a\.example/);
+    await page.waitForFunction(() => /^A transfer is unconfirmed/.test(document.getElementById('chainLabsStatus').textContent), null, { timeout: 15000 });
     check('asking again while the receipt still fails keeps it listed and says it is unconfirmed', (await page.locator('.chain-labs-pending').count()) === listed && /unconfirmed/i.test(await text('#chainLabsStatus')));
     breakReceipts = false;
     await page.getByRole('button', { name: 'Check now' }).click();
     await page.waitForFunction(() => !/Unconfirmed at a\.example/.test(document.getElementById('chainLabsSection').innerText), null, { timeout: 15000 });
-    check('and a receipt that verifies later settles it', (await page.locator('.chain-labs-pending').count()) === listed - 1 && /A waiting transfer was made/.test(await text('#chainLabsStatus')));
+    // A background refresh may settle it before Check now does; either way the transfer ends as made.
+    check('and a receipt that verifies later settles it', (await page.locator('.chain-labs-pending').count()) === listed - 1 && !/Unconfirmed at a\.example/.test(await section()));
+    // A transfer whose answer never arrives: the domain made it, the wallet keeps it as unknown and shows that.
+    dropAnswers = true;
+    await page.locator('.chain-labs-coin', { hasText: 'SGL' }).getByRole('button', { name: 'Send…' }).click();
+    await page.fill('#chainLabsSendTo', bob.key);
+    await page.fill('#chainLabsSendAmount', '1.5');
+    await page.getByRole('button', { name: 'Check…' }).click();
+    await waitFor(/Send 1\.5 SGL to key/);
+    await page.getByRole('button', { name: 'Sign and send' }).click();
+    await waitFor(/Outcome unknown at a\.example: sending 1\.5 SGL/);
+    check('a transfer that gets no answer is shown as unknown, kept, and not called failed or sent', /may or may not have been made/.test(await section()) && /will not send it again/.test(await section()) && /may or may not have been made/.test(await text('#chainLabsStatus')));
+    dropAnswers = false;
+    await page.getByRole('button', { name: 'Check now' }).click();
+    await page.waitForFunction(() => !/Outcome unknown at a\.example/.test(document.getElementById('chainLabsSection').innerText), null, { timeout: 15000 });
+    check('and the domain\'s answer about it settles it', (await page.locator('.chain-labs-pending').count()) === listed - 1);
 
     console.log('--- buying with Gold ---');
     const sglCoin = page.locator('.chain-labs-coin', { hasText: 'SGL' }), prvCoin = page.locator('.chain-labs-coin', { hasText: 'PRV' });
@@ -160,7 +181,7 @@ const { A, B, nodes } = S;
     await waitFor(/Pay 20 Gold to get 2 SGL from a\.example/);
     check('the purchase is described: what is paid, what is received and that the Gold credential is sent', /sends the Gold credential to the domain/.test(await section()));
     await page.getByRole('button', { name: 'Sign and buy' }).click();
-    await waitFor(/a\.example says you hold 38\.5 SGL/);
+    await waitFor(/a\.example says you hold 37 SGL/);
     check('approving delivers the coin and the tab shows it', /Bought\. The domain delivered the coin/.test(await text('#chainLabsStatus')));
 
     console.log('--- a frozen coin and the page structure ---');
@@ -174,7 +195,7 @@ const { A, B, nodes } = S;
     await waitFor(/It is frozen: the domains disagree/);
     check('a coin the domain calls frozen says so and offers neither Send nor Buy', (await page.locator('.chain-labs-coin', { hasText: 'SGL' }).getByRole('button').count()) === 0 && (await page.locator('.chain-labs-coin', { hasText: 'PRV' }).getByRole('button').count()) === 1);
     await page.evaluate(() => { AtlasWallet.getChainLabs().rows = window.__realRows; return AtlasChainLabsTab.render(); });
-    await waitFor(/a\.example says you hold 38\.5 SGL, as of/);
+    await waitFor(/a\.example says you hold 37 SGL, as of/);
     await page.evaluate(() => {
       const chain = AtlasWallet.getChainLabs();
       const rows = chain.rows.bind(chain);
@@ -204,7 +225,7 @@ const { A, B, nodes } = S;
     const accepted = await page.evaluate(() => window.__accepted[0]);
     check('only the button in the confirmation accepts, and it repeats exactly the state that was shown', accepted[1].length === 32 && accepted[2].index === 1 && accepted[2].hash === 'b'.repeat(64), accepted);
     await page.evaluate(() => { AtlasWallet.getChainLabs().rows = window.__realRows; return AtlasChainLabsTab.render(); });
-    await waitFor(/a\.example says you hold 38\.5 SGL, as of/);
+    await waitFor(/a\.example says you hold 37 SGL, as of/);
     check('the section is a labelled group for screen readers', await page.evaluate(() => { const s = document.getElementById('chainLabsSection'); const h = document.getElementById(s.getAttribute('aria-labelledby')); return !!h && /Chain labs coins/.test(h.textContent); }));
 
     console.log('--- what the signer will sign ---');
@@ -227,7 +248,7 @@ const { A, B, nodes } = S;
     await page.getByRole('button', { name: 'Ask all domains again' }).click();
     await waitFor(/The domain did not answer/);
     const down = await section();
-    check('the domain that is down says so, keeps its last answer, and the other is unaffected', /The domain did not answer\. Showing its last answer/.test(down) && /a\.example says you hold 38\.5 SGL/.test(down) && /b\.example/.test(down));
+    check('the domain that is down says so, keeps its last answer, and the other is unaffected', /The domain did not answer\. Showing its last answer/.test(down) && /a\.example says you hold 37 SGL/.test(down) && /b\.example/.test(down));
     await S.start(nodes[A]);
 
     console.log('--- reopening ---');

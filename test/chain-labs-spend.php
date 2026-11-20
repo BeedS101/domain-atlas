@@ -244,18 +244,18 @@ $request = function (string $challenge, array $signer, array $over = []) use ($h
     $payload = array_merge(['type' => 'atlas.ledger.holdings.request', 'v' => 1, 'domain' => $domain, 'key' => $h['key'], 'challenge' => $challenge], $over);
     return ['payload' => $payload, 'signature' => ledger_owner_sign($signer['priv'], $payload)];
 };
-$ch = spend_challenge_issue($hdb, $NOW);
+$ch = spend_challenge_issue($dom['priv'], $domain, $NOW);
 $signed = spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ch['challenge'], $h), $NOW);
 $sc = array_column($signed['statement']['coins'], 'units', 'symbol');
 t($signed['statement']['proven'] === true && $sc === ['PUB' => '4000', 'SEC' => '4200'] && spend_verify_holdings($signed, $dom['pub'], $domain, $h['key'], $NOW), 'a key-signed request also lists the private coin', $signed['statement']);
 t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ch['challenge'], $h), $NOW), 'bad-challenge'), 'a challenge cannot be used twice');
-$ch = spend_challenge_issue($hdb, $NOW);
+$ch = spend_challenge_issue($dom['priv'], $domain, $NOW);
 t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ch['challenge'], $other), $NOW), 'bad-signature'), "a request signed by another key is refused, not answered as a plain lookup");
 t(spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ch['challenge'], $h), $NOW)['statement']['proven'] === true, 'a refused request does not use up the challenge');
-$ch = spend_challenge_issue($hdb, $NOW);
+$ch = spend_challenge_issue($dom['priv'], $domain, $NOW);
 t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ch['challenge'], $h), $NOW + SPEND_CHALLENGE_SECONDS + 1), 'bad-challenge'), 'an expired challenge is refused');
 t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request(bin2hex(random_bytes(16)), $h), $NOW), 'bad-challenge'), 'a challenge the domain never issued is refused');
-$ch = spend_challenge_issue($hdb, $NOW);
+$ch = spend_challenge_issue($dom['priv'], $domain, $NOW);
 $cases = [
     'a request for another domain' => ['domain' => 'b.example'], 'a request about another key' => ['key' => $other['key']],
     'the wrong type' => ['type' => 'atlas.ledger.transfer'], 'the wrong version' => ['v' => 2],
@@ -277,10 +277,57 @@ t(!spend_verify_holdings($ok, $dom['pub'], 'b.example', $h['key'], $NOW), 'or on
 t(!spend_verify_holdings($ok, $dom['pub'], $domain, $other['key'], $NOW), 'or another key');
 t(!spend_verify_holdings($ok, $dom['pub'], $domain, $h['key'], $NOW + 301) && spend_verify_holdings($ok, $dom['pub'], $domain, $h['key'], $NOW + 300), 'or one older than the allowed age');
 t(!spend_verify_holdings($ok, $dom['pub'], $domain, $h['key'], $NOW - 500), 'or one dated in the future');
+// Challenges: issuing reads and writes no database, so asking can be done without limit; redeeming needs a request a key signed.
 $hdb->prepare('DELETE FROM ledger_challenges')->execute();
-$hdb->exec("INSERT INTO ledger_challenges(challenge,expires_at,used) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<" . SPEND_MAX_OPEN_CHALLENGES . ") SELECT printf('%032x', i), " . ($NOW + 1000) . ", 0 FROM n");
-t(refuses(fn() => spend_challenge_issue($hdb, $NOW), 'busy'), 'challenges are capped while many are open');
-t(spend_challenge_issue($hdb, $NOW + 2000)['challenge'] !== '', 'and expired ones are cleared so issuing works again');
+$issued = [];
+for ($i = 0; $i < 12000; $i++) $issued[] = spend_challenge_issue($dom['priv'], $domain, $NOW)['challenge'];
+t((int) $hdb->query('SELECT COUNT(*) FROM ledger_challenges')->fetchColumn() === 0, 'issuing 12000 challenges writes nothing to the database');
+t(count(array_unique($issued)) === 12000 && !array_filter($issued, fn($c) => !preg_match('/^[a-f0-9]{32}$/D', $c)), 'each is a distinct 32 character challenge');
+$after = spend_challenge_issue($dom['priv'], $domain, $NOW);
+t(spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($after['challenge'], $h), $NOW)['statement']['proven'] === true, 'a wallet is served after any number were issued');
+t($after['expiresAt'] === gmdate('Y-m-d\TH:i:s\Z', $NOW + SPEND_CHALLENGE_SECONDS), 'the answer states when the challenge expires');
+$edge = spend_challenge_issue($dom['priv'], $domain, $NOW)['challenge'];
+t(spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($edge, $h), $NOW + SPEND_CHALLENGE_SECONDS)['statement']['proven'] === true, 'a challenge is accepted up to the second its lifetime ends');
+$late = spend_challenge_issue($dom['priv'], $domain, $NOW)['challenge'];
+t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($late, $h), $NOW + SPEND_CHALLENGE_SECONDS + 1), 'bad-challenge'), 'and refused after it');
+t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($late, $h), $NOW + SPEND_CHALLENGE_SECONDS + 1), 'bad-challenge') && (int) $hdb->query("SELECT COUNT(*) FROM ledger_challenges WHERE challenge='" . $late . "'")->fetchColumn() === 0, 'an expired challenge is not recorded either');
+$ahead = spend_challenge_issue($dom['priv'], $domain, $NOW + 60)['challenge'];
+t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($ahead, $h), $NOW), 'bad-challenge'), 'a challenge dated ahead of the clock is refused');
+$soon = spend_challenge_issue($dom['priv'], $domain, $NOW + SPEND_CHALLENGE_FUTURE_SECONDS)['challenge'];
+t(spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($soon, $h), $NOW)['statement']['proven'] === true, 'a few seconds of clock difference are allowed');
+$real = spend_challenge_issue($dom['priv'], $domain, $NOW)['challenge'];
+$changed = [];
+for ($i = 0; $i < 32; $i++) { $c = $real; $c[$i] = $c[$i] === '0' ? '1' : '0'; $changed[] = $c; }
+$taken = 0;
+foreach ($changed as $c) { try { spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($c, $h), $NOW); $taken++; } catch (LedgerError $e) { if ($e->reason !== 'bad-challenge') $taken++; } }
+t($taken === 0, 'a challenge with any one digit changed is refused: the time, the random part and the MAC are all covered');
+$guess = 0;
+for ($i = 0; $i < 300; $i++) { try { spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request(bin2hex(pack('N', $NOW) . random_bytes(12)), $h), $NOW); $guess++; } catch (LedgerError $e) { if ($e->reason !== 'bad-challenge') $guess++; } }
+t($guess === 0 && (int) $hdb->query("SELECT COUNT(*) FROM ledger_challenges WHERE challenge NOT IN ('" . implode("','", [$after['challenge'], $edge, $soon]) . "')")->fetchColumn() === 0, 'made-up challenges with a plausible time are refused and recorded nowhere');
+t(spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($real, $h), $NOW)['statement']['proven'] === true, 'the genuine challenge is untouched by those refusals');
+$otherDomain = spend_challenge_issue($dom['priv'], 'b.example', $NOW)['challenge'];
+t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($otherDomain, $h), $NOW), 'bad-challenge'), 'a challenge another domain issued is refused');
+$otherKey = spend_challenge_issue(domain_pair()['priv'], $domain, $NOW)['challenge'];
+t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($otherKey, $h), $NOW), 'bad-challenge'), 'and one made with another key');
+$twice = spend_challenge_issue($dom['priv'], $domain, $NOW)['challenge'];
+spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($twice, $h), $NOW);
+t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $h['key'], $request($twice, $h), $NOW + 30), 'bad-challenge'), 'a redeemed challenge is refused when used again');
+t(refuses(fn() => spend_holdings($hdb, $domain, $dom['priv'], $other['key'], $request($twice, $other, ['key' => $other['key']]), $NOW + 30), 'bad-challenge'), 'even by another key');
+// Two connections to the same database redeeming one challenge: exactly one wins.
+$file = sys_get_temp_dir() . '/spend-challenge-' . bin2hex(random_bytes(4)) . '.sqlite';
+$left = ledger_open($file);
+$right = ledger_open($file);
+$race = spend_challenge_issue($dom['priv'], $domain, $NOW)['challenge'];
+$won = 0; $lost = 0;
+foreach ([$left, $right, $left, $right, $right, $left] as $conn) { try { spend_challenge_consume($conn, $dom['priv'], $domain, $race, $NOW); $won++; } catch (LedgerError $e) { $lost += $e->reason === 'bad-challenge' ? 1 : 0; } }
+t($won === 1 && $lost === 5, 'one challenge redeemed over several connections is accepted once', [$won, $lost]);
+// What is recorded is dropped when the challenge could no longer be accepted.
+for ($i = 0; $i < 50; $i++) spend_challenge_consume($left, $dom['priv'], $domain, spend_challenge_issue($dom['priv'], $domain, $NOW)['challenge'], $NOW);
+t((int) $left->query('SELECT COUNT(*) FROM ledger_challenges')->fetchColumn() === 51, 'redeemed challenges are recorded');
+spend_challenge_consume($left, $dom['priv'], $domain, spend_challenge_issue($dom['priv'], $domain, $NOW + 1000)['challenge'], $NOW + 1000);
+t((int) $left->query('SELECT COUNT(*) FROM ledger_challenges')->fetchColumn() === 1, 'and dropped once they have expired, so nothing accumulates after a burst');
+$left = $right = null;
+@unlink($file);
 $direct = [];
 $port = random_int(20000, 40000);
 $server = proc_open([PHP_BINARY, '-S', '127.0.0.1:' . $port, '-t', __DIR__ . '/../chain-labs'], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $sp);

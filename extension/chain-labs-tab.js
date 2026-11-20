@@ -171,7 +171,7 @@
         const prepared = p.prepared;
         panel = null;
         const r = await chain().send(prepared);
-        notice = r.status === 'done' ? 'Sent. The domain\'s receipt matches what you signed.' : 'The domain is waiting for the other domains to approve. The wallet keeps this transfer and will check on it.';
+        notice = r.status === 'done' ? 'Sent. The domain\'s receipt matches what you signed.' : r.status === 'unknown' ? 'The domain did not answer, so the transfer may or may not have been made. The wallet keeps it as unknown, will not send it again, and checks on it with Check now.' : 'The domain is waiting for the other domains to approve. The wallet keeps this transfer and will check on it.';
       })));
       actions.appendChild(cancel());
       box.appendChild(actions);
@@ -232,13 +232,15 @@
     view.pendingSends.forEach((p) => {
       const card = el('div', { className: 'info-card chain-labs-pending' });
       const sum = (AtlasChainLabs.formatUnits(p.amount, p.decimals) || p.amount) + ' ' + p.symbol;
-      card.appendChild(el('div', { textContent: p.state === 'unconfirmed'
+      card.appendChild(el('div', { textContent: p.state === 'unknown'
+        ? 'Outcome unknown at ' + p.domain + ': sending ' + sum + '. The domain did not answer, so this transfer may or may not have been made. The wallet keeps it, has not counted it as made or as failed, and will not send it again. Check now asks the domain about this transfer.'
+        : p.state === 'unconfirmed'
         ? 'Unconfirmed at ' + p.domain + ': sending ' + sum + '. The domain says it made this transfer, but its receipt could not be verified' + (p.reason ? ' (' + p.reason + ')' : '') + '. The wallet has not counted it as made or as failed, and will not send it again. Check now asks again, and for a public coin asks the coin\'s other domains too.'
         : 'Waiting at ' + p.domain + ': sending ' + sum + '.' }));
       const actions = el('div', { className: 'item-actions' });
       actions.appendChild(button('Check now', () => act(async () => {
         const done = await chain().checkPending();
-        notice = done.length ? done.map((x) => (x.outcome === 'done' ? 'A waiting transfer was made' + (x.confirmedBy ? ' (confirmed through ' + x.confirmedBy + ')' : '') + '.' : x.outcome === 'unconfirmed' ? 'A transfer is unconfirmed: the domain says it was made, but its receipt could not be verified' + (x.reason ? ' (' + x.reason + ')' : '') + '. It is kept, not counted as made or failed, and not sent again.' : x.outcome === 'waiting' ? 'Still waiting.' : 'A waiting transfer ended: ' + x.outcome + '.')).join(' ') : 'Still waiting.';
+        notice = done.length ? done.map((x) => (x.outcome === 'done' ? 'A waiting transfer was made' + (x.confirmedBy ? ' (confirmed through ' + x.confirmedBy + ')' : '') + '.' : x.outcome === 'unconfirmed' ? 'A transfer is unconfirmed: the domain says it was made, but its receipt could not be verified' + (x.reason ? ' (' + x.reason + ')' : '') + '. It is kept, not counted as made or failed, and not sent again.' : x.outcome === 'waiting' ? 'Still waiting.' : x.outcome === 'unknown' ? 'Still unknown' + (x.reason ? ': ' + x.reason : '') + '. The transfer is kept and not sent again.' : x.outcome === 'not-made' ? 'A transfer the domain never received has lapsed and was not made.' : 'A waiting transfer ended: ' + x.outcome + '.')).join(' ') : 'Still waiting.';
       })));
       card.appendChild(actions);
       wrap.appendChild(card);

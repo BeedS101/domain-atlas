@@ -160,7 +160,7 @@ try {
     }
     if ($method !== 'POST') reply34(404, ['ok' => false, 'error' => 'Unknown action']);
 
-    if ($action === 'challenge') reply34(200, ['ok' => true] + spend_challenge_issue($db, $now));
+    if ($action === 'challenge') reply34(200, ['ok' => true] + spend_challenge_issue($domainPrivate, $host, $now));
     if ($action === 'holdings') {
         $m = body34();
         $request = $m['request'] ?? null;

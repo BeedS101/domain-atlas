@@ -7,7 +7,8 @@ if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVE
 require_once __DIR__ . '/ledger.php';
 
 const SPEND_CHALLENGE_SECONDS = 120;
-const SPEND_MAX_OPEN_CHALLENGES = 5000;
+const SPEND_CHALLENGE_FUTURE_SECONDS = 5;
+const SPEND_CHALLENGE_KEEP_SECONDS = 10;
 const SPEND_HOLDINGS_MAX_COINS = 50;
 
 // The digest that names a proposal: the canonical payload the owner signed.
@@ -171,21 +172,43 @@ function spend_verify_receipt(array $receipt, string $authorityPublicPem, ?strin
 
 // ---------- the holdings lookup ----------
 
-// A fresh single-use challenge for a request that asks for private coins.
-function spend_challenge_issue(PDO $db, int $now): array
+// A challenge for a request that asks for private coins. It is 16 bytes written as 32 hex characters: the second it was issued
+// in (4 bytes), a random part (5 bytes) and a MAC over both and the domain (7 bytes) under a key derived from the domain's private
+// key. Issuing one reads no database and writes nothing, so asking for challenges, which anyone can do, cannot fill anything.
+// A challenge is single use because redeeming it, which takes a request signed by a wallet key, records it.
+function spend_challenge_mac(string $domainPrivatePem, string $domain, string $issued, string $random): string
 {
-    $db->prepare('DELETE FROM ledger_challenges WHERE expires_at < ?')->execute([$now]);
-    if ((int) $db->query('SELECT COUNT(*) FROM ledger_challenges')->fetchColumn() >= SPEND_MAX_OPEN_CHALLENGES) ledger_fail('busy', 'too many open challenges');
-    $challenge = bin2hex(random_bytes(16));
-    $db->prepare('INSERT INTO ledger_challenges(challenge,expires_at,used) VALUES(?,?,0)')->execute([$challenge, $now + SPEND_CHALLENGE_SECONDS]);
-    return ['challenge' => $challenge, 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $now + SPEND_CHALLENGE_SECONDS)];
+    $key = hash_hmac('sha256', 'atlas.ledger.challenge.key.v1', $domainPrivatePem, true);
+    return substr(hash_hmac('sha256', "atlas.ledger.challenge.v1\n" . $domain . "\n" . $issued . $random, $key, true), 0, 7);
 }
 
-function spend_challenge_consume(PDO $db, string $challenge, int $now): void
+function spend_challenge_issue(string $domainPrivatePem, string $domain, int $now): array
 {
-    $used = $db->prepare('UPDATE ledger_challenges SET used=1 WHERE challenge=? AND used=0 AND expires_at >= ?');
-    $used->execute([$challenge, $now]);
-    if ($used->rowCount() !== 1) ledger_fail('bad-challenge', 'the challenge is unknown, used or expired');
+    $issued = pack('N', $now);
+    $random = random_bytes(5);
+    return ['challenge' => bin2hex($issued . $random . spend_challenge_mac($domainPrivatePem, $domain, $issued, $random)),
+        'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $now + SPEND_CHALLENGE_SECONDS)];
+}
+
+// The challenge is one this domain issued, is not older than its lifetime and is not dated ahead of the clock; then it is recorded
+// as used, and a second use is refused. Only a challenge that passes the MAC is ever recorded, and records are dropped once the
+// challenge could no longer be accepted.
+function spend_challenge_consume(PDO $db, string $domainPrivatePem, string $domain, string $challenge, int $now): void
+{
+    $raw = preg_match('/^[a-f0-9]{32}$/D', $challenge) ? hex2bin($challenge) : false;
+    if ($raw === false) ledger_fail('bad-challenge', 'the challenge is malformed');
+    $issued = substr($raw, 0, 4);
+    $random = substr($raw, 4, 5);
+    if (!hash_equals(spend_challenge_mac($domainPrivatePem, $domain, $issued, $random), substr($raw, 9))) ledger_fail('bad-challenge', 'the challenge is unknown, used or expired');
+    $at = (int) unpack('N', $issued)[1];
+    if ($now > $at + SPEND_CHALLENGE_SECONDS || $at > $now + SPEND_CHALLENGE_FUTURE_SECONDS) ledger_fail('bad-challenge', 'the challenge is unknown, used or expired');
+    $db->prepare('DELETE FROM ledger_challenges WHERE expires_at < ?')->execute([$now - SPEND_CHALLENGE_KEEP_SECONDS]);
+    try {
+        $db->prepare('INSERT INTO ledger_challenges(challenge,expires_at,used) VALUES(?,?,1)')->execute([$challenge, $at + SPEND_CHALLENGE_SECONDS]);
+    } catch (PDOException $e) {
+        if (!str_contains($e->getMessage(), 'UNIQUE')) throw $e;
+        ledger_fail('bad-challenge', 'the challenge is unknown, used or expired');
+    }
 }
 
 // $request is null for a plain lookup, which sees public coins only, or the owner's signed request
@@ -204,7 +227,7 @@ function spend_holdings(PDO $db, string $domain, string $domainPrivatePem, strin
         if ($payload['type'] !== 'atlas.ledger.holdings.request' || $payload['v'] !== 1 || $payload['domain'] !== $domain || $payload['key'] !== $key) ledger_fail('bad-request', 'the request is not for this domain and key');
         if (!is_string($payload['challenge']) || !preg_match('/^[a-f0-9]{32}$/D', $payload['challenge'])) ledger_fail('bad-challenge', 'the challenge is malformed');
         if (!ledger_owner_verify(ledger_canonical($payload), $key, $request['signature'] ?? null)) ledger_fail('bad-signature', 'the request signature does not verify');
-        spend_challenge_consume($db, $payload['challenge'], $now);
+        spend_challenge_consume($db, $domainPrivatePem, $domain, $payload['challenge'], $now);
         $proven = true;
     }
     $coins = [];

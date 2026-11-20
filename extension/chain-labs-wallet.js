@@ -733,9 +733,16 @@
     // verified: it stays, with the signed authorization and the digest that names it, and is marked `unconfirmed` when the receipt failed or left
     // waiting when the receipt could only not be checked yet. Nothing here sends a transfer again.
     const UNCONFIRMED_NOTE = 'The wallet has not counted it as made or as failed, and will not send it again.';
+    // A transfer is kept, signed and named by its digest, before it leaves the wallet, as `unknown`: the request may be lost on the way
+    // or its answer may never arrive, and the domain may have made the transfer either way. It is settled only by the domain's own answer
+    // about that digest, or, once the authorization has lapsed, by the signed holdings showing the sender's account where it was.
+    const UNKNOWN_NOTE = 'The domain did not answer, so the transfer may or may not have been made. The wallet keeps it and will not send it again.';
+    const UNSEEN_SETTLE_MS = 600000;
+    const MAX_UNRESOLVED = 50;
+    const isUnresolved = (p) => p.state === 'unconfirmed' || p.state === 'unknown';
     function capPending(list) {
-      const keep = list.filter((p) => p.state === 'unconfirmed');
-      const rest = list.filter((p) => p.state !== 'unconfirmed').slice(-MAX_PENDING);
+      const keep = list.filter(isUnresolved);
+      const rest = list.filter((p) => !isUnresolved(p)).slice(-MAX_PENDING);
       return list.filter((p) => keep.includes(p) || rest.includes(p));
     }
     function pendingSendOf(record, prepared, authorization, digest, extra) {
@@ -746,6 +753,10 @@
         const held = c.pendingSends.find((p) => p.digest === item.digest);
         c.pendingSends = capPending(c.pendingSends.filter((p) => p.digest !== item.digest).concat([held ? Object.assign({}, held, item, { createdAt: held.createdAt }) : item]));
       }, ownerKey);
+    }
+
+    function dropPendingSend(digest, ownerKey) {
+      return mutateCache((c) => { c.pendingSends = c.pendingSends.filter((p) => p.digest !== digest); }, ownerKey);
     }
 
     function receiptMatches(receipt, expect) {
@@ -798,13 +809,16 @@
     // Signs and sends a prepared transfer to the domain. A stale base is made again once.
     async function send(prepared) {
       const record = await recordFor(prepared.domain);
+      if ((await cache()).pendingSends.filter(isUnresolved).length >= MAX_UNRESOLVED) throw Object.assign(new Error('Too many transfers are still unresolved. Check them before sending another.'), { code: 'too-many-unresolved' });
       for (let attempt = 0; attempt < 2; attempt++) {
         const authorization = await signTransfer(record, prepared);
+        const digest = await sha256Hex(canonical(authorization.payload));
+        // The signed transfer is kept before it leaves the wallet. A request that gets no answer may still have been received and made.
+        await keepPendingSend(pendingSendOf(record, prepared, authorization, digest, { state: 'unknown', since: nowMs() }), prepared.from);
         const r = await request(record.domain, 'POST', 'action=propose', { authorization });
         const j = r.json || {};
         if (r.status === 201) {
           // The domain says the transfer was made. Whatever its receipt turns out to be, the wallet keeps the transfer until it has an outcome it can verify.
-          const digest = await sha256Hex(canonical(authorization.payload));
           try {
             if (!j.ok) throw unverified('the answer has no receipt');
             await acceptReceipt(record, prepared.coinId, j.receipt, { coinId: prepared.coinId, to: prepared.to, amount: prepared.amount, from: prepared.from, private: prepared.private });
@@ -812,22 +826,30 @@
             if (!err || err.code !== 'bad-receipt') throw err;
             const reason = String(err.reason || '').slice(0, 200);
             if (err.unchecked) {
-              await keepPendingSend(pendingSendOf(record, prepared, authorization, digest, { note: 'The domain says the transfer was made, but its receipt could not be checked yet.' }), prepared.from);
+              await keepPendingSend(pendingSendOf(record, prepared, authorization, digest, { state: 'waiting', note: 'The domain says the transfer was made, but its receipt could not be checked yet.' }), prepared.from);
               return { status: 'waiting', digest, note: 'The domain says the transfer was made, but the wallet could not check its receipt yet (' + reason + '). It keeps the transfer and checks again.' };
             }
             await keepPendingSend(pendingSendOf(record, prepared, authorization, digest, { state: 'unconfirmed', reason, since: nowMs() }), prepared.from);
             throw Object.assign(new Error('The domain says the transfer was made, but its receipt could not be verified (' + reason + '), so the outcome is unconfirmed. ' + UNCONFIRMED_NOTE), { code: 'bad-receipt', reason, unconfirmed: true, digest });
           }
+          await dropPendingSend(digest, prepared.from);
           await lookup(record.domain).catch(() => null);
           return { status: 'done', receipt: j.receipt };
         }
         if (r.status === 202 && j.proposal && HASH_RE.test(j.proposal.digest || '')) {
-          await keepPendingSend(pendingSendOf(record, prepared, authorization, j.proposal.digest), prepared.from);
-          return { status: 'waiting', digest: j.proposal.digest, note: j.note || '' };
+          await keepPendingSend(pendingSendOf(record, prepared, authorization, digest, { state: 'waiting', note: j.note || '' }), prepared.from);
+          return { status: 'waiting', digest, note: j.note || '' };
         }
+        // Only an answer that refuses the transfer says it was not made. No answer, or one that is not the domain's refusal, leaves it unknown.
+        if (!(r.status >= 400 && r.status < 500 && j.ok === false)) {
+          await keepPendingSend(pendingSendOf(record, prepared, authorization, digest, { state: 'unknown', note: UNKNOWN_NOTE }), prepared.from);
+          return { status: 'unknown', digest, note: UNKNOWN_NOTE };
+        }
+        await dropPendingSend(digest, prepared.from);
+        // A refused transfer that the domain says is stale was not made; the next one is signed on the account as it is now.
         if (r.status === 409 && j.code === 'stale' && attempt === 0) continue;
         if (r.status === 409 && j.code === 'not-authority') throw Object.assign(new Error('This coin is spent through ' + (typeof j.authority === 'string' ? j.authority : 'its authority domain') + '. Add that domain to your list and send from there.'), { code: 'not-authority' });
-        throw Object.assign(new Error(r.status === 0 ? PROBLEMS.network : SEND_PROBLEMS[j.code] || 'The domain did not accept the transfer.'), { code: r.status === 0 ? 'network' : j.code || 'refused' });
+        throw Object.assign(new Error(SEND_PROBLEMS[j.code] || 'The domain did not accept the transfer.'), { code: j.code || 'refused' });
       }
       throw Object.assign(new Error(SEND_PROBLEMS.stale), { code: 'stale' });
     }
@@ -855,6 +877,23 @@
       return null;
     }
 
+    // A transfer the domain says it has no record of. It was not made when the authorization has lapsed (a transfer that arrives after its
+    // expiry is refused, with room for a domain's clock to differ) and the signed holdings show the sender's account where it stood when
+    // the transfer was signed. Before that, or when the account has moved, nothing says whether the request was received.
+    async function settleUnseen(p) {
+      const payload = p.authorization && isObject(p.authorization.payload) ? p.authorization.payload : null;
+      const expires = payload ? Date.parse(payload.expiresAt) : NaN;
+      if (!payload || !Number.isFinite(expires) || !Number.isInteger(payload.baseSeq)) return { made: null, reason: 'the signed transfer cannot be read' };
+      if (nowMs() < expires + UNSEEN_SETTLE_MS) return { made: null, reason: 'the domain has no record of it yet, and it could still arrive' };
+      try {
+        const { coin } = await freshCoin(await recordFor(p.domain), p.coinId);
+        if (coin.seq === payload.baseSeq) return { made: false };
+        return { made: null, reason: 'the account has moved since, so the wallet cannot tell whether this transfer was made' };
+      } catch (err) {
+        return { made: null, reason: 'the signed holdings could not be read' };
+      }
+    }
+
     // Asks the domain how each waiting transfer ended. An executed transfer is done only with a receipt that verifies, from its own domain or, for
     // a public coin, from another domain of the roster. A receipt that fails leaves the transfer `unconfirmed` and reported; one that cannot be
     // checked yet leaves it waiting. A transfer is removed only when a verified receipt settles it, or when the domain says it expired or was
@@ -876,7 +915,7 @@
             continue;
           } catch (err) {
             if (!err || err.code !== 'bad-receipt') continue;
-            if (err.unchecked) { report.push(Object.assign({}, p, { outcome: p.state === 'unconfirmed' ? 'unconfirmed' : 'waiting', reason: String(err.reason || '').slice(0, 200) })); continue; }
+            if (err.unchecked) { report.push(Object.assign({}, p, { outcome: p.state === 'unconfirmed' || p.state === 'unknown' ? p.state : 'waiting', reason: String(err.reason || '').slice(0, 200) })); continue; }
             const reason = String(err.reason || '').slice(0, 200);
             const index = Number.isInteger(proposal.index) ? proposal.index : null;
             const spot = p.domain + '/' + p.coinId + '/' + index;
@@ -891,6 +930,17 @@
         } else if (r.status === 200 && proposal && (proposal.status === 'expired' || proposal.status === 'rejected') && p.state !== 'unconfirmed') {
           settled.push(p.digest);
           report.push(Object.assign({}, p, { outcome: proposal.status }));
+        } else if (p.state === 'unknown') {
+          if (r.status === 200 && proposal && proposal.status === 'pending') {
+            // The domain holds it, waiting for approvals: it is an ordinary waiting transfer from here on.
+            marked.set(p.digest, { state: 'waiting', note: '' });
+            report.push(Object.assign({}, p, { outcome: 'waiting' }));
+          } else if (r.status === 404 && r.json && r.json.code === 'unknown-proposal') {
+            const seen = await settleUnseen(p);
+            if (seen.made === false) { settled.push(p.digest); report.push(Object.assign({}, p, { outcome: 'not-made' })); } else report.push(Object.assign({}, p, { outcome: 'unknown', reason: seen.reason }));
+          } else {
+            report.push(Object.assign({}, p, { outcome: 'unknown', reason: 'the domain did not answer' }));
+          }
         }
       }
       await mutateCache((latest) => {

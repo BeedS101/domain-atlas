@@ -377,7 +377,7 @@ Nothing about the coins is stored in the wallet beyond the list and a cache of t
   wallet verifies the signature against the key pinned from the domain's manifest and ignores any answer that fails,
   is malformed or is larger than a fixed size.
 - For a public coin the request carries only the key. For a private coin the request is signed by the key over a fresh
-  challenge from the domain, and a domain returns private-coin results only to such a request. A domain answers a
+  challenge from the domain (docs/chain-labs-challenges.md), and a domain returns private-coin results only to such a request. A domain answers a
   request that is not signed with its public coins only.
 - The wallet asks the listed domains in parallel with a short timeout each and caches the answers. A domain that is down
   shows its last answer with its age. One failing domain never blanks the tab.
@@ -440,7 +440,8 @@ Each stage ships separately, with tests, on its own branch.
    Built as `lib/spend.php` and the endpoint `spend34.php`. Proposals are stored pending, one per sender, and
    identified by the digest of the signed payload; a single authority coin executes them at once and answers with the
    receipt (the signed log entry); recovery finishes what a crash left. `holdings` answers public coins to anyone and
-   private coins to a request the key signed over a single-use challenge, which names the domain and the key. The
+   private coins to a request the key signed over a single-use challenge, which names the domain and the key. A challenge carries
+   its own time and a MAC, so issuing one stores nothing and a flood of requests for them cannot block a wallet. The
    operator opens a registered coin as a ledger and makes treasury grants through the same endpoint.
 5. Spend in multi mode: approval and execution between two and three local PHP nodes in the test suite, with all-of and
    2-of-3 thresholds, including concurrent double spends, a domain down, and crash injection.

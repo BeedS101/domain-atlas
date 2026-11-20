@@ -52,21 +52,51 @@ its authority and genesis digest, the sender, the recipient, the amount, the sen
 about 200 seconds (`issuedAt` five seconds back, `expiresAt` 200 seconds on). It is signed with the owner's key by the wallet before the request.
 
 When the request gets no answer (a timeout after 8 seconds, a dropped connection, a refused one) the wallet sees only status 0 and cannot tell
-whether the domain received it. So an unanswered `propose` may have transmitted a complete owner-signed authorization. What follows from that:
+whether the domain received it. An unanswered `propose` may have transmitted a complete owner-signed authorization, and the domain may have
+committed the transfer. What follows from that:
 
-- The domain, or anyone who obtains the request from it (its logs, say), can have the transfer made once, and only
-  that transfer: the authorization names the recipient, the amount, the coin, the authority and the genesis, and its nonce and `baseSeq` are
-  used once. It cannot be turned into another transfer or used on another coin or domain, and it stops being valid when its window ends. A
-  multi authority entry that was approved in time may still be written later, at its own time; it is still that one transfer.
-- The wallet keeps no record of such a request. `send` throws `network` ("The domain did not answer.") and no pending transfer is written, so
-  `checkPending` does not look for it, although its digest (the hash of the signed payload) is known to the wallet at that point.
-- If the domain did make the transfer, the balance shown after the next lookup is lower and the recipient holds it. A second `send` signs a new
-  authorization against the refreshed `baseSeq` and the domain accepts it as a different transfer, so a person who repeats the transfer without
-  looking at the balance first sends it twice. Nothing is taken beyond what the person signed in each authorization.
-- If the domain did not receive it, nothing happened, and the authorization lapses unused.
+- The domain, or anyone who obtains the request from it (its logs, say), can have the transfer made once, and only that transfer: the authorization
+  names the recipient, the amount, the coin, the authority and the genesis, and its nonce and `baseSeq` are used once. It cannot be turned into
+  another transfer or used on another coin or domain, and it stops being valid when its window ends. A multi authority entry that was approved in
+  time may still be written later, at its own time; it is still that one transfer.
+- If the domain did make the transfer, the balance after the next lookup is lower and the recipient holds it. If it did not receive the request,
+  nothing happened and the authorization lapses unused.
 
-The wallet never resubmits an unanswered request by itself; it asks again only by the person's choice. Keeping the digest as a waiting transfer
-for status 0, so that `checkPending` settles it, is a separate change that has not been made.
+What the wallet does:
+
+- **It keeps the signed transfer before sending it.** The signed authorization and its digest (the hash of the signed payload) are written to
+  the pending transfers, in the `unknown` state, before the request leaves the wallet, so a crash, a restart or a lost answer cannot lose them.
+  Pending transfers belong to the wallet's identity and are stored with its other data, so they are still there after a restart.
+- **A request with no answer stays `unknown`.** `send` returns `{ status: 'unknown', digest, note }` and the transfer stays on the pending list.
+  The wallet does not count it as made or as failed. A 201 with a verified receipt removes it; a 201 whose receipt does not verify makes it
+  `unconfirmed` (section 1.1); a 202 makes it `waiting`; only an answer that refuses the transfer (a 4xx `ok: false`) removes it as not made.
+  A timeout, a dropped connection, a 5xx or an answer that is not the domain's JSON refusal never does.
+- **It never signs another authorization as a retry.** An unknown transfer is not sent again, by the wallet or by `checkPending`. The one case
+  where a second authorization is signed is when the domain itself refused the first as `stale` (so it was not made), and then the new one
+  is signed on the account as it stands, once. A person who sends again after an unknown outcome signs a new, different transfer, which the
+  domain accepts as such; the pending list and the Ledger tab say beforehand that the earlier one is still unresolved.
+- **It settles the transfer from what the domain and the ledger show.** `checkPending` asks `action=proposal` for the stored digest, the
+  domain's existing way to ask about a transfer. An `executed` proposal is settled by its receipt through the same checks as any receipt
+  (section 1), including another roster domain's receipt for a public coin. A `pending` proposal turns the transfer into an ordinary waiting
+  one. An `expired` or `rejected` proposal removes it, since the domain has recorded that it was not made.
+- **A transfer the domain says it never saw is settled only with evidence.** When the proposal is unknown (404 `unknown-proposal`) the wallet does
+  not guess. Once the authorization has lapsed (`expiresAt` plus 600 seconds, so a domain whose clock differs still refused it) and the
+  domain's signed holdings, checked with the wallet's own signature as every lookup is, show the sender's account at the `baseSeq` the transfer was
+  signed on, the transfer was not made and is removed. Earlier than that, or when the account has moved on, the transfer stays `unknown`: the
+  wallet cannot tell from the holdings alone whether the transfer or a later one moved the account.
+- **No answer to the check stays unknown.** A domain that does not answer, or answers with anything else, leaves the transfer where it was.
+- **The list is bounded without losing any of them.** `unknown` and `unconfirmed` transfers are never pushed off the pending list by newer
+  ones, and the wallet refuses a new `send` with `too-many-unresolved` once 50 of them are unresolved.
+
+The Ledger tab shows an unknown transfer as "Outcome unknown at <domain>: sending <amount>", says the transfer may or may not have been made, that the
+wallet keeps it and will not send it again, and offers Check now. The send notice and the Check now notice use the same words, and never call
+the transfer failed or sent.
+
+The limits: a transfer the domain made but now answers `unknown-proposal` for, on an account that has since moved on, stays `unknown` until the
+domain's proposal or a receipt answers; the wallet does not settle it from the account's sequence alone. It also does not search the domain's ledger
+history for the transfer by its public fields, because a private coin's entries name accounts by references the wallet cannot compute and a public
+coin's fields alone can match a different transfer. A domain that denies a transfer it made is caught only when the signed holdings later show the
+account moved.
 
 ## 2. The genesis, and pinning
 
@@ -112,8 +142,8 @@ decide whether to offer Buy, and the domain refuses anything it cannot do.
 ## 5. Compatibility
 
 No endpoint or receipt format changed. The wallet's functions keep their names and results; the new outcomes are the error codes `genesis-changed` and
-`wrong-genesis`. A pending transfer gained the states `unconfirmed` (and `index`, `reason`, `since`) and keeps its `authorization`; older pending items
-without them keep working. `checkPending` outcomes are `done`, `waiting`, `unconfirmed`, `expired` and `rejected`. Servers need no update.
+`wrong-genesis`. A pending transfer gained the states `unconfirmed` and `unknown` (and `index`, `reason`, `since`) and keeps its `authorization`; older pending items
+without them keep working. `send` can also return `{ status: 'unknown' }`. `checkPending` outcomes are `done`, `waiting`, `unconfirmed`, `unknown`, `not-made`, `expired` and `rejected`. Servers need no update.
 
 ## 6. Checks
 
@@ -121,4 +151,6 @@ without them keep working. `checkPending` outcomes are `done`, `waiting`, `uncon
 node test/chain-labs-wallet-verify.js   # made-up receipts, missing or forged approvals, a changed genesis, edited purchase terms, first contact,
                                         # unconfirmed transfers and purchases, reconciliation, network failures
 node test/chain-labs-wallet.js          # the wallet as before, with verified receipts
+node test/chain-labs-wallet-unanswered.js  # a request that gets no answer: before and after sending, after the domain committed it,
+                                        # after a restart, never signing a second authorization, settling by proposal, receipt or lapse
 ```

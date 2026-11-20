@@ -70,7 +70,7 @@ operator grant signed with it. The coin creation form does not offer a faucet po
 
 `lib/spend.php` adds owner proposals kept until they execute (one waiting per sender, expiring, the same proposal answered
 the same way), execution by the authority of a single authority coin with a signed receipt, recovery that finishes the
-proposals a crash left waiting, and the signed holdings statement with its single-use challenges. `spend34.php` serves
+proposals a crash left waiting, and the signed holdings statement with its single-use, self-authenticating challenges (`docs/chain-labs-challenges.md`). `spend34.php` serves
 them over HTTPS; its tests run the real endpoint with keys and signatures made the way a wallet makes them.
 
 `lib/peer.php` is the multi authority side: signed requests between the domains of a coin, opening a coin together, keeping
