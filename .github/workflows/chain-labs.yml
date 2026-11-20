@@ -29,6 +29,10 @@ on:
       - 'test/chain-labs-operator-cli.js'
       - 'test/chain-labs-operator-sunset.js'
       - 'test/chain-labs-operator-separation.js'
+      - 'test/chain-labs-sigformat.php'
+      - 'test/chain-labs-sigformat-activation.php'
+      - 'test/chain-labs-sigformat-http.js'
+      - 'test/chain-labs-wallet-verify.js'
       - 'tools/chainlabs-operator.js'
       - 'tools/lib/chainlabs-operator.js'
       - 'extension/chain-labs-wallet.js'
@@ -60,6 +64,10 @@ on:
       - 'test/chain-labs-operator-cli.js'
       - 'test/chain-labs-operator-sunset.js'
       - 'test/chain-labs-operator-separation.js'
+      - 'test/chain-labs-sigformat.php'
+      - 'test/chain-labs-sigformat-activation.php'
+      - 'test/chain-labs-sigformat-http.js'
+      - 'test/chain-labs-wallet-verify.js'
       - 'tools/chainlabs-operator.js'
       - 'tools/lib/chainlabs-operator.js'
       - 'extension/chain-labs-wallet.js'
@@ -119,3 +127,7 @@ jobs:
           node test/chain-labs-operator-cli.js
           node test/chain-labs-operator-sunset.js
           node test/chain-labs-operator-separation.js
+          php test/chain-labs-sigformat.php
+          php test/chain-labs-sigformat-activation.php
+          node test/chain-labs-sigformat-http.js
+          node test/chain-labs-wallet-verify.js
