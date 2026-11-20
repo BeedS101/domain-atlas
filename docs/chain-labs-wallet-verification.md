@@ -42,6 +42,10 @@ accounts by reference and another domain's receipt cannot show which transfer it
 unconfirmed transfers that look alike in their public fields are not both settled by one entry, so a second claim on the same entry stays unconfirmed.
 An unconfirmed transfer is never pushed off the pending list by newer ones. The pending list shows it as unresolved, with the reason.
 
+A purchase request is treated the same way: only a 4xx other than 408, 425 and 429 that is the domain's own refusal (`ok: false` with a `code`) ends it. A rate limit,
+a timeout, a firewall page or an answer that is not in the domain's form keeps the pending purchase, with its Gold request, and asking again repeats the same
+request id, which the domain answers with the entry it already made.
+
 A purchase whose receipt fails stays in the pending purchases as `unconfirmed` or waiting. Asking again repeats the same request id, which the
 domain answers with the entry it already made, so the Gold is not delivered twice.
 
@@ -71,6 +75,13 @@ What the wallet does:
   The wallet does not count it as made or as failed. A 201 with a verified receipt removes it; a 201 whose receipt does not verify makes it
   `unconfirmed` (section 1.1); a 202 makes it `waiting`; only an answer that refuses the transfer (a 4xx `ok: false`) removes it as not made.
   A timeout, a dropped connection, a 5xx or an answer that is not the domain's JSON refusal never does.
+- **Only the domain's own refusal says it was not made.** An answer removes the transfer only when it is a 4xx other than 408, 425 and
+  429, carries `ok: false` and names one of the codes a domain uses for a transfer it refused before storing it or closed
+  (`stale`, `insufficient`, `expired`, `pending-exists`, `bad-signature`, `bad-authorization`, `no-account`, `replayed`,
+  `legacy-authorization`, `wrong-authority`, `wrong-genesis`, `unknown-base`, `unknown-coin`, `not-authority`). A rate limit, a timeout from a proxy
+  in front of the domain, a firewall page, a `busy` or `wrong-index` answer (after which the domain keeps the proposal and may make it), or a code
+  the wallet does not know, may reach the wallet for a transfer that was made, so the transfer stays `unknown` and is settled by the proposal and its
+  receipt as above.
 - **It never signs another authorization as a retry.** An unknown transfer is not sent again, by the wallet or by `checkPending`. The one case
   where a second authorization is signed is when the domain itself refused the first as `stale` (so it was not made), and then the new one
   is signed on the account as it stands, once. A person who sends again after an unknown outcome signs a new, different transfer, which the

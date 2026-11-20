@@ -297,6 +297,22 @@ const both = (...hooks) => async (url, init, forward) => { for (const h of hooks
     const resumed2 = await calm.resumeBuy(pb2.requestId);
     line(resumed2.status === 'done' && (await calm.rows()).pendingBuys.length === 0, 'and finishes when the domain answers', resumed2.status);
 
+    // A purchase the domain made whose answer is replaced by a rate limit or another 4xx that is not its own refusal is kept, and asking again
+    // repeats the same request.
+    for (const [name, status, json] of [['a rate limit', 429, { ok: false, error: 'Too Many Requests' }], ['a request timeout', 408, { ok: false }], ['a firewall page', 403, { ok: false }], ['an answer that is not JSON', 400, null]]) {
+      const lostSale = through(alice, ust, async (url, init, forward) => { if (!url.includes('action=purchase')) return null; await forward(); return { status, json: json === null ? {} : json }; });
+      const pb3 = await lostSale.prepareBuy(A, sgl.id, credential(100, alice), 100, '20');
+      const e3 = await lostSale.buy(pb3).catch((e) => e);
+      const k3 = (await calm.rows()).pendingBuys;
+      line(e3.code === 'network' && k3.length === 1 && k3[0].requestId === pb3.requestId, name + ' after the domain made the sale keeps the purchase', e3.code || e3);
+      const again = await calm.resumeBuy(pb3.requestId);
+      line(again.status === 'done' && (await calm.rows()).pendingBuys.length === 0, '    and asking again is answered with the entry already made, delivered once', again.status);
+    }
+    const refusedSale = through(alice, ust, async (url) => (url.includes('action=purchase') ? { status: 409, json: { ok: false, code: 'purchase-day-limit', error: 'sold out today' } } : null));
+    const pbR = await refusedSale.prepareBuy(A, sgl.id, credential(100, alice), 100, '20');
+    const eR = await refusedSale.buy(pbR).catch((e) => e);
+    line(eR.code === 'purchase-day-limit' && (await calm.rows()).pendingBuys.length === 0, 'a refusal in the domain\'s own form still ends the purchase', eR.code);
+
     // The list of waiting transfers is capped, but never at the cost of an unconfirmed one.
     const capped = Object.assign(freshState(), { domains: JSON.parse(JSON.stringify(st.domains)) });
     const stale = (i, state) => Object.assign({ domain: A, coinId: sgl.id, digest: String(i).padStart(64, '0'), to: bob.key, amount: '100', from: alice.key, symbol: 'SGL', decimals: 2, createdAt: 1000 + i }, state ? { state, reason: 'x', since: 1 } : {});

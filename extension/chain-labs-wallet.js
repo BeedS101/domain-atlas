@@ -736,7 +736,15 @@
     // A transfer is kept, signed and named by its digest, before it leaves the wallet, as `unknown`: the request may be lost on the way
     // or its answer may never arrive, and the domain may have made the transfer either way. It is settled only by the domain's own answer
     // about that digest, or, once the authorization has lapsed, by the signed holdings showing the sender's account where it was.
-    const UNKNOWN_NOTE = 'The domain did not answer, so the transfer may or may not have been made. The wallet keeps it and will not send it again.';
+    // The codes with which a domain refuses a transfer it did not make: it was refused before anything was stored, or the stored proposal was
+  // closed. Others a domain can answer with (busy, wrong-index, a code this wallet does not know) leave a proposal stored that may still be made.
+  const REFUSAL_CODES = new Set(['stale', 'insufficient', 'expired', 'pending-exists', 'bad-signature', 'bad-authorization', 'no-account', 'replayed',
+    'legacy-authorization', 'wrong-authority', 'wrong-genesis', 'unknown-base', 'unknown-coin', 'not-authority']);
+  const AMBIGUOUS_STATUS = new Set([408, 425, 429]);
+  function isRefusal(status, j) {
+    return status >= 400 && status < 500 && !AMBIGUOUS_STATUS.has(status) && isObject(j) && j.ok === false && typeof j.code === 'string' && REFUSAL_CODES.has(j.code);
+  }
+  const UNKNOWN_NOTE = 'The domain did not answer, so the transfer may or may not have been made. The wallet keeps it and will not send it again.';
     const UNSEEN_SETTLE_MS = 600000;
     const MAX_UNRESOLVED = 50;
     const isUnresolved = (p) => p.state === 'unconfirmed' || p.state === 'unknown';
@@ -840,8 +848,9 @@
           await keepPendingSend(pendingSendOf(record, prepared, authorization, digest, { state: 'waiting', note: j.note || '' }), prepared.from);
           return { status: 'waiting', digest, note: j.note || '' };
         }
-        // Only an answer that refuses the transfer says it was not made. No answer, or one that is not the domain's refusal, leaves it unknown.
-        if (!(r.status >= 400 && r.status < 500 && j.ok === false)) {
+        // Only the domain's refusal of the transfer says it was not made. Any other answer, including a 4xx that a proxy, a rate limit or a
+        // transient conflict can produce while the proposal stays stored, leaves it unknown.
+        if (!isRefusal(r.status, j)) {
           await keepPendingSend(pendingSendOf(record, prepared, authorization, digest, { state: 'unknown', note: UNKNOWN_NOTE }), prepared.from);
           return { status: 'unknown', digest, note: UNKNOWN_NOTE };
         }
@@ -1058,9 +1067,13 @@
         await mutateCache((cache) => { const held = cache.pendingBuys.find((x) => x.requestId === prepared.requestId); if (held) held.note = note; });
         return { status: 'waiting', requestId: prepared.requestId, note };
       }
-      // A refusal ends the request unless the domain may still be holding it.
-      if (r.status !== 0 && r.status < 500) {
+      // Only the domain's own refusal ends the request. A rate limit, a timeout from a proxy in front of the domain, or an answer that is not
+      // a refusal in the domain's form may arrive for a sale the domain went on to make, so the purchase stays and asking again repeats the same request.
+      const refused = r.status >= 400 && r.status < 500 && !AMBIGUOUS_STATUS.has(r.status) && j.ok === false && typeof j.code === 'string';
+      if (refused) {
         await dropBuy(prepared.requestId);
+      } else if (r.status !== 0 && r.status < 500) {
+        throw Object.assign(new Error('The domain did not answer clearly, so the sale may or may not have been made. The wallet keeps the purchase; asking again repeats the same request, which is not delivered twice.'), { code: 'network' });
       }
       throw Object.assign(new Error(r.status === 0 ? PROBLEMS.network : (BUY_PROBLEMS[j.code] || 'The domain did not accept the purchase.') + refusalDetail(j)), { code: r.status === 0 ? 'network' : j.code || 'refused', detail: refusalDetail(j).trim() });
     }

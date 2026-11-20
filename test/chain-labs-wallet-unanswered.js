@@ -217,6 +217,47 @@ const lostRequest = async (url) => { if (url.includes('action=propose')) throw n
     line(rs.status === 'unknown' && (await pending(server500)).length === 1, 'a server error does not say that, and is kept as unknown', rs.status || rs.code);
     st.cache.pendingSends = [];
 
+    console.log('\n== a 4xx answer that is not the domain refusing the transfer');
+    // The domain makes the transfer and the answer that reaches the wallet is replaced: a rate limit or timeout from a proxy in front of the
+    // domain, a busy answer, or a conflict the domain reports while the proposal stays stored and runs later.
+    const ambiguous = [
+      ['429 with no code (a rate limit)', 429, { ok: false, error: 'Too Many Requests' }],
+      ['429 busy', 429, { ok: false, code: 'busy', error: 'busy' }],
+      ['408 request timeout', 408, { ok: false, error: 'timeout' }],
+      ['425 too early', 425, { ok: false }],
+      ['409 wrong-index (the proposal stays stored)', 409, { ok: false, code: 'wrong-index', error: 'x' }],
+      ['400 with a code the wallet does not know', 400, { ok: false, code: 'something-new', error: 'x' }],
+      ['403 from a firewall in front of the domain', 403, { ok: false }]
+    ];
+    for (const [name, status, json] of ambiguous) {
+      signs = 0;
+      const sgBefore = BigInt(await units(sgl.id));
+      const w = walletOver(alice, st, async (url, init, forward) => {
+        if (!url.includes('action=propose')) return null;
+        await forward();
+        return { status, json };
+      });
+      const r = await w.send(await w.prepareSend(A, sgl.id, bob.key, '1')).catch((e) => e);
+      const kept = await pending(w);
+      line(r.status === 'unknown' && kept.length === 1 && kept[0].state === 'unknown' && signs === 1, name + ': the transfer is kept as unknown, not dropped', r.status || r.code);
+      line(BigInt(await units(sgl.id)) === sgBefore + 100n, '    the domain had made it', await units(sgl.id));
+      const out = await w.checkPending();
+      line(out.length === 1 && out[0].outcome === 'done' && (await pending(w)).length === 0 && signs === 1, '    and the domain\'s answer about the digest settles it, with nothing sent again', out);
+    }
+    // The same answers where the domain did not make the transfer: kept as unknown until the domain says so.
+    signs = 0;
+    const notMade = walletOver(alice, st, async (url) => (url.includes('action=propose') ? { status: 429, json: { ok: false, error: 'Too Many Requests' } } : null));
+    const nm = await notMade.send(await notMade.prepareSend(A, sgl.id, bob.key, '1')).catch((e) => e);
+    line(nm.status === 'unknown' && (await pending(notMade)).length === 1 && (await notMade.checkPending())[0].outcome === 'unknown' && signs === 1, 'a rate limit that stopped the request is kept as unknown until the lapse shows nothing was made', nm.status || nm.code);
+    st.cache.pendingSends = [];
+    // A refusal the domain gives for a transfer it did not make still says so.
+    for (const [code, status] of [['insufficient', 409], ['stale', 409], ['expired', 409], ['pending-exists', 409], ['bad-signature', 401], ['wrong-authority', 409]]) {
+      signs = 0;
+      const w = walletOver(alice, st, async (url) => (url.includes('action=propose') ? { status, json: { ok: false, code, error: 'no' } } : null));
+      const r = await w.send(await w.prepareSend(A, sgl.id, bob.key, '1')).catch((e) => e);
+      line((r.code === code || code === 'stale') && (await pending(w)).length === 0, code + ': a refusal that says it was not made removes it', r.code || r.status);
+    }
+
     console.log('\n== unresolved transfers are not dropped');
     const capped = { domains: JSON.parse(JSON.stringify(st.domains)), cache: {} };
     const fake = (i, state) => Object.assign({ domain: A, coinId: sgl.id, digest: String(i).padStart(64, '0'), to: bob.key, amount: '100', from: alice.key, symbol: 'SGL', decimals: 2, createdAt: 1000 + i }, state ? { state } : {});
